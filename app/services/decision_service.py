@@ -1,0 +1,393 @@
+"""/data_decision 핵심 — 자산 ① 검색 파이프라인 호출 + v0.6 RC DecisionResponse 변환.
+
+흐름 (자산 ① 그대로 재사용, K-AIR-meta-api 가 pgvector 로 했던 일을 Neo4j 벡터 인덱스로 수행):
+  1) HyDE (자산 ① hyde.get_hyde_generator) — 질문 → 구조화 힌트.
+  2) Embedding (자산 ① embedding.get_embedding_client) — HyDE 텍스트 + 원본 질문 → 1536-dim 벡터.
+  3) Vector Search (자산 ① vector_search.search_tables_by_vector) — Neo4j text_to_sql_table_vec_index.
+  4) 두 축(HyDE / 원본 질문) 가중 합산 병합.
+  5) 컬럼 매칭(옵션) — 자산 ①의 fetch_anchor_columns 로 후보 컬럼 추출.
+  6) subject_area / target_class 분류 → DecisionResponse 조립.
+
+R-3 db 폴백 체인: Schema.db || DataSource.engine || settings.meta_db_label.
+v0.6 RC 풍부 필드(join_groups 등)는 빈 값 폴백.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+from neo4j import AsyncDriver
+
+from ..config import settings
+from ..schemas import (
+    ColumnConstraint,
+    DecisionCandidate,
+    DecisionResponse,
+    MatchedColumn,
+    META_VERSION,
+    TargetClass,
+)
+from . import subject_area as sa
+from .neo4j_client.embedding import get_embedding_client
+from .neo4j_client.hyde import build_hyde_embedding_text, get_hyde_generator
+from .neo4j_client.models import TableCandidate
+from .neo4j_client.vector_search import (
+    fetch_anchor_columns,
+    fetch_fk_relationships,
+    search_tables_by_vector,
+)
+
+
+def _subject_area_to_target_class(area: str) -> TargetClass:
+    """K-AIR gen-1 과 동일 매핑 — schemas.py 의 enum 호환."""
+    if area == "agg":
+        return "analytic"
+    if area in ("raw", "master", "code"):
+        return "source"
+    if area in ("hist", "link"):
+        return "collect"
+    return "unknown"
+
+
+def _merge_candidates(
+    hyde_tables: List[TableCandidate],
+    question_tables: List[TableCandidate],
+    *,
+    top_k: int,
+) -> List[TableCandidate]:
+    """K-AIR `_merge_topk` 와 동일한 가중 점수 합산 (hyde_weight / question_weight 그대로)."""
+    wh = settings.hyde_weight
+    wq = settings.question_weight
+    bucket: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    def _add(rows: List[TableCandidate], weight: float) -> None:
+        for t in rows:
+            key = (t.schema or "", t.name or "")
+            cur = bucket.get(key)
+            if cur is None:
+                bucket[key] = {"obj": t, "score": float(t.score) * weight}
+            else:
+                cur["score"] += float(t.score) * weight
+
+    if hyde_tables:
+        _add(hyde_tables, wh)
+    _add(question_tables, wq if hyde_tables else 1.0)
+
+    sorted_keys = sorted(bucket.keys(), key=lambda k: bucket[k]["score"], reverse=True)[:top_k]
+    out: List[TableCandidate] = []
+    for k in sorted_keys:
+        t = bucket[k]["obj"]
+        out.append(
+            TableCandidate(
+                schema=t.schema,
+                name=t.name,
+                description=t.description,
+                analyzed_description=t.analyzed_description,
+                score=float(bucket[k]["score"]),
+            )
+        )
+    return out
+
+
+async def _resolve_db_label(driver: AsyncDriver, *, schema_name: str) -> str:
+    """R-3: Schema.db || DataSource.engine || META_DB_LABEL."""
+    if not schema_name:
+        return settings.meta_db_label
+    cypher = """
+    MATCH (s:Schema) WHERE toLower(s.name) = toLower($schema_name)
+    OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s)
+    RETURN COALESCE(s.db, ds.engine, $default_db) AS db LIMIT 1
+    """
+    async with driver.session() as sess:
+        result = await sess.run(cypher, schema_name=schema_name, default_db=settings.meta_db_label)
+        row = await result.single()
+    if row and row["db"]:
+        return str(row["db"])
+    return settings.meta_db_label
+
+
+async def _attach_matched_columns(
+    driver: AsyncDriver,
+    cands: List[TableCandidate],
+    *,
+    keywords: List[str],
+    top_m: int,
+) -> Dict[Tuple[str, str], List[MatchedColumn]]:
+    """자산 ① fetch_anchor_columns 로 후보 컬럼을 받아 MatchedColumn 배열로 변환."""
+    if not cands or top_m <= 0 or not keywords:
+        return {}
+    async with driver.session() as sess:
+        cols = await fetch_anchor_columns(
+            sess,
+            tables=cands,
+            keywords_lower=[k.lower() for k in keywords],
+            per_table_limit=top_m,
+        )
+    out: Dict[Tuple[str, str], List[MatchedColumn]] = {}
+    for c in cols:
+        key = (c.table_schema or "", c.table_name or "")
+        out.setdefault(key, []).append(
+            MatchedColumn(
+                column_name=c.name,
+                score=float(c.score or 0.0),
+                constraints=[],
+                column_name_kr=None,
+                data_type=c.dtype or None,
+                description=c.description or None,
+            )
+        )
+    return out
+
+
+async def _decide_keyword(driver: AsyncDriver, *, query: str) -> List[TableCandidate]:
+    """폴백: 공백 분리 토큰 OR Cypher CONTAINS (자산 ① 의 vector 인덱스 없이도 동작).
+
+    K-AIR gen-1 의 `_decide_keyword` 와 동등 — 백엔드만 Neo4j Cypher 로 교체.
+    """
+    import re
+
+    tokens = [t for t in re.findall(r"[가-힣a-zA-Z0-9_]{2,}", query)
+              if t not in {"알려줘", "보여줘", "검색", "조회", "해줘", "어떻게", "얼마나", "무엇", "뭐야"}]
+    tokens = [t.lower() for t in tokens][:10]
+    if not tokens:
+        return []
+    cypher = """
+    MATCH (t:Table)
+    WHERE COALESCE(t.text_to_sql_db_exists, true) = true
+    WITH t, [kw IN $tokens
+             WHERE toLower(COALESCE(t.name, '')) CONTAINS kw
+                OR toLower(COALESCE(t.description, '')) CONTAINS kw
+                OR toLower(COALESCE(t.analyzed_description, '')) CONTAINS kw] AS hits
+    WHERE size(hits) > 0
+    RETURN t.schema AS schema, t.name AS name, t.description AS description,
+           t.analyzed_description AS analyzed_description,
+           toFloat(size(hits)) / toFloat($n) AS score
+    ORDER BY score DESC, name ASC
+    LIMIT $k
+    """
+    async with driver.session() as sess:
+        result = await sess.run(
+            cypher,
+            tokens=tokens,
+            n=len(tokens),
+            k=settings.decision_topk,
+        )
+        rows = await result.data()
+    return [
+        TableCandidate(
+            schema=str(r.get("schema") or ""),
+            name=str(r.get("name") or ""),
+            description=str(r.get("description") or ""),
+            analyzed_description=str(r.get("analyzed_description") or ""),
+            score=float(r.get("score") or 0.0),
+        )
+        for r in rows
+    ]
+
+
+def _extract_keywords(hyde_out: Any, question: str) -> List[str]:
+    """자산 ① api._extract_keywords_from_hyde 와 동일 정책."""
+    import re
+
+    keywords: list[str] = []
+    seen: set[str] = set()
+
+    def _add(items):
+        for x in items or []:
+            s = str(x or "").strip()
+            if s and s.lower() not in seen and len(s) >= 2:
+                seen.add(s.lower())
+                keywords.append(s)
+
+    if hyde_out:
+        _add(hyde_out.entities.include)
+        _add(hyde_out.search_keywords.tables)
+        _add(hyde_out.search_keywords.columns)
+        _add(hyde_out.join_filter_hints.filter_column_meanings)
+
+    tokens = re.findall(r"[가-힣a-zA-Z0-9_]{2,}", question)
+    stopwords = {"알려줘", "보여줘", "검색", "조회", "해줘", "어떻게", "얼마나", "무엇", "뭐야"}
+    for t in tokens:
+        if t.lower() not in seen and t not in stopwords:
+            seen.add(t.lower())
+            keywords.append(t)
+    return keywords[:20]
+
+
+def _classify_target(cands: List[DecisionCandidate]) -> Tuple[str, float]:
+    """K-AIR `_classify` 와 동일 — agg/raw 임계값 기반 target/confidence."""
+    if not cands:
+        return "none", 0.0
+    areas: Dict[str, int] = {}
+    for c in cands:
+        a = c.subject_area
+        areas[a] = areas.get(a, 0) + 1
+    top = cands[0]
+    agg_n = areas.get("agg", 0)
+    raw_n = areas.get("raw", 0) + areas.get("master", 0) + areas.get("code", 0)
+    if agg_n >= 1 and top.score >= settings.decision_analytic_threshold:
+        return "analytic", top.score
+    if raw_n >= 1 and top.score >= settings.decision_source_threshold:
+        return "source", top.score
+    return "collect", top.score
+
+
+def _collect_secondary(top_target: str, cands: List[DecisionCandidate]) -> List[str]:
+    valid = {"analytic", "source", "collect"}
+    seen: List[str] = []
+    for c in cands:
+        tc = c.target_class
+        if tc not in valid or tc == top_target:
+            continue
+        if tc not in seen:
+            seen.append(tc)
+    return seen
+
+
+async def decide(
+    driver: AsyncDriver,
+    *,
+    query: str,
+    query_embedding: Optional[List[float]] = None,
+    include_matched_columns: bool = True,
+    column_top_m: Optional[int] = None,
+) -> DecisionResponse:
+    """v0.6 RC `/data_decision` 메인."""
+    debug: Dict[str, Any] = {"mode": None}
+    effective_col_m = column_top_m if column_top_m is not None else settings.decision_column_top_m
+    effective_col_m = max(1, min(50, int(effective_col_m)))
+
+    hyde_out = None
+    hyde_status = "skipped"
+    hyde_embedding: Optional[List[float]] = None
+    question_embedding: Optional[List[float]] = query_embedding
+
+    # 1) HyDE — 외부 임베딩이 주어지지 않은 경우만
+    if query_embedding is None and settings.openai_enabled:
+        hyde_gen = get_hyde_generator()
+        hyde_out, hyde_status = await hyde_gen.generate(question=query)
+        debug["hyde_status"] = hyde_status
+        # 2) Embedding
+        embedder = get_embedding_client()
+        texts: List[str] = []
+        if hyde_out is not None:
+            et = build_hyde_embedding_text(hyde_out)
+            if et:
+                texts.append(et)
+        texts.append(query)
+        try:
+            vecs = await embedder.embed_batch(texts)
+        except Exception as exc:
+            debug["embedding_error"] = str(exc)[:200]
+            vecs = []
+        if vecs:
+            if hyde_out is not None and len(vecs) >= 2:
+                hyde_embedding = vecs[0]
+                question_embedding = vecs[-1]
+            else:
+                question_embedding = vecs[-1]
+        debug["mode"] = "internal_hyde+vector"
+    elif query_embedding is not None:
+        debug["mode"] = "precomputed_vector"
+    else:
+        debug["mode"] = "keyword_only"
+        debug["reason"] = "OPENAI_API_KEY not set"
+
+    # 3) Vector Search
+    tables_hyde: List[TableCandidate] = []
+    tables_question: List[TableCandidate] = []
+    mode_hyde = ""
+    mode_question = ""
+    async with driver.session() as sess:
+        if hyde_embedding is not None:
+            tables_hyde, mode_hyde = await search_tables_by_vector(
+                sess, embedding=hyde_embedding, k=settings.decision_topk, schema_filter=None
+            )
+        if question_embedding is not None:
+            tables_question, mode_question = await search_tables_by_vector(
+                sess,
+                embedding=question_embedding,
+                k=settings.decision_topk,
+                schema_filter=None,
+            )
+    debug["hyde_results"] = len(tables_hyde)
+    debug["question_results"] = len(tables_question)
+    debug["hyde_search_mode"] = mode_hyde
+    debug["question_search_mode"] = mode_question
+
+    merged = _merge_candidates(tables_hyde, tables_question, top_k=settings.decision_topk)
+    debug["merged"] = len(merged)
+
+    # 폴백: HyDE/임베딩 실패 또는 vector 검색 0 hit → keyword(Cypher CONTAINS)
+    if not merged:
+        merged = await _decide_keyword(driver, query=query)
+        debug["fallback"] = "keyword_cypher"
+        debug["merged"] = len(merged)
+
+    # 4) candidates 조립 (db 폴백 + subject_area 분류)
+    cands: List[DecisionCandidate] = []
+    for t in merged:
+        schema_name = t.schema or ""
+        area = sa.classify(schema_name, t.name or "")
+        db_label = await _resolve_db_label(driver, schema_name=schema_name)
+        cands.append(
+            DecisionCandidate(
+                db=db_label,
+                schema_name=schema_name,
+                table_name=t.name or "",
+                score=float(t.score),
+                source="vector",
+                target_class=_subject_area_to_target_class(area),
+                subject_area=area,
+                matched_columns=[],
+            )
+        )
+
+    # 5) matched_columns 채움
+    columns_mode = "skipped"
+    if include_matched_columns and settings.decision_match_columns and cands:
+        keywords = _extract_keywords(hyde_out, query)
+        col_map = await _attach_matched_columns(
+            driver,
+            merged,
+            keywords=keywords,
+            top_m=effective_col_m,
+        )
+        for c in cands:
+            key = (c.schema_name, c.table_name)
+            c.matched_columns = col_map.get(key, [])
+        columns_mode = "neo4j_anchor"
+    elif not include_matched_columns:
+        columns_mode = "disabled_request"
+    elif not settings.decision_match_columns:
+        columns_mode = "disabled_env"
+
+    # 6) target / secondary / confidence
+    target, conf = _classify_target(cands)
+    secondary = _collect_secondary(target, cands)
+
+    threshold_used = {
+        "analytic": settings.decision_analytic_threshold,
+        "source": settings.decision_source_threshold,
+        "topk": settings.decision_topk,
+        "column_top_m": effective_col_m,
+        "matched_columns_mode": columns_mode,
+        "hyde_weight": settings.hyde_weight,
+        "question_weight": settings.question_weight,
+        "mode": debug.get("mode"),
+        "hyde_status": debug.get("hyde_status"),
+        "hyde_results": debug.get("hyde_results"),
+        "question_results": debug.get("question_results"),
+        "merged": debug.get("merged"),
+        "fallback": debug.get("fallback"),
+        "join_groups_mode": "empty_fallback",
+        "meta_version": META_VERSION,
+    }
+
+    return DecisionResponse(
+        target=target,
+        secondary_targets=secondary,
+        confidence=conf,
+        candidates=cands,
+        join_groups=[],
+        threshold_used=threshold_used,
+    )

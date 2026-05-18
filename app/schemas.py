@@ -1,0 +1,296 @@
+"""계약 Pydantic 모델 (v0.5 → v0.6 확장).
+
+v0.6 변경 요약:
+- 응답에 `meta_version` 동봉
+- /data_decision: candidate별 `target_class`/`subject_area`/`matched_columns`,
+  최상위 `secondary_targets`/`join_groups` 추가
+- /meta/table: `table_info.datasource`/`lineage_brief`/`ontology_anchors`,
+  `columns[].code_lookup`/`term_mapping`/`value_examples` 추가
+- 신규 enum: `target_class`, `recommended_strategy`, `bridge_via`
+- 빈 값(`null`/`[]`) 보장 — 데이터 미적재 시에도 응답 정합 유지
+- 기존 v0.5 필드는 모두 유지(forward-compatible)
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field
+
+
+META_VERSION = "0.6"
+
+
+# ---------------------------------------------------------------------------
+# 공통 키 (db, schema_name, table_name)
+# ---------------------------------------------------------------------------
+class TableKey(BaseModel):
+    db: Optional[str] = Field(
+        default=None,
+        description="원천 라벨(t2s_tables.db). 미입력 시 schema+이름 동일 행 중 첫 행. "
+        "ERP_SIM·RWIS 등 다중 카탈로그 구분 시 지정.",
+        examples=["RWIS", "ERP_SIM"],
+    )
+    schema_name: str = Field(..., examples=["RWIS"])
+    table_name: str = Field(..., examples=["RDF01HH_TB"])
+
+
+# ---------------------------------------------------------------------------
+# /meta/batch
+# ---------------------------------------------------------------------------
+class BatchRequest(BaseModel):
+    batch_date: Optional[str] = Field(
+        default=None,
+        description="null=전체, 'YYYYMMDD'=해당 날짜 기준 변경·추가분",
+        examples=[None, "20260420"],
+    )
+
+
+class BatchItem(TableKey):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# /meta/table 공통 enum
+# ---------------------------------------------------------------------------
+SubjectArea = Literal["agg", "raw", "code", "hist", "master", "link", "unknown"]
+YN = Literal["Y", "N"]
+ColumnConstraint = Literal["PK", "FK", "UNIQUE"]
+
+
+# ---------------------------------------------------------------------------
+# v0.6 신규 — /meta/table 보강 서브타입
+# ---------------------------------------------------------------------------
+class DataSourceInfo(BaseModel):
+    """원천 DB 식별자·접속 메타. K-AIR-analyzer가 채움.
+    데이터 미적재 시 None."""
+    id: str = Field(..., description="DataSource ID (예: kwater_source_rwis)")
+    dialect: Optional[str] = Field(default=None, description="postgresql/oracle/tibero/sap_hana 등")
+    domain: Optional[str] = Field(default=None, description="계측·전사·분석 등 업무 도메인")
+    owner: Optional[str] = Field(default=None, description="소관 부서·담당")
+
+
+class LineageRef(TableKey):
+    """리니지 그래프의 인접 테이블 식별자."""
+    pass
+
+
+class LineageBrief(BaseModel):
+    """이 테이블의 상류·하류 인접 테이블 간단 요약.
+    K-AIR-analyzer의 SP·DDL 파싱 결과(`analyzer_lineage_*`) 기반.
+    데이터 미적재 시 두 배열 모두 빈 배열."""
+    upstream: List[LineageRef] = Field(default_factory=list)
+    downstream: List[LineageRef] = Field(default_factory=list)
+
+
+class OntologyAnchor(BaseModel):
+    """이 테이블이 5계층 온톨로지의 어느 노드와 어떻게 연결되는지.
+    K-AIR 에이전트의 온톨로지 부여 결과(`ontology_graph` 엣지) 기반."""
+    layer: Literal["KPI", "Measure", "Process", "Resource", "Driver"]
+    name: str = Field(..., description="온톨로지 노드 이름 (예: '탁도')")
+    relation: str = Field(..., description="엣지 타입 (예: SUPPORTS, MEASURES, PRODUCES)")
+
+
+class CodeLookup(BaseModel):
+    """FK가 명시되지 않은 코드성 컬럼이 어떤 마스터 테이블을 참조하는지 힌트.
+    via=fk(직접 FK 메타) / convention(명명 규약) / term(표준용어 매핑)."""
+    ref_schema_name: Optional[str] = None
+    ref_table_name: Optional[str] = None
+    ref_column_name: Optional[str] = None
+    via: Optional[Literal["fk", "convention", "term"]] = None
+
+
+class TermMapping(BaseModel):
+    """Argus Catalog 합류 후 채워지는 표준용어 매핑.
+    데이터 미적재 시 None."""
+    standard_term: Optional[str] = None
+    physical_name: Optional[str] = None
+    synonyms: List[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# /meta/table 모델
+# ---------------------------------------------------------------------------
+class TableInfo(BaseModel):
+    db: str
+    schema_name: str
+    table_name: str
+    table_name_kr: Optional[str] = None
+    table_comment: Optional[str] = None
+    subject_area: SubjectArea = "unknown"
+    table_is_active: YN = "Y"
+    pk_columns: List[str] = Field(default_factory=list)
+
+    # v0.6 신규 (빈 값 default)
+    datasource: Optional[DataSourceInfo] = None
+    lineage_brief: LineageBrief = Field(default_factory=LineageBrief)
+    ontology_anchors: List[OntologyAnchor] = Field(default_factory=list)
+
+
+class ColumnMeta(BaseModel):
+    column_name: str
+    column_name_kr: Optional[str] = None
+    data_type: Optional[str] = None
+    column_comment: Optional[str] = None
+    constraints: List[ColumnConstraint] = Field(default_factory=list)
+    is_null: bool = True
+    column_is_active: YN = "Y"
+
+    # v0.6 신규 (빈 값 default)
+    code_lookup: Optional[CodeLookup] = None
+    term_mapping: Optional[TermMapping] = None
+    value_examples: List[str] = Field(default_factory=list)
+
+
+class RefMeta(BaseModel):
+    column_name: str
+    position: int = 1
+    ref_schema_name: str
+    ref_table_name: str
+    ref_column_name: str
+
+
+class MetaTableResponse(BaseModel):
+    meta_version: str = META_VERSION
+    table_info: TableInfo
+    columns: List[ColumnMeta]
+    fk: List[RefMeta]
+
+
+# ---------------------------------------------------------------------------
+# /data_decision
+# ---------------------------------------------------------------------------
+class DecisionRequest(BaseModel):
+    query: str = Field(..., min_length=1, examples=["최근 일주일간 시간별 탁도 평균"])
+    query_embedding: Optional[List[float]] = None
+    include_matched_columns: bool = Field(
+        default=True,
+        description="False면 candidates[].matched_columns 를 채우지 않음",
+    )
+    column_top_m: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description="테이블별 컬럼 벡터 매칭 상한. 미지정 시 서버 DECISION_COLUMN_TOP_M",
+    )
+
+
+# v0.6 신규 enum
+TargetClass = Literal["analytic", "source", "collect", "mixed", "unknown"]
+TargetTop = Literal["analytic", "source", "collect", "none"]
+RecommendedStrategy = Literal[
+    "simple_join",
+    "derived_join",
+    "cte_then_join",
+    "exists_filter",
+    "split_execute",
+]
+BridgeVia = Literal["fk", "ontology", "embedding", "term", "convention"]
+
+
+class MatchedColumn(BaseModel):
+    """자연어 질의-컬럼 매칭 결과. 컬럼 RAG(`embedding_columns`) 활성화 후 채워짐.
+    미적재 시 빈 배열.
+
+    슬롯 매핑 정책 (테이블 측 column_name_kr/column_comment 와 동일):
+      - column_name_kr : 짧은 원본 한글명 (t2s_columns.description).
+      - description    : 풍부한 LLM 증강 한국어 설명 우선 + 원본 폴백
+                         (t2s_columns.analyzed_description or .description).
+                         v0.6.x forward-compatible 신규 필드 — 미적재 시 None.
+    """
+    column_name: str
+    score: float = 0.0
+    constraints: List[ColumnConstraint] = Field(default_factory=list)
+    column_name_kr: Optional[str] = None
+    data_type: Optional[str] = None
+    description: Optional[str] = None
+
+
+class DecisionCandidate(TableKey):
+    score: float
+    source: Literal["vector", "schema_rule", "name_rule"] = "vector"
+
+    # v0.6 신규 (빈 값 default)
+    target_class: TargetClass = "unknown"
+    subject_area: SubjectArea = "unknown"
+    matched_columns: List[MatchedColumn] = Field(default_factory=list)
+
+
+class JoinBridge(BaseModel):
+    """JOIN 매개 단일 신호. fk/ontology/embedding/term 중 하나."""
+    from_: str = Field(..., alias="from")
+    to: str
+    via: BridgeVia
+    path: List[str] = Field(default_factory=list, description="ontology 매개 시 경유 노드 라벨")
+    confidence: float = 0.0
+
+    model_config = {"populate_by_name": True}
+
+
+class JoinGroup(BaseModel):
+    """JOIN 매개 후보 묶음. 4순위 알고리즘이 채움.
+    데이터·알고리즘 미구현 시 빈 배열."""
+    members: List[TableKey]
+    bridge_tables: List[TableKey] = Field(default_factory=list)
+    cross_db: bool = False
+    recommended_strategy: Optional[RecommendedStrategy] = None
+    bridges: List[JoinBridge] = Field(default_factory=list)
+    group_score: float = 0.0
+    score_breakdown: Dict[str, Any] = Field(default_factory=dict)
+    rationale: Optional[str] = None
+
+
+class DecisionResponse(BaseModel):
+    meta_version: str = META_VERSION
+    target: TargetTop
+    secondary_targets: List[Literal["analytic", "source", "collect"]] = Field(default_factory=list)
+    confidence: float
+    candidates: List[DecisionCandidate]
+    join_groups: List[JoinGroup] = Field(default_factory=list)
+    threshold_used: dict
+
+
+# ---------------------------------------------------------------------------
+# /query (스텁)
+# ---------------------------------------------------------------------------
+class QueryRequest(BaseModel):
+    query: str
+
+
+class QueryResponse(BaseModel):
+    meta_version: str = META_VERSION
+    status: Literal["not_implemented"] = "not_implemented"
+    message: str = (
+        "v0.5 문서에 /query 요청/응답 스펙이 정의되어 있지 않습니다 (R9). "
+        "v0.6 스펙 확정 후 /data_decision + /meta/table을 오케스트레이션하여 구현 예정."
+    )
+    decision_hint: Optional[DecisionResponse] = None
+
+
+# ---------------------------------------------------------------------------
+# /query/execute — v0.6에서 deprecated 표기 (계획서 §3 별도 트랙)
+# ---------------------------------------------------------------------------
+class QueryExecuteRequest(BaseModel):
+    sql: str = Field(..., description="SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용")
+    timeout_s: Optional[int] = Field(
+        default=None, ge=1, le=60,
+        description="서버 statement_timeout (기본 10s, 최대 30s)",
+    )
+    max_rows: Optional[int] = Field(
+        default=None, ge=1, le=100000,
+        description="반환 최대 행수 (기본 1000, 최대 10000)",
+    )
+
+
+class QueryExecuteResponse(BaseModel):
+    meta_version: str = META_VERSION
+    audit_id: str
+    status: Literal["ok", "timeout", "db_error", "error", "rejected"]
+    error: Optional[str] = None
+    sql_executed: str
+    columns: List[str] = Field(default_factory=list)
+    rows: List[List[Any]] = Field(default_factory=list)
+    row_count: int = 0
+    truncated: bool = False
+    elapsed_ms: float = 0.0
+    timeout_s_applied: int = 0
+    max_rows_applied: int = 0

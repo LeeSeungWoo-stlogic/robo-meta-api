@@ -1,0 +1,101 @@
+"""/meta/* 4 endpoint 라우터 — v0.6 RC body 정합."""
+from __future__ import annotations
+
+from typing import List
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from ..db import get_neo4j
+from ..schemas import (
+    BatchItem,
+    BatchRequest,
+    ColumnMeta,
+    MetaTableResponse,
+    META_VERSION,
+    RefMeta,
+    TableKey,
+)
+from ..services import meta_service
+
+router = APIRouter(tags=["meta"])
+
+
+# ---------------------------------------------------------------------------
+# /meta/batch
+# ---------------------------------------------------------------------------
+class BatchResponse(BaseModel):
+    meta_version: str = META_VERSION
+    items: List[BatchItem]
+    total: int = 0
+
+
+@router.post("/meta/batch", response_model=BatchResponse)
+async def meta_batch(req: BatchRequest) -> BatchResponse:
+    driver = get_neo4j()
+    items = await meta_service.list_batch(driver, batch_date=req.batch_date)
+    return BatchResponse(items=items, total=len(items))
+
+
+# ---------------------------------------------------------------------------
+# /meta/table
+# ---------------------------------------------------------------------------
+@router.post("/meta/table", response_model=MetaTableResponse)
+async def meta_table(req: TableKey) -> MetaTableResponse:
+    driver = get_neo4j()
+    resp = await meta_service.get_table(
+        driver,
+        db=req.db,
+        schema_name=req.schema_name,
+        table_name=req.table_name,
+    )
+    if resp is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# /meta/column
+# ---------------------------------------------------------------------------
+class ColumnRequest(TableKey):
+    column_name: str = Field(..., examples=["TAGSN"])
+
+
+class MetaColumnResponse(BaseModel):
+    meta_version: str = META_VERSION
+    column: ColumnMeta
+
+
+@router.post("/meta/column", response_model=MetaColumnResponse)
+async def meta_column(req: ColumnRequest) -> MetaColumnResponse:
+    driver = get_neo4j()
+    col = await meta_service.get_column(
+        driver,
+        db=req.db,
+        schema_name=req.schema_name,
+        table_name=req.table_name,
+        column_name=req.column_name,
+    )
+    if col is None:
+        raise HTTPException(status_code=404, detail="column not found")
+    return MetaColumnResponse(column=col)
+
+
+# ---------------------------------------------------------------------------
+# /meta/ref
+# ---------------------------------------------------------------------------
+class MetaRefResponse(BaseModel):
+    meta_version: str = META_VERSION
+    fk: List[RefMeta]
+
+
+@router.post("/meta/ref", response_model=MetaRefResponse)
+async def meta_ref(req: TableKey) -> MetaRefResponse:
+    driver = get_neo4j()
+    fks = await meta_service.get_refs(
+        driver,
+        db=req.db,
+        schema_name=req.schema_name,
+        table_name=req.table_name,
+    )
+    return MetaRefResponse(fk=fks)
