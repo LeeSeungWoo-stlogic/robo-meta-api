@@ -80,13 +80,27 @@ app.include_router(query_exec.router)
 
 
 def main() -> None:
-    uvicorn.run(
-        "app.main:app",
-        host=settings.api_host,
-        port=settings.api_port,
-        reload=False,
-        loop="asyncio",  # Windows Proactor 회피
-    )
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        loop = asyncio.SelectorEventLoop()
+        asyncio.set_event_loop(loop)
+        
+        config = uvicorn.Config(
+            "app.main:app",
+            host=settings.api_host,
+            port=settings.api_port,
+            reload=False,
+            loop="asyncio"
+        )
+        server = uvicorn.Server(config)
+        loop.run_until_complete(server.serve())
+    else:
+        uvicorn.run(
+            "app.main:app",
+            host=settings.api_host,
+            port=settings.api_port,
+            reload=False,
+        )
 
 
 if __name__ == "__main__":

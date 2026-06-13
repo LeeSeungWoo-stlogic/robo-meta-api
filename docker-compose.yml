@@ -13,23 +13,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: robo-meta-api:dev
-    container_name: robo-meta-api
+    image: robo-meta-api-v2:dev
+    container_name: robo-meta-api-v2
     restart: unless-stopped
     ports:
-      - "8097:8097"
+      - "8098:8098"
     env_file:
       - .env
     environment:
-      # host.docker.internal 폴백 — 호스트의 robo-neo4j / robo-postgres 와 연결
-      NEO4J_URI: "${NEO4J_URI:-bolt://host.docker.internal:7687}"
-      SOURCE_PG_HOST: "${SOURCE_PG_HOST:-host.docker.internal}"
+      # host.docker.internal mapping for Neo4j (7688) and PostgreSQL
+      NEO4J_URI: "bolt://host.docker.internal:7688"
+      SOURCE_PG_HOST: "host.docker.internal"
+      API_PORT: "8098"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./logs:/app/logs
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8097/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8098/health"]
       interval: 30s
       timeout: 5s
       retries: 3

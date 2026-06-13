@@ -25,10 +25,10 @@ OUT_DIR = Path(__file__).parent.parent / "logs" / "smoke_v06"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 사전 검증에서 PG/Neo4j 모두 확인된 RWIS smoke 테이블
-SMOKE_DB = os.getenv("SMOKE_DB", "oracle")  # Schema(name=RWIS, db=oracle) 적재값
-SMOKE_SCHEMA = os.getenv("SMOKE_SCHEMA", "RWIS")
-SMOKE_TABLE = os.getenv("SMOKE_TABLE", "RDITAG_TB")
-SMOKE_COLUMN = os.getenv("SMOKE_COLUMN", "TAGSN")
+SMOKE_DB = os.getenv("SMOKE_DB", "hwaseong")  # Schema(name=rwis, db=hwaseong) 적재값
+SMOKE_SCHEMA = os.getenv("SMOKE_SCHEMA", "rwis")
+SMOKE_TABLE = os.getenv("SMOKE_TABLE", "rditag_tb")
+SMOKE_COLUMN = os.getenv("SMOKE_COLUMN", "tagsn")
 
 
 def _post(path: str, body: Dict[str, Any]) -> requests.Response:

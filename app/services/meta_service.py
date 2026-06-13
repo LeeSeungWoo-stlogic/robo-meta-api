@@ -53,7 +53,7 @@ async def list_batch(driver: AsyncDriver, *, batch_date: Optional[str]) -> List[
     추후 `Table.updated_at` 적재 후 필터 추가 가능.
     """
     cypher = """
-    MATCH (t:Table)-[:BELONGS_TO]->(s:Schema)
+    MATCH (t:Table)-[:belongsTo|HAS_TABLE]-(s:Schema)
     OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s)
     WHERE COALESCE(t.text_to_sql_db_exists, true) = true
     RETURN COALESCE(s.db, ds.engine, $default_db) AS db,
@@ -89,7 +89,7 @@ async def get_table(
     db 가 주어지면 Schema.db 와 일치하는 행을 우선 선택, 없으면 schema+name 만으로 매칭.
     """
     cypher = """
-    MATCH (t:Table)-[:BELONGS_TO]->(s:Schema)
+    MATCH (t:Table)-[:belongsTo|HAS_TABLE]-(s:Schema)
     WHERE toLower(s.name) = toLower($schema_name)
       AND toLower(t.name) = toLower($table_name)
       AND COALESCE(t.text_to_sql_db_exists, true) = true
@@ -99,8 +99,8 @@ async def get_table(
     WHERE $db_filter IS NULL OR toLower(db_label) = toLower($db_filter)
     OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c:Column)
     WITH t, s, ds, db_label, collect(DISTINCT c) AS cols
-    OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c1:Column)-[fk:FK_TO]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
-    OPTIONAL MATCH (t2)-[:BELONGS_TO]->(s2:Schema)
+    OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c1:Column)-[fk:fkTo]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
+    OPTIONAL MATCH (t2)-[:belongsTo|HAS_TABLE]-(s2:Schema)
     WITH t, s, ds, db_label, cols,
          collect(DISTINCT CASE WHEN c1 IS NULL THEN NULL ELSE {
              from_column: c1.name,
@@ -201,7 +201,7 @@ async def get_column(
 ) -> Optional[ColumnMeta]:
     """단일 컬럼 메타. PK/FK constraint 도 함께 채움."""
     cypher = """
-    MATCH (t:Table)-[:BELONGS_TO]->(s:Schema)
+    MATCH (t:Table)-[:belongsTo|HAS_TABLE]-(s:Schema)
     WHERE toLower(s.name) = toLower($schema_name)
       AND toLower(t.name) = toLower($table_name)
     OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s)
@@ -209,7 +209,7 @@ async def get_column(
     WHERE $db_filter IS NULL OR toLower(db_label) = toLower($db_filter)
     MATCH (t)-[:HAS_COLUMN]->(c:Column)
     WHERE toLower(c.name) = toLower($column_name)
-    OPTIONAL MATCH (c)-[:FK_TO]->(c2:Column)
+    OPTIONAL MATCH (c)-[:fkTo]->(c2:Column)
     RETURN c {.*} AS col, c2 IS NOT NULL AS is_fk
     LIMIT 1
     """
@@ -256,14 +256,14 @@ async def get_refs(
     table_name: str,
 ) -> List[RefMeta]:
     cypher = """
-    MATCH (t1:Table)-[:BELONGS_TO]->(s1:Schema)
+    MATCH (t1:Table)-[:belongsTo|HAS_TABLE]-(s1:Schema)
     WHERE toLower(s1.name) = toLower($schema_name)
       AND toLower(t1.name) = toLower($table_name)
     OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s1)
     WITH t1, s1, ds, COALESCE(s1.db, ds.engine, $default_db) AS db_label
     WHERE $db_filter IS NULL OR toLower(db_label) = toLower($db_filter)
-    MATCH (t1)-[:HAS_COLUMN]->(c1:Column)-[:FK_TO]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
-    MATCH (t2)-[:BELONGS_TO]->(s2:Schema)
+    MATCH (t1)-[:HAS_COLUMN]->(c1:Column)-[:fkTo]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
+    MATCH (t2)-[:belongsTo|HAS_TABLE]-(s2:Schema)
     RETURN c1.name AS column_name,
            s2.name AS ref_schema_name,
            t2.name AS ref_table_name,

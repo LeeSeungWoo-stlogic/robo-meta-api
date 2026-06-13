@@ -365,6 +365,111 @@ async def decide(
     target, conf = _classify_target(cands)
     secondary = _collect_secondary(target, cands)
 
+    # 7) Union-Find 기반 외래키(FK) 그래프 경로 탐색 및 JoinGroup 빌드
+    join_groups = []
+    join_groups_mode = "empty"
+    
+    cand_map = {}
+    table_fqns = []
+    for c in cands:
+        s = (c.schema_name or "").strip()
+        n = (c.table_name or "").strip()
+        if n:
+            fqn = f"{s}.{n}" if s else n
+            cand_map[fqn.lower()] = c
+            table_fqns.append(fqn)
+
+    if table_fqns:
+        async with driver.session() as sess:
+            fk_relations = await fetch_fk_relationships(sess, table_fqns=table_fqns, limit=50)
+        
+        if fk_relations:
+            join_groups_mode = "fk_graph"
+            parent = {fqn_key: fqn_key for fqn_key in cand_map.keys()}
+
+            def find(x):
+                if parent[x] != x:
+                    parent[x] = find(parent[x])
+                return parent[x]
+
+            def union(x, y):
+                rx = find(x)
+                ry = find(y)
+                if rx != ry:
+                    parent[rx] = ry
+
+            from ..schemas import JoinBridge, TableKey, JoinGroup
+            
+            bridges_all = []
+            for rel in fk_relations:
+                fs = rel.get("from_schema") or ""
+                ft = rel.get("from_table") or ""
+                ts = rel.get("to_schema") or ""
+                tt = rel.get("to_table") or ""
+                
+                from_fqn = f"{fs}.{ft}" if fs else ft
+                to_fqn = f"{ts}.{tt}" if ts else tt
+                
+                from_key = from_fqn.lower()
+                to_key = to_fqn.lower()
+                
+                if from_key in parent and to_key in parent:
+                    union(from_key, to_key)
+                    bridges_all.append({
+                        "bridge": JoinBridge(**{"from": from_fqn, "to": to_fqn, "via": "fk", "path": [], "confidence": 1.0}),
+                        "from_key": from_key,
+                        "to_key": to_key
+                    })
+
+            from collections import defaultdict
+            groups_dict = defaultdict(list)
+            for fqn_key in cand_map.keys():
+                root = find(fqn_key)
+                groups_dict[root].append(cand_map[fqn_key])
+
+            for root, members in groups_dict.items():
+                if len(members) < 2:
+                    continue
+                
+                group_fqn_keys = set()
+                for m in members:
+                    s = (m.schema_name or "").strip().lower()
+                    n = (m.table_name or "").strip().lower()
+                    group_fqn_keys.add(f"{s}.{n}" if s else n)
+
+                group_bridges = []
+                for b in bridges_all:
+                    if b["from_key"] in group_fqn_keys and b["to_key"] in group_fqn_keys:
+                        group_bridges.append(b["bridge"])
+
+                if not group_bridges:
+                    continue
+
+                member_keys = [
+                    TableKey(**{"db": m.db, "schema_name": m.schema_name or None, "table_name": m.table_name})
+                    for m in members
+                ]
+
+                dbs = {m.db for m in members if m.db}
+                cross_db = len(dbs) > 1
+
+                relations_desc = [f"{gb.from_} -> {gb.to}" for gb in group_bridges]
+                rationale = "Detected FK relationships: " + ", ".join(relations_desc)
+                group_score = max(m.score for m in members) if members else 0.0
+
+                join_groups.append(
+                    JoinGroup(
+                        members=member_keys,
+                        bridge_tables=[],
+                        cross_db=cross_db,
+                        recommended_strategy="simple_join",
+                        bridges=group_bridges,
+                        group_score=group_score,
+                        score_breakdown={},
+                        rationale=rationale
+                    )
+                )
+
     threshold_used = {
         "analytic": settings.decision_analytic_threshold,
         "source": settings.decision_source_threshold,
@@ -379,7 +484,7 @@ async def decide(
         "question_results": debug.get("question_results"),
         "merged": debug.get("merged"),
         "fallback": debug.get("fallback"),
-        "join_groups_mode": "empty_fallback",
+        "join_groups_mode": join_groups_mode,
         "meta_version": META_VERSION,
     }
 
@@ -388,6 +493,6 @@ async def decide(
         secondary_targets=secondary,
         confidence=conf,
         candidates=cands,
-        join_groups=[],
+        join_groups=join_groups,
         threshold_used=threshold_used,
     )

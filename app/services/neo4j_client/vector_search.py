@@ -186,18 +186,18 @@ async def fetch_fk_relationships(
         return []
     table_fqns_l = [str(x or "").strip().lower() for x in table_fqns if str(x or "").strip()]
     cypher = """
-    MATCH (t1:Table)-[:HAS_COLUMN]->(c1:Column)-[fk:FK_TO]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
+    MATCH (t1:Table)-[:hasColumn|HAS_COLUMN]->(c1:Column)-[fk:fkTo]->(c2:Column)<-[:hasColumn|HAS_COLUMN]-(t2:Table)
     WITH t1, c1, fk, c2, t2,
-         (toLower(COALESCE(t1.schema,'')) + '.' + toLower(COALESCE(t1.original_name, t1.name))) AS fqn1,
-         (toLower(COALESCE(t2.schema,'')) + '.' + toLower(COALESCE(t2.original_name, t2.name))) AS fqn2
+         (CASE WHEN t1.schema IS NOT NULL AND t1.schema <> '' THEN toLower(t1.schema) + '.' + toLower(t1.name) ELSE toLower(t1.name) END) AS fqn1,
+         (CASE WHEN t2.schema IS NOT NULL AND t2.schema <> '' THEN toLower(t2.schema) + '.' + toLower(t2.name) ELSE toLower(t2.name) END) AS fqn2
     WHERE fqn1 IN $table_fqns AND fqn2 IN $table_fqns
-    RETURN COALESCE(t1.original_name, t1.name) AS from_table,
+    RETURN t1.name AS from_table,
            t1.schema AS from_schema,
            c1.name AS from_column,
-           COALESCE(t2.original_name, t2.name) AS to_table,
+           t2.name AS to_table,
            t2.schema AS to_schema,
            c2.name AS to_column,
-           fk.constraint AS constraint_name
+           (CASE WHEN 'constraint' IN keys(fk) THEN properties(fk)['constraint'] ELSE '' END) AS constraint_name
     ORDER BY from_schema, from_table, to_schema, to_table
     LIMIT $limit
     """
