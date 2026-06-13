@@ -1,135 +1,214 @@
-# robo-meta-api
+# robo-meta-api v2
 
-> Neo4j 베이스 v0.6 RC body 정합 meta-api (PRD 시나리오 X / gen-2)
-> 자산 ① (`test_K_Water/neo4j_client/`, 2026-03-07) 의 검증된 HyDE→임베딩→벡터 검색 파이프라인을
-> K-AIR-meta-api 의 v0.6 RC 응답 계약(8 endpoint + `meta_version` + `X-Meta-Version` 헤더)으로
-> 정렬한 신규 마이크로서비스.
+> Neo4j 베이스 v0.6 RC body 정합 meta-api — **v2 (브랜치: v0.2)**
+>
+> v1 대비 추가된 핵심 기능:
+> - `/data_decision` 응답에 **FK 경로 기반 `join_groups` 탐색 로직** 추가 (Union-Find + `fkTo` 관계 그래프 탐색)
+> - Neo4j Cypher 쿼리 최적화 (`properties(fk)['constraint']` 방식으로 정적 속성 경고 제거)
+> - `/meta/*` 엔드포인트 양방향 관계 지원 (`belongsTo` + `HAS_TABLE` 동시 조회)
+> - 포트 `8098` (v1: 8097 과 독립 운영)
+> - `docs/` 폴더: 분석 보고서 및 가이드 문서 포함
+
+---
 
 ## 1. 한 줄 정리
 
 ```
-외부 AI ──[HTTP v0.6 body]──> robo-meta-api(8097) ──[Cypher / pgvector]──> robo-neo4j(7687) + robo-postgres(5432)
+외부 AI ──[HTTP v0.6 body]──> robo-meta-api-v2(8098) ──[Cypher / psycopg]──> robo-neo4j(7687) + robo-postgres(5432)
                                   │
-                                  └ K-AIR-meta-api(8096, gen-1) 와 v0.6 RC 응답 동등
+                                  └ /data_decision: FK 경로 탐색 → join_groups 조립 (v2 신규)
 ```
 
-## 2. 빠른 시작 (로컬)
+---
 
-전제 — 호스트에 다음 컨테이너가 가동 중일 것:
+## 2. 빠른 시작
 
-- `robo-neo4j` (`neo4j:2025.11.2-community`, 7687) — 메타 그래프 (text_to_sql_table_vec_index ONLINE, 402 테이블)
+### 전제 — 아래 컨테이너가 실행 중이어야 함
+
+- `robo-neo4j` (`neo4j:2025.11.2-community`, 7687) — 메타 그래프 (`text_to_sql_table_vec_index` ONLINE)
 - `robo-postgres` (`postgres:15-alpine`, 5432) — 원천 RDB `rwis` DB / `RWIS` 스키마
 
+### Docker (권장)
+
 ```bash
-git clone <this-repo>
+git clone -b v0.2 <this-repo>
 cd robo-meta-api
 cp .env.example .env
-# .env 에 OPENAI_API_KEY 채움 (HyDE 활성화) — 비워두면 keyword Cypher 폴백 모드
-pip install -r requirements.txt
-python -m app.main
-# -> http://127.0.0.1:8097
+# .env 에 필요한 접속 정보 입력 (NEO4J_URI, SOURCE_PG_*, OPENAI_API_KEY 등)
+docker compose up -d --build
+docker logs -f robo-meta-api-v2
+curl http://127.0.0.1:8098/health
 ```
 
-회귀:
+### 로컬 직접 실행
+
+```bash
+pip install -r requirements.txt
+python -m app.main
+# -> http://127.0.0.1:8098
+```
+
+### 회귀 테스트
 
 ```bash
 python tests/smoke_v06.py        # 8 endpoint 200 + meta_version=0.6
-python scripts/compare_gen1_gen2.py  # gen-1 vs gen-2 Jaccard ≥ 0.95 (OPENAI 키 필요)
 ```
 
-Docker:
-
-```bash
-docker compose up -d --build
-docker logs -f robo-meta-api
-curl http://127.0.0.1:8097/health
-```
+---
 
 ## 3. 디렉토리 구조
 
 ```
-robo-meta-api/
+robo-meta-api/                         (v0.2 브랜치)
 ├── app/
-│   ├── main.py                          # FastAPI 부팅 + lifespan (Neo4j + 원천 PG)
-│   ├── config.py                        # 통합 settings (Neo4j + 원천 PG + decision + exec)
-│   ├── db.py                            # Neo4j 드라이버 + 원천 PG psycopg 풀
-│   ├── schemas.py                       # K-AIR v0.6 RC 그대로 (차용)
+│   ├── main.py                        # FastAPI 부팅 + lifespan (Neo4j + 원천 PG)
+│   ├── config.py                      # 통합 settings (Neo4j + 원천 PG + decision + exec)
+│   ├── db.py                          # Neo4j 드라이버 + 원천 PG psycopg 풀
+│   ├── schemas.py                     # K-AIR v0.6 RC 스펙 (JoinGroup / JoinBridge 포함)
 │   ├── routers/
-│   │   ├── decision.py                  # POST /data_decision
-│   │   ├── meta.py                      # POST /meta/{batch,table,column,ref}
-│   │   └── query_exec.py                # POST /query/execute (K-AIR 그대로)
+│   │   ├── decision.py                # POST /data_decision
+│   │   ├── meta.py                    # POST /meta/{batch,table,column,ref}
+│   │   └── query_exec.py              # POST /query/execute
 │   ├── services/
-│   │   ├── decision_service.py          # HyDE+벡터 → DecisionResponse 변환 + keyword Cypher 폴백
-│   │   ├── meta_service.py              # /meta/* 4 endpoint Cypher
-│   │   ├── subject_area.py              # K-AIR 차용 (분류 규칙)
-│   │   ├── query_runner.py              # K-AIR 차용 (READ ONLY TX + 감사 JSONL)
-│   │   ├── sql_guard.py                 # K-AIR 차용 (화이트/블랙리스트)
-│   │   └── neo4j_client/                # 자산 ① 그대로 (HyDE, embedding, vector_search, db_probe)
-│   └── rules/subject_area_rules.yaml    # K-AIR 차용 (분류 규칙 YAML)
-├── tests/smoke_v06.py                   # VER-MN-04 (8 endpoint 회귀)
-├── scripts/compare_gen1_gen2.py         # VER-MN-03 (gen-1 vs gen-2 동등성)
-├── Dockerfile / docker-compose.yml
+│   │   ├── decision_service.py        # HyDE+벡터 → FK 경로 탐색 → JoinGroup 조립 (v2 핵심)
+│   │   ├── meta_service.py            # /meta/* Cypher (양방향 관계 지원)
+│   │   ├── subject_area.py            # 분류 규칙
+│   │   ├── query_runner.py            # READ ONLY TX + 감사 JSONL
+│   │   ├── sql_guard.py               # SELECT 화이트리스트 / DDL 블랙리스트
+│   │   └── neo4j_client/              # HyDE, embedding, vector_search, db_probe
+│   └── rules/subject_area_rules.yaml  # 분류 규칙 YAML
+├── tests/smoke_v06.py                 # VER-MN-04 (8 endpoint 회귀)
+├── docs/                              # 분석 보고서 및 가이드 문서
+│   ├── fk_path_expansion_plan.md      # FK 경로 탐색 설계 계획서
+│   ├── fk_path_expansion_v2_report.md # v2 작업 완료 보고서
+│   ├── kair_ontology_fk_investigation.md # KAIR 온톨로지/FK fallback 조사
+│   ├── metadata_mapping_analysis.md   # Neo4j 메타데이터 구조 분석
+│   ├── rag_comparison_report.md       # RAG 비교 검증 보고서
+│   └── query_execute_backend_guide.md # /query/execute 백엔드 교체 가이드
+├── Dockerfile
+├── docker-compose.yml
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
 
+---
+
 ## 4. 8 endpoint × 응답 키 (v0.6 RC body)
 
 | Method | Path | 응답 핵심 키 |
-|---|---|---|
+|--------|------|-------------|
 | GET | `/health` | `meta_version=0.6` + `X-Meta-Version: 0.6` 헤더 |
 | POST | `/data_decision` | `target / secondary_targets / confidence / candidates[].matched_columns / join_groups / threshold_used` |
 | POST | `/meta/batch` | `items[].db / schema_name / table_name` |
-| POST | `/meta/table` | `table_info / columns / fk` (v0.6 풍부 필드는 빈 값 폴백) |
+| POST | `/meta/table` | `table_info / columns / fk` |
 | POST | `/meta/column` | `column.{column_name, data_type, constraints, ...}` |
 | POST | `/meta/ref` | `fk[].{column_name, ref_schema_name, ref_table_name, ref_column_name}` |
 | POST | `/query/execute` | `status / sql_executed / columns / rows / row_count / truncated / elapsed_ms` (sql_guard 차단 시 400) |
 
-## 5. 폴백 정책 (PRD §5 REQ-MN-F-05 + R-3)
+---
 
-- **OPENAI 미설정 / quota 초과**: HyDE 와 임베딩 skip → **keyword Cypher 폴백** (`MATCH (t:Table) WHERE toLower(name/desc/analyzed) CONTAINS kw`)
-- **v0.6 RC 풍부 필드** (`lineage_brief`, `ontology_anchors`, `code_lookup`, `term_mapping`, `value_examples`, `join_groups`): 데이터 미적재이므로 `null` 또는 `[]` 폴백
-- **`db` 라벨 폴백 체인**: `Schema.db || DataSource.engine || META_DB_LABEL`
+## 5. v2 핵심 변경: FK 경로 탐색 (`join_groups`)
 
-## 6. 컴포넌트 출처
+### 동작 방식
+
+`/data_decision` 호출 시 벡터 검색으로 선별된 후보 테이블 간 FK 연결 경로를 탐색하여 `join_groups`를 조립합니다.
+
+```
+후보 테이블 선별 (HyDE + 벡터 검색)
+        │
+        ▼
+Neo4j: (Column)-[:fkTo]->(Column) 관계 조회
+        │
+        ▼
+Union-Find 클러스터링 → FK로 연결된 테이블 그룹화
+        │
+        ▼
+JoinGroup / JoinBridge 객체 조립 → join_groups 반환
+```
+
+### 응답 예시
+
+```json
+{
+  "join_groups": [
+    {
+      "tables": ["rwis.table_a", "rwis.table_b"],
+      "bridges": [
+        {
+          "from_table": "rwis.table_a",
+          "from_column": "col_id",
+          "to_table": "rwis.table_b",
+          "to_column": "a_id",
+          "constraint": "fk_b_to_a"
+        }
+      ]
+    }
+  ]
+}
+```
+
+> **참고**: FK 관계가 Neo4j에 적재되지 않은 테이블 간에는 `join_groups`가 빈 배열(`[]`)로 반환됩니다.
+
+---
+
+## 6. 폴백 정책
+
+- **OPENAI 미설정 / quota 초과**: HyDE + 임베딩 skip → keyword Cypher 폴백  
+  (`MATCH (t:Table) WHERE toLower(name/desc/analyzed) CONTAINS kw`)
+- **FK 관계 미적재**: `join_groups: []` 반환 (정상 동작)
+- **`db` 라벨 폴백 체인**: `Schema.db || DataSource.engine || META_DB_LABEL` 환경변수
+
+---
+
+## 7. 환경변수 (.env)
+
+```dotenv
+# Neo4j
+NEO4J_URI=bolt://host.docker.internal:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=
+
+# 원천 PostgreSQL
+SOURCE_PG_HOST=host.docker.internal
+SOURCE_PG_PORT=5432
+SOURCE_PG_DB=rwis
+SOURCE_PG_USER=postgres
+SOURCE_PG_PASS=
+SOURCE_PG_SCHEMA=RWIS
+
+# OpenAI (HyDE + 임베딩 활성화 — 비워두면 keyword 폴백)
+OPENAI_API_KEY=
+
+# API
+API_PORT=8098
+
+# 기타 정책
+META_DB_LABEL=kwater_prod
+DECISION_VECTOR_TOPK=10
+```
+
+---
+
+## 8. 컴포넌트 출처
 
 | 원천 | 차용 모듈 | 변경 |
-|---|---|---|
-| 자산 ① ([`test_K_Water/neo4j_client/`](https://github.com/LeeSeungWoo-stlogic/test_K_Water)) | `app/services/neo4j_client/*` (8 파일) | OPENAI_API_KEY 하드코딩만 제거, 나머지 그대로 |
-| [`K-AIR-meta-api`](https://github.com/LeeSeungWoo-stlogic/K-AIR-meta-api) | `app/schemas.py`, `app/services/{sql_guard,query_runner,subject_area}.py`, `app/routers/query_exec.py`, `app/rules/subject_area_rules.yaml` | 그대로 (수정 0) |
-| 신규 | `app/main.py`, `app/config.py`, `app/db.py`, `app/services/{decision_service,meta_service}.py`, `app/routers/{decision,meta}.py` | ~930 lines |
+|------|----------|------|
+| `test_K_Water/neo4j_client/` | `app/services/neo4j_client/*` | OPENAI_API_KEY 하드코딩 제거, `vector_search.py` Cypher 최적화 |
+| `K-AIR-meta-api` | `schemas.py`, `sql_guard.py`, `query_runner.py`, `subject_area.py`, `query_exec.py`, `subject_area_rules.yaml` | 최소 수정 |
+| 신규 (v1) | `main.py`, `config.py`, `db.py`, `decision_service.py`, `meta_service.py`, `routers/` | 신규 작성 |
+| 신규 (v2) | `decision_service.py` FK 탐색 로직, `meta_service.py` 양방향 관계 | v2 추가 |
 
-## 7. 검증 게이트 매핑 (PRD §6)
+---
 
-- **VER-MN-01** `/health` v0.6 헤더 → [tests/smoke_v06.py](tests/smoke_v06.py) `[1/8]`
-- **VER-MN-02** smoke_v06 회귀 → 동일 스크립트 `[1~8/8]`
-- **VER-MN-03** gen-1 vs gen-2 동등성 (Jaccard ≥ 0.95) → [scripts/compare_gen1_gen2.py](scripts/compare_gen1_gen2.py) (OPENAI 키 필요)
-- **VER-MN-04** 8 endpoint 모두 200 → smoke_v06 PASS
-- **VER-MN-05** 시크릿 push 0 → `.gitignore` + `git log -p --all -- '.env*'` empty
+## 9. 알려진 제약
 
-## 8. 운영 RUNBOOK (요약)
+- **FK 미적재**: 현재 Neo4j에 `fkTo` 관계가 없는 테이블 쌍은 `join_groups`가 비어 있음. Neo4j에 FK 관계 적재 시 자동 반영.
+- **`Schema.db=oracle` 표기**: 원천은 PostgreSQL이나 Neo4j 노드의 `db` 속성이 `oracle`. `META_DB_LABEL` 환경변수로 통제 가능.
+- **OPENAI quota**: API 키 미설정 또는 quota 초과 시 keyword Cypher 폴백 동작.
+- **`/query/execute` 백엔드 교체**: 현재 PostgreSQL 전용. MindsDB 등으로 교체 시 `docs/query_execute_backend_guide.md` 참조.
 
-| 운영 항목 | 명령 / 점검 |
-|---|---|
-| 헬스 | `curl http://127.0.0.1:8097/health` → `meta_version=0.6` |
-| 부팅 | `python -m app.main` (Windows ProactorEventLoop 자동 회피) |
-| 종료 | `Ctrl+C` (lifespan 이 Neo4j 드라이버 + PG 풀 close) |
-| 회귀 | `python tests/smoke_v06.py` (8/8 PASS = VER-MN-04) |
-| 동등성 | `python scripts/compare_gen1_gen2.py` (avg Jaccard@10 ≥ 0.95) |
-| 감사 로그 | `logs/query_audit.jsonl` JSONL append (rotate 별도 권고) |
-| OPENAI 키 회수 | `.env` 의 `OPENAI_API_KEY` 만 갱신 후 재기동 |
-| Neo4j 인덱스 누락 시 | 자산 ① `vector_search.py` 가 자동으로 `vector.similarity.cosine` 스캔 폴백 |
-
-## 9. 알려진 제약 / 후속 트랙
-
-- **R-1 자산 ① 키 leak**: `test_K_Water/neo4j_client/config.py` 의 OPENAI_API_KEY 가 git 추적 상태. **회수(rotate) 권고**.
-- **R-2 `:Database` ≠ `:DataSource`**: PRD §2 다이어그램의 `:Database` 는 실 라벨이 `:DataSource` + `:Schema`. 본 레포의 Cypher 는 실 라벨로 작성.
-- **R-3 `Schema.db=oracle` 표기**: 원천은 robo-postgres 이나 `:Schema.db` 가 `oracle`. `META_DB_LABEL` 환경변수로 운영 시 라벨 통제 가능.
-- **R-4 `text_to_sql_is_valid=TRUE` 49건만 운영급**: 나머지 337건은 임베딩은 있으나 미검증.
-- **R-6 db_probe**: `value_examples` 풍부 필드는 빈 값 폴백 (별도 트랙).
-- **R-8 OPENAI quota**: 현재 자산 ①의 키가 quota 초과 — VER-MN-03 보류 상태.
-- **gen-1 폐기 시점**: 추후 결정 (이중 운영 유지).
+---
 
 ## 10. 라이선스
 
