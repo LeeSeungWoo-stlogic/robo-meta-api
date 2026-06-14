@@ -34,7 +34,7 @@ curl -s -X POST http://127.0.0.1:8100/data_decision \
 
 기대: `resolution_status: complete`, `RDISAUP_TB.SUJ_CODE=316` 등 `resolved_entities`.
 
-환경: `.env.rwis-test.example` — `PG_*`(db_probe)와 `SOURCE_PG_*` 동일 값 필요.
+환경: `.env.rwis-test.example` — `PG_*`(db_probe)와 `SOURCE_PG_*` 동일 값, `DECISION_SCHEMA_ALLOWLIST=rwis` (Request body에 schema 없음).
 
 ## 문서
 

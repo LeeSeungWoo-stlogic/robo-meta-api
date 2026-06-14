@@ -2,7 +2,7 @@
 
 > **기준 구현:** `robo-meta-api-v4` (Docker 포트 **8100**)  
 > **상위 초안:** K-AIR Meta API Specification Draft **v0.6 RC** (`api_spec_draft.md`)  
-> **변경 요약:** v0.6 대비 `/data_decision` **요청 2필드·응답 3필드** 추가. 나머지 endpoint body는 v0.6과 **동일(하위 호환)**.
+> **변경 요약:** v0.6 대비 `/data_decision` **요청 +1필드·응답 +3필드**. 나머지 endpoint body는 v0.6과 **동일(하위 호환)**.
 
 ---
 
@@ -75,6 +75,8 @@
 | `include_matched_columns` | boolean | | `true` | `matched_columns` 포함 여부 |
 | `column_top_m` | integer | | null | 테이블별 컬럼 매칭 상한 (1–50) |
 | `auto_resolve_entities` | boolean | | `true` | v0.7 A안: 1차 코드 해소 |
+
+> **Request body에 `schema` / `schema_name` 없음.** PG·Neo4j 스키마 범위는 서버 env `DECISION_SCHEMA_ALLOWLIST`(예: `rwis`)로 제한. entity resolution DB 접속은 `SOURCE_PG_SCHEMA`, `PG_SCHEMAS`.
 
 ```json
 {
@@ -184,6 +186,8 @@
 
 ### 2-8. Response Example (v0.7, RWIS E2E)
 
+> `candidates[].db`는 Neo4j DataSource 라벨(R-3 폴백 `META_DB_LABEL`). legacy ingest 잔존 시 `hwaseong` 등 **실제 PG DB명과 다를 수 있음**. `schema_name`·테이블·코드 해소가 핵심.
+
 ```json
 {
   "meta_version": "0.7",
@@ -192,7 +196,7 @@
   "confidence": 0.5,
   "candidates": [
     {
-      "db": "rwis",
+      "db": "hwaseong",
       "schema_name": "rwis",
       "table_name": "RDF01HH_TB",
       "score": 0.44,
