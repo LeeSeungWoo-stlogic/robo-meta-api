@@ -12,19 +12,18 @@
 |------|----------------|-----------|------|
 | `X-Meta-Version` / `meta_version` | `"0.6"` | `"0.7"` | 버전 bump |
 | Base URL (Docker) | `8096` (예시) | **8100** | v4 전용 포트 |
-| **POST /data_decision Request** | 3필드 | **5필드** | **+2** (아래) |
+| **POST /data_decision Request** | 3필드 | **4필드** | **+1** (`auto_resolve_entities`) |
 | **POST /data_decision Response** | 7 top-level | **10 top-level** | **+3** (아래) |
 | POST /query/execute | v0.7 제거 예정(초안) | **유지(deprecated)** | v4는 probe·smoke용 보존 |
 | POST /meta/* | 초안 미기재 | v0.6과 동일 | 변경 없음 |
 
-### `/data_decision` Request 변경 (+2)
+### `/data_decision` Request 변경 (+1)
 
 | 필드 | v0.6 | v0.7 | 설명 |
 |------|:----:|:----:|------|
 | `query` | ✓ | ✓ | 동일 |
 | `include_matched_columns` | ✓ | ✓ | 동일 |
 | `column_top_m` | ✓ | ✓ | 동일 |
-| `query_embedding` | — | **✓** | 사전 계산 임베딩(1536). null이면 서버 HyDE+embed |
 | `auto_resolve_entities` | — | **✓** | `true`(기본): PG db_probe로 코드 해소 시도 |
 
 ### `/data_decision` Response 변경 (+3)
@@ -75,7 +74,6 @@
 | `query` | string | ✓ | — | 자연어 질의 |
 | `include_matched_columns` | boolean | | `true` | `matched_columns` 포함 여부 |
 | `column_top_m` | integer | | null | 테이블별 컬럼 매칭 상한 (1–50) |
-| `query_embedding` | array[float] | | null | 1536-dim. null이면 서버 내부 embed |
 | `auto_resolve_entities` | boolean | | `true` | v0.7 A안: 1차 코드 해소 |
 
 ```json

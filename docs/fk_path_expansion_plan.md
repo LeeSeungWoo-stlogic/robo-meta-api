@@ -48,7 +48,7 @@ sequenceDiagram
 | 검토 영역 | 영향 여부 | 분석 상세 및 하위 호환성 여부 |
 | :--- | :---: | :--- |
 | **Endpoint Path** | **영향 없음** | 기존 엔드포인트 경로인 `POST /data_decision`을 그대로 유지합니다. 클라이언트 사이드에서 호출 URL을 변경할 필요가 없습니다. |
-| **Request Body** | **영향 없음** | 입력 파라미터 규격인 `DecisionRequest` (`query`, `query_embedding` 등) 구조를 일체 수정하지 않습니다. 따라서 클라이언트의 호출 데이터 스펙에 대한 수정이 불필요합니다. |
+| **Request Body** | **영향 없음** | 입력 파라미터 규격인 `DecisionRequest` (`query`, `include_matched_columns`, `column_top_m`, `auto_resolve_entities`) 구조를 일체 수정하지 않습니다. 따라서 클라이언트의 호출 데이터 스펙에 대한 수정이 불필요합니다. |
 | **Response Body** | **영향 없음 (100% 호환)** | 기존 `/data_decision` 응답 스키마인 `DecisionResponse` 내부에는 이미 **`join_groups: List[JoinGroup] = Field(default_factory=list)`** 필드가 구현되어 있습니다.<br><br>기존에는 기능 미반영으로 인해 빈 배열(`[]`)로 반환되던 하위 JSON 필드에 실제 데이터가 채워지는 구조적 변화만 발생하므로, JSON 규격(스키마 구조)이 깨지지 않아 **기존 클라이언트 서비스에 무결(100% 하위 호환)** 합니다. |
 
 > [!TIP]

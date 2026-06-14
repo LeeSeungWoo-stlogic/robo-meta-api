@@ -16,7 +16,6 @@ async def data_decision(req: DecisionRequest) -> DecisionResponse:
     return await decision_service.decide(
         driver,
         query=req.query,
-        query_embedding=req.query_embedding,
         include_matched_columns=req.include_matched_columns,
         column_top_m=req.column_top_m,
         auto_resolve_entities=req.auto_resolve_entities,

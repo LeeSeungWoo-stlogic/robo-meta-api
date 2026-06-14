@@ -161,7 +161,6 @@ class MetaTableResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class DecisionRequest(BaseModel):
     query: str = Field(..., min_length=1, examples=["최근 일주일간 시간별 탁도 평균"])
-    query_embedding: Optional[List[float]] = None
     include_matched_columns: bool = Field(
         default=True,
         description="False면 candidates[].matched_columns 를 채우지 않음",

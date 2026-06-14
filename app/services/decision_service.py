@@ -265,7 +265,6 @@ async def decide(
     driver: AsyncDriver,
     *,
     query: str,
-    query_embedding: Optional[List[float]] = None,
     include_matched_columns: bool = True,
     column_top_m: Optional[int] = None,
     auto_resolve_entities: bool = True,
@@ -278,14 +277,12 @@ async def decide(
     hyde_out = None
     hyde_status = "skipped"
     hyde_embedding: Optional[List[float]] = None
-    question_embedding: Optional[List[float]] = query_embedding
+    question_embedding: Optional[List[float]] = None
 
-    # 1) HyDE — 외부 임베딩이 주어지지 않은 경우만
-    if query_embedding is None and settings.openai_enabled:
+    if settings.openai_enabled:
         hyde_gen = get_hyde_generator()
         hyde_out, hyde_status = await hyde_gen.generate(question=query)
         debug["hyde_status"] = hyde_status
-        # 2) Embedding
         embedder = get_embedding_client()
         texts: List[str] = []
         if hyde_out is not None:
@@ -305,8 +302,6 @@ async def decide(
             else:
                 question_embedding = vecs[-1]
         debug["mode"] = "internal_hyde+vector"
-    elif query_embedding is not None:
-        debug["mode"] = "precomputed_vector"
     else:
         debug["mode"] = "keyword_only"
         debug["reason"] = "OPENAI_API_KEY not set"
