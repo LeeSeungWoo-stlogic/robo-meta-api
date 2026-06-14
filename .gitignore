@@ -1,0 +1,37 @@
+# --- 시크릿 / 환경 ---
+.env
+.env.*
+!.env.example
+!.env.rwis-test.example
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- 로그 / 임시 ---
+*.log
+logs/
+*.jsonl.tmp
+
+# --- IDE ---
+.vscode/
+.idea/
+.cursor/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- 빌드 산출물 ---
+build/
+dist/
+*.egg

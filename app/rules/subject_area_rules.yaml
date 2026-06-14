@@ -1,0 +1,42 @@
+# subject_area 규칙 — 테이블명 정규식 + AGE 온톨로지 힌트.
+# 우선순위: name_patterns(위→아래) → ontology_hints → default
+# 추후 Argus 완성 시 `ontology_hints` 규칙을 `standard_status` 기반으로 교체 가능.
+
+default: unknown
+
+# 정규식 매칭은 case-insensitive, schema_name.table_name 형식으로도 매칭 시도
+name_patterns:
+  # 일/시간 단위 집계 테이블
+  - pattern: ".*(_DD|_HH|_MM|RDD01DD|RDF01HH|AGG|SUMMARY|_STAT).*"
+    value: agg
+  # 이력·로그·히스토리
+  - pattern: ".*(HIST|_LOG|_LOG_TB|JOBLOG|YUYUK_LOG).*"
+    value: hist
+  # 코드·마스터 분류
+  - pattern: ".*(CODE|_CODE_TB|CD_TB|TYPE_TB).*"
+    value: code
+  # 태그·설비 마스터
+  - pattern: ".*(RDITAG|TAGUNIT|_MAST_|_MASTER_|_BONBU|_SAMUSO|_SAMUPR|_RSSYS).*"
+    value: master
+  # 매핑/연계 테이블
+  - pattern: ".*(LINK|MAP|REL|XREF|_LINK_TB).*"
+    value: link
+  # 사전 필터에 걸리지 않은 TB_/_TB 일반 → raw
+  - pattern: ".*_TB$"
+    value: raw
+
+# AGE 온톨로지 보강 힌트
+# - table_has_fk_count (들어오고 나가는 FK가 일정 이상이면 master 후보)
+# - table_belongs_to_layer (Resource/Driver → master, Measure → raw/agg)
+# 단순 버전: 테이블이 온톨로지 노드와 연결되었는지로만 master 판정
+ontology_hints:
+  promote_master_if_ontology_linked: false  # 보수적 off (원천 테이블엔 기본 연결 없음)
+  promote_agg_if_uses_by_query: true        # USES_TABLE 관계 많으면 집계·분석용으로 간주
+  uses_by_query_threshold: 3
+
+overrides:
+  # 예외/고정 매핑 (스키마.테이블)
+  "RWIS.RDD01DD_TB": agg
+  "RWIS.RDF01HH_TB": agg
+  "RWIS.RDITAG_TB": master
+  "RWIS.RDITAGUNIT_TB": master

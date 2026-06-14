@@ -1,0 +1,57 @@
+# robo-meta-api v4 — entity resolution (A안) + join_groups 3단 fallback
+#
+# 외부 의존 컨테이너 (별도 기동 필수):
+#   - robo-neo4j      (호스트 bolt 7688)
+#   - robo-postgres   (호스트 PG 5434, DB rwis / schema rwis)
+#
+# 기동: docker compose up -d --build
+# 헬스: curl http://127.0.0.1:8100/health
+
+version: "3.9"
+
+services:
+  robo-meta-api-v4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: robo-meta-api-v4:dev
+    container_name: robo-meta-api-v4
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    env_file:
+      - .env
+    environment:
+      API_PORT: "8100"
+      NEO4J_URI: "bolt://host.docker.internal:7688"
+      SOURCE_PG_HOST: "host.docker.internal"
+      SOURCE_PG_PORT: "5434"
+      SOURCE_PG_SCHEMA: "rwis"
+      # entity resolution db_probe (neo4j_client — SOURCE_PG 와 동일)
+      PG_HOST: "host.docker.internal"
+      PG_PORT: "5434"
+      PG_DATABASE: "rwis"
+      PG_SCHEMAS: "rwis"
+      META_DB_LABEL: "rwis"
+      DECISION_SCHEMA_ALLOWLIST: "rwis"
+      ENTITY_RESOLUTION_ENABLED: "1"
+      JOIN_ONTOLOGY_ENABLED: "1"
+      JOIN_CONVENTION_ENABLED: "1"
+      JOIN_CONVENTION_MIN_COL_LEN: "4"
+      JOIN_CONVENTION_CONFIDENCE: "0.5"
+      JOIN_CONVENTION_CONFIDENCE_MISMATCH: "0.35"
+      JOIN_ONTOLOGY_REL_TYPES: "fkToTable,FK_TO_TABLE,FK_TO_COLUMN,RELATED_TO,REFERENCES,DOMAIN_RELATED,dataFlowsTo"
+      JOIN_FK_LIMIT: "50"
+      JOIN_ONTOLOGY_LIMIT: "50"
+      JOIN_CONVENTION_LIMIT: "30"
+      NEO4J_TABLE_VECTOR_INDEX: "text_to_sql_table_vec_index"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
