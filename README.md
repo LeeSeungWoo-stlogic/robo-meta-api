@@ -38,6 +38,7 @@ curl -s -X POST http://127.0.0.1:8100/data_decision \
 
 ## 문서
 
+- [`docs/api_spec_v0.7.md`](docs/api_spec_v0.7.md) — **v0.7 API 명세** (v0.6 초안 대비 diff 포함)
 - [`docs/design-v4-resolved-entities.md`](docs/design-v4-resolved-entities.md)
 - [`docs/external_t2sql_integration.md`](docs/external_t2sql_integration.md)
 
