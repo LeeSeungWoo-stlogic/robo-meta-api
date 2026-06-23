@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .models import ColumnCandidate, TableCandidate
 
 from ...config import settings
+from ..kair_graph_adapter import REL_COLUMN_FK, REL_TABLE_COLUMN
 
 
 def _is_missing_vector_index_error(exc: Exception, *, index_name: str) -> bool:
@@ -44,6 +45,8 @@ async def search_tables_by_vector(
       COALESCE(node.name,'') AS name,
       COALESCE(node.description,'') AS description,
       COALESCE(node.analyzed_description,'') AS analyzed_description,
+      COALESCE(node.datasource,'') AS datasource,
+      COALESCE(node.subject_area,'') AS subject_area,
       score AS score
     ORDER BY score DESC, schema ASC, name ASC
     LIMIT $k
@@ -63,6 +66,8 @@ async def search_tables_by_vector(
                 name=str(r.get("name") or ""),
                 description=str(r.get("description") or ""),
                 analyzed_description=str(r.get("analyzed_description") or ""),
+                datasource=str(r.get("datasource") or ""),
+                subject_area=str(r.get("subject_area") or ""),
                 score=float(r.get("score") or 0.0),
             )
             for r in rows
@@ -84,6 +89,8 @@ async def search_tables_by_vector(
       COALESCE(t.name,'') AS name,
       COALESCE(t.description,'') AS description,
       COALESCE(t.analyzed_description,'') AS analyzed_description,
+      COALESCE(t.datasource,'') AS datasource,
+      COALESCE(t.subject_area,'') AS subject_area,
       score AS score
     ORDER BY score DESC, schema ASC, name ASC
     LIMIT $k
@@ -101,6 +108,8 @@ async def search_tables_by_vector(
             name=str(r.get("name") or ""),
             description=str(r.get("description") or ""),
             analyzed_description=str(r.get("analyzed_description") or ""),
+            datasource=str(r.get("datasource") or ""),
+            subject_area=str(r.get("subject_area") or ""),
             score=float(r.get("score") or 0.0),
         )
         for r in rows
@@ -127,7 +136,7 @@ async def fetch_table_schemas(
     if not requested:
         return []
 
-    cypher = """
+    cypher = f"""
     UNWIND $requested AS req
     MATCH (t:Table)
     WHERE (
@@ -137,7 +146,7 @@ async def fetch_table_schemas(
       AND (req.schema IS NULL OR (t.schema IS NOT NULL AND toLower(t.schema) = req.schema))
       AND COALESCE(t.text_to_sql_db_exists, true) = true
     WITH DISTINCT t
-    OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c:Column)
+    OPTIONAL MATCH (t)-[:{REL_TABLE_COLUMN}]->(c:Column)
     WITH t, c
     ORDER BY c.name
     RETURN COALESCE(t.original_name, t.name) AS table_name,
@@ -145,7 +154,7 @@ async def fetch_table_schemas(
            t.description AS table_description,
            t.text_to_sql_table_type AS table_type,
            t.datasource AS datasource,
-           collect({
+           collect({{
                name: c.name,
                fqn: c.fqn,
                dtype: c.dtype,
@@ -154,7 +163,7 @@ async def fetch_table_schemas(
                is_primary_key: c.is_primary_key,
                enum_values: c.enum_values,
                cardinality: c.cardinality
-           }) AS columns
+           }}) AS columns
     ORDER BY table_schema, table_name
     """
     res = await session.run(cypher, requested=requested)
@@ -185,8 +194,8 @@ async def fetch_fk_relationships(
     if not table_fqns:
         return []
     table_fqns_l = [str(x or "").strip().lower() for x in table_fqns if str(x or "").strip()]
-    cypher = """
-    MATCH (t1:Table)-[:hasColumn|HAS_COLUMN]->(c1:Column)-[fk:fkTo|FK_TO_COLUMN]->(c2:Column)<-[:hasColumn|HAS_COLUMN]-(t2:Table)
+    cypher = f"""
+    MATCH (t1:Table)-[:{REL_TABLE_COLUMN}]->(c1:Column)-[fk:{REL_COLUMN_FK}]->(c2:Column)<-[:{REL_TABLE_COLUMN}]-(t2:Table)
     WITH t1, c1, fk, c2, t2,
          (CASE WHEN t1.schema IS NOT NULL AND t1.schema <> '' THEN toLower(t1.schema) + '.' + toLower(t1.name) ELSE toLower(t1.name) END) AS fqn1,
          (CASE WHEN t2.schema IS NOT NULL AND t2.schema <> '' THEN toLower(t2.schema) + '.' + toLower(t2.name) ELSE toLower(t2.name) END) AS fqn2
@@ -285,6 +294,11 @@ async def fetch_ontology_relationships(
     return await result.data()
 
 
+def _is_mart_fact_table(table_name: str) -> bool:
+    """mart fact 테이블 식별 (Neo4j schema와 무관하게 fct_ prefix 기준)."""
+    return str(table_name or "").lower().startswith("fct_")
+
+
 async def fetch_convention_joins(
     session,
     *,
@@ -292,21 +306,22 @@ async def fetch_convention_joins(
     min_col_len: int = 4,
     excludes: set[str] | None = None,
     limit: int = 30,
+    exclude_mart_pairs: bool = True,
 ) -> List[Dict[str, Any]]:
     if not table_fqns or len(table_fqns) < 2:
         return []
 
     ex = excludes if excludes is not None else settings.join_convention_exclude
 
-    cypher = """
+    cypher = f"""
     UNWIND $fqns AS fqn1
     UNWIND $fqns AS fqn2
     WITH fqn1, fqn2 WHERE fqn1 < fqn2
-    MATCH (t1:Table)-[:HAS_COLUMN|hasColumn]->(c1:Column)
+    MATCH (t1:Table)-[:{REL_TABLE_COLUMN}]->(c1:Column)
     WHERE (CASE WHEN t1.schema IS NOT NULL AND t1.schema <> ''
                 THEN toLower(t1.schema) + '.' + toLower(t1.name)
                 ELSE toLower(t1.name) END) = fqn1
-    MATCH (t2:Table)-[:HAS_COLUMN|hasColumn]->(c2:Column)
+    MATCH (t2:Table)-[:{REL_TABLE_COLUMN}]->(c2:Column)
     WHERE (CASE WHEN t2.schema IS NOT NULL AND t2.schema <> ''
                 THEN toLower(t2.schema) + '.' + toLower(t2.name)
                 ELSE toLower(t2.name) END) = fqn2
@@ -340,7 +355,17 @@ async def fetch_convention_joins(
         excludes=list(ex),
         limit=int(limit),
     )
-    return await result.data()
+    rows = await result.data()
+    if not exclude_mart_pairs:
+        return rows
+    return [
+        r
+        for r in rows
+        if not (
+            _is_mart_fact_table(str(r.get("from_table") or ""))
+            and _is_mart_fact_table(str(r.get("to_table") or ""))
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -368,9 +393,9 @@ async def fetch_anchor_columns(
     if not kws:
         return []
 
-    cypher = """
+    cypher = f"""
     UNWIND $requested AS req
-    MATCH (t:Table)-[:HAS_COLUMN]->(c:Column)
+    MATCH (t:Table)-[:{REL_TABLE_COLUMN}]->(c:Column)
     WHERE (
       (t.name IS NOT NULL AND toLower(t.name) = req.name)
       OR (t.original_name IS NOT NULL AND toLower(t.original_name) = req.name)

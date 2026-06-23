@@ -3,12 +3,24 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..schemas import QueryExecuteRequest, QueryExecuteResponse
+from ..schemas import (
+    QueryExecuteRequest,
+    QueryExecuteResponse,
+    QueryRequest,
+    QueryResponse,
+)
 from ..services import query_runner
 from ..services.sql_guard import GuardError
 
 
 router = APIRouter(tags=["query"])
+
+
+@router.post("/query", response_model=QueryResponse)
+async def query_stub(req: QueryRequest) -> QueryResponse:
+    """v0.7 정책: /query는 스텁 노출(미구현 상태 명시)."""
+    _ = req
+    return QueryResponse()
 
 
 @router.post("/query/execute", response_model=QueryExecuteResponse)

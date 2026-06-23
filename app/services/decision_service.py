@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from neo4j import AsyncDriver
 
 from ..config import settings
+from .kair_graph_adapter import REL_SCHEMA_DATASOURCE, REL_TABLE_SCHEMA, table_lookup_key
 from ..schemas import (
     ColumnConstraint,
     DecisionCandidate,
@@ -53,20 +54,67 @@ def _subject_area_to_target_class(area: str) -> TargetClass:
     return "unknown"
 
 
+def _table_fqn_key(schema: str, name: str) -> str:
+    s = (schema or "").strip()
+    n = (name or "").strip()
+    return f"{s}.{n}".lower() if s else n.lower()
+
+
+def _table_identity_key(t: TableCandidate) -> str:
+    return table_lookup_key(
+        datasource=t.datasource,
+        schema=t.schema,
+        name=t.name,
+    )
+
+
+def _table_description_text(t: TableCandidate) -> Tuple[Optional[str], Optional[str]]:
+    """(table_comment, description) — description 은 analyzed 우선."""
+    comment = (t.description or "").strip() or None
+    analyzed = (t.analyzed_description or "").strip()
+    rich = analyzed or comment
+    return comment, (rich or None)
+
+
+def _resolve_decision_policy(
+    *,
+    table_limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """요청 table_limit 하나로 검색 top-k 와 최종 cap 을 함께 제어."""
+    if table_limit is not None:
+        n = max(1, min(50, int(table_limit)))
+        return {
+            "topk": n,
+            "table_max": n,
+            "table_limit": n,
+            "score_gap_ratio": settings.decision_score_gap_ratio,
+            "score_min_step": settings.decision_score_min_step,
+            "score_top_radius": settings.decision_score_top_radius,
+        }
+    return {
+        "topk": max(1, min(50, int(settings.decision_topk))),
+        "table_max": max(0, min(50, int(settings.decision_table_max))),
+        "table_limit": None,
+        "score_gap_ratio": settings.decision_score_gap_ratio,
+        "score_min_step": settings.decision_score_min_step,
+        "score_top_radius": settings.decision_score_top_radius,
+    }
+
+
 def _merge_candidates(
     hyde_tables: List[TableCandidate],
     question_tables: List[TableCandidate],
     *,
-    top_k: int,
+    max_k: int,
 ) -> List[TableCandidate]:
-    """K-AIR `_merge_topk` 와 동일한 가중 점수 합산 (hyde_weight / question_weight 그대로)."""
+    """K-AIR `_merge_topk` 가중 합산. max_k 는 상한(최소 개수 아님)."""
     wh = settings.hyde_weight
     wq = settings.question_weight
     bucket: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     def _add(rows: List[TableCandidate], weight: float) -> None:
         for t in rows:
-            key = (t.schema or "", t.name or "")
+            key = _table_identity_key(t)
             cur = bucket.get(key)
             if cur is None:
                 bucket[key] = {"obj": t, "score": float(t.score) * weight}
@@ -77,7 +125,7 @@ def _merge_candidates(
         _add(hyde_tables, wh)
     _add(question_tables, wq if hyde_tables else 1.0)
 
-    sorted_keys = sorted(bucket.keys(), key=lambda k: bucket[k]["score"], reverse=True)[:top_k]
+    sorted_keys = sorted(bucket.keys(), key=lambda k: bucket[k]["score"], reverse=True)[:max_k]
     out: List[TableCandidate] = []
     for k in sorted_keys:
         t = bucket[k]["obj"]
@@ -87,27 +135,152 @@ def _merge_candidates(
                 name=t.name,
                 description=t.description,
                 analyzed_description=t.analyzed_description,
+                datasource=t.datasource,
+                subject_area=t.subject_area,
                 score=float(bucket[k]["score"]),
             )
         )
     return out
 
 
-async def _resolve_db_label(driver: AsyncDriver, *, schema_name: str) -> str:
-    """R-3: Schema.db || DataSource.engine || META_DB_LABEL."""
-    if not schema_name:
+def _prune_by_score_gap(
+    candidates: List[TableCandidate],
+    *,
+    max_k: int,
+    gap_ratio: float,
+    min_step: float = 0.0,
+    top_radius: float = 0.0,
+) -> List[TableCandidate]:
+    """상위 1개 유지. ratio/step/radius 로 테이블 수 축소."""
+    if not candidates:
+        return []
+    ordered = sorted(candidates, key=lambda t: float(t.score), reverse=True)
+    top_score = float(ordered[0].score)
+    if top_score <= 0:
+        return ordered[:1]
+    ratio = max(0.0, min(1.0, float(gap_ratio)))
+    cutoff = top_score * ratio
+    if top_radius > 0:
+        cutoff = max(cutoff, top_score - float(top_radius))
+    step = max(0.0, float(min_step))
+    out: List[TableCandidate] = []
+    for t in ordered[:max(1, int(max_k))]:
+        score = float(t.score)
+        if not out:
+            out.append(t)
+            continue
+        if score < cutoff:
+            break
+        if step > 0 and (float(out[-1].score) - score) > step:
+            break
+        out.append(t)
+    return out
+
+
+def _select_final_candidates(
+    pool: List[TableCandidate],
+    pruned: List[TableCandidate],
+    *,
+    bridges_all: List[Dict[str, Any]],
+    join_expand: bool,
+    expand_via: tuple[str, ...],
+    max_k: int,
+    gap_ratio: float,
+    min_step: float,
+    top_radius: float,
+) -> List[TableCandidate]:
+    """score-pruned 유지. join_expand 시 앵커(1위) FK 1-hop만 추가 후 재-prune."""
+    if not pruned:
+        return []
+    if not join_expand or not bridges_all:
+        return _prune_by_score_gap(
+            pruned, max_k=max_k, gap_ratio=gap_ratio, min_step=min_step, top_radius=top_radius
+        )
+
+    pool_by_key = {
+        _table_fqn_key(t.schema or "", t.name or ""): t for t in pool
+    }
+    anchor_key = _table_fqn_key(pruned[0].schema or "", pruned[0].name or "")
+    allowed_via = {v.strip().lower() for v in expand_via if v.strip()}
+
+    selected_keys = {_table_fqn_key(t.schema or "", t.name or "") for t in pruned}
+    for b in bridges_all:
+        bridge = b.get("bridge")
+        via = (getattr(bridge, "via", None) or "").strip().lower()
+        if via not in allowed_via:
+            continue
+        fk, tk = b.get("from_key") or "", b.get("to_key") or ""
+        if anchor_key == fk and tk in pool_by_key:
+            selected_keys.add(tk)
+        elif anchor_key == tk and fk in pool_by_key:
+            selected_keys.add(fk)
+
+    expanded = [pool_by_key[k] for k in selected_keys if k in pool_by_key]
+    expanded.sort(key=lambda t: float(t.score), reverse=True)
+    return _prune_by_score_gap(
+        expanded, max_k=max_k, gap_ratio=gap_ratio, min_step=min_step, top_radius=top_radius
+    )
+
+
+async def _resolve_db_label(
+    driver: AsyncDriver,
+    *,
+    schema_name: str,
+    table_name: str,
+    datasource: str = "",
+) -> str:
+    """R-3: Schema.db || DataSource.engine || META_DB_LABEL.
+
+    KAIR SoT 정합을 위해 table(schema+name, optional datasource) 스코프로 1차 해석하고,
+    실패 시 schema 스코프 폴백을 수행한다.
+    """
+    if not schema_name or not table_name:
         return settings.meta_db_label
-    cypher = """
-    MATCH (s:Schema) WHERE toLower(s.name) = toLower($schema_name)
-    OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s)
-    RETURN COALESCE(s.db, ds.engine, $default_db) AS db LIMIT 1
+
+    cypher_by_table = f"""
+    MATCH (t:Table)
+    WHERE toLower(COALESCE(t.schema, '')) = toLower($schema_name)
+      AND toLower(COALESCE(t.name, '')) = toLower($table_name)
+      AND ($ds_filter = '' OR toLower(COALESCE(t.datasource, '')) = toLower($ds_filter))
+    OPTIONAL MATCH (t)-[:{REL_TABLE_SCHEMA}]-(s:Schema)
+    OPTIONAL MATCH (src:DataSource)-[:{REL_SCHEMA_DATASOURCE}]->(s)
+    RETURN COALESCE(s.db, src.engine, $default_db) AS db
+    LIMIT 1
     """
     async with driver.session() as sess:
-        result = await sess.run(cypher, schema_name=schema_name, default_db=settings.meta_db_label)
+        result = await sess.run(
+            cypher_by_table,
+            schema_name=schema_name,
+            table_name=table_name,
+            ds_filter=datasource or "",
+            default_db=settings.meta_db_label,
+        )
+        row = await result.single()
+    if row and row["db"]:
+        return str(row["db"])
+
+    cypher_by_schema = f"""
+    MATCH (s:Schema) WHERE toLower(s.name) = toLower($schema_name)
+    OPTIONAL MATCH (src:DataSource)-[:{REL_SCHEMA_DATASOURCE}]->(s)
+    RETURN COALESCE(s.db, src.engine, $default_db) AS db LIMIT 1
+    """
+    async with driver.session() as sess:
+        result = await sess.run(
+            cypher_by_schema,
+            schema_name=schema_name,
+            default_db=settings.meta_db_label,
+        )
         row = await result.single()
     if row and row["db"]:
         return str(row["db"])
     return settings.meta_db_label
+
+
+def _candidate_subject_area(t: TableCandidate) -> str:
+    area = (t.subject_area or "").strip().lower()
+    if area in {"agg", "raw", "code", "hist", "master", "link"}:
+        return area
+    return sa.classify(t.schema or "", t.name or "")
 
 
 async def _attach_matched_columns(
@@ -165,6 +338,8 @@ async def _decide_keyword(driver: AsyncDriver, *, query: str) -> List[TableCandi
     WHERE size(hits) > 0
     RETURN t.schema AS schema, t.name AS name, t.description AS description,
            t.analyzed_description AS analyzed_description,
+           COALESCE(t.datasource,'') AS datasource,
+           COALESCE(t.subject_area,'') AS subject_area,
            toFloat(size(hits)) / toFloat($n) AS score
     ORDER BY score DESC, name ASC
     LIMIT $k
@@ -183,6 +358,8 @@ async def _decide_keyword(driver: AsyncDriver, *, query: str) -> List[TableCandi
             name=str(r.get("name") or ""),
             description=str(r.get("description") or ""),
             analyzed_description=str(r.get("analyzed_description") or ""),
+            datasource=str(r.get("datasource") or ""),
+            subject_area=str(r.get("subject_area") or ""),
             score=float(r.get("score") or 0.0),
         )
         for r in rows
@@ -267,10 +444,12 @@ async def decide(
     query: str,
     include_matched_columns: bool = True,
     column_top_m: Optional[int] = None,
+    table_limit: Optional[int] = None,
     auto_resolve_entities: bool = True,
 ) -> DecisionResponse:
     """v0.6 RC `/data_decision` 메인."""
     debug: Dict[str, Any] = {"mode": None}
+    policy = _resolve_decision_policy(table_limit=table_limit)
     effective_col_m = column_top_m if column_top_m is not None else settings.decision_column_top_m
     effective_col_m = max(1, min(50, int(effective_col_m)))
 
@@ -317,14 +496,14 @@ async def decide(
             tables_hyde, mode_hyde = await search_tables_by_vector(
                 sess,
                 embedding=hyde_embedding,
-                k=settings.decision_topk,
+                k=policy["topk"],
                 schema_filter=schema_filter,
             )
         if question_embedding is not None:
             tables_question, mode_question = await search_tables_by_vector(
                 sess,
                 embedding=question_embedding,
-                k=settings.decision_topk,
+                k=policy["topk"],
                 schema_filter=schema_filter,
             )
     debug["hyde_results"] = len(tables_hyde)
@@ -332,88 +511,71 @@ async def decide(
     debug["hyde_search_mode"] = mode_hyde
     debug["question_search_mode"] = mode_question
 
-    merged = _merge_candidates(tables_hyde, tables_question, top_k=settings.decision_topk)
-    debug["merged"] = len(merged)
+    merged_full = _merge_candidates(tables_hyde, tables_question, max_k=policy["topk"])
+    pruned = _prune_by_score_gap(
+        merged_full,
+        max_k=policy["topk"],
+        gap_ratio=policy["score_gap_ratio"],
+        min_step=policy["score_min_step"],
+        top_radius=policy["score_top_radius"],
+    )
+    merged = pruned
+    debug["merged_full"] = len(merged_full)
+    debug["merged_pruned"] = len(pruned)
 
     # 폴백: HyDE/임베딩 실패 또는 vector 검색 0 hit → keyword(Cypher CONTAINS)
     if not merged:
-        merged = await _decide_keyword(driver, query=query)
+        merged_full = await _decide_keyword(driver, query=query)
+        pruned = _prune_by_score_gap(
+            merged_full,
+            max_k=policy["topk"],
+            gap_ratio=policy["score_gap_ratio"],
+            min_step=policy["score_min_step"],
+            top_radius=policy["score_top_radius"],
+        )
+        merged = pruned
         debug["fallback"] = "keyword_cypher"
-        debug["merged"] = len(merged)
+        debug["merged_full"] = len(merged_full)
+        debug["merged_pruned"] = len(pruned)
 
-    # 4) candidates 조립 (db 폴백 + subject_area 분류)
-    cands: List[DecisionCandidate] = []
-    for t in merged:
-        schema_name = t.schema or ""
-        area = sa.classify(schema_name, t.name or "")
-        db_label = await _resolve_db_label(driver, schema_name=schema_name)
-        cands.append(
-            DecisionCandidate(
-                db=db_label,
-                schema_name=schema_name,
-                table_name=t.name or "",
-                score=float(t.score),
-                source="vector",
-                target_class=_subject_area_to_target_class(area),
-                subject_area=area,
-                matched_columns=[],
-            )
-        )
+    debug["merged"] = len(merged)
 
-    # 5) matched_columns 채움
-    columns_mode = "skipped"
-    if include_matched_columns and settings.decision_match_columns and cands:
-        keywords = _extract_keywords(hyde_out, query)
-        col_map = await _attach_matched_columns(
-            driver,
-            merged,
-            keywords=keywords,
-            top_m=effective_col_m,
-        )
-        for c in cands:
-            key = (c.schema_name, c.table_name)
-            c.matched_columns = col_map.get(key, [])
-        columns_mode = "neo4j_anchor"
-    elif not include_matched_columns:
-        columns_mode = "disabled_request"
-    elif not settings.decision_match_columns:
-        columns_mode = "disabled_env"
+    # join graph 는 검색 풀(merged_full) 기준 — FK 확장 후보 탐색
+    join_pool = merged_full if merged_full else merged
 
-    # 6) target / secondary / confidence
-    target, conf = _classify_target(cands)
-    secondary = _collect_secondary(target, cands)
-
-    # 7) Union-Find 기반 join_groups 조립 (3단 fallback)
+    # 4) candidates 조립 전 — join 기반 최종 테이블 집합 결정
     join_groups = []
     join_groups_mode = "empty"
+    final_merged = merged
 
     from ..schemas import JoinBridge, TableKey, JoinGroup
     from collections import defaultdict
 
     cand_map = {}
     table_fqns = []
-    for c in cands:
-        s = (c.schema_name or "").strip()
-        n = (c.table_name or "").strip()
+    for t in join_pool:
+        s = (t.schema or "").strip()
+        n = (t.name or "").strip()
         if n:
             fqn = f"{s}.{n}" if s else n
-            cand_map[fqn.lower()] = c
+            cand_map[fqn.lower()] = t
             table_fqns.append(fqn)
+
+    parent: Dict[str, str] = {}
+    bridges_all: List[Dict[str, Any]] = []
+
+    def find(x: str) -> str:
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x: str, y: str) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
 
     if table_fqns:
         parent = {k: k for k in cand_map.keys()}
-
-        def find(x):
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
-
-        def union(x, y):
-            rx, ry = find(x), find(y)
-            if rx != ry:
-                parent[rx] = ry
-
-        bridges_all = []
 
         async with driver.session() as sess:
             fk_relations = await fetch_fk_relationships(
@@ -539,11 +701,88 @@ async def decide(
                         join_groups_mode, "convention"
                     )
 
+        final_merged = _select_final_candidates(
+            join_pool,
+            merged,
+            bridges_all=bridges_all,
+            join_expand=settings.decision_join_expand,
+            expand_via=settings.decision_join_expand_via,
+            max_k=policy["topk"],
+            gap_ratio=policy["score_gap_ratio"],
+            min_step=policy["score_min_step"],
+            top_radius=policy["score_top_radius"],
+        )
+        if policy["table_max"] > 0:
+            final_merged = final_merged[: policy["table_max"]]
+        debug["merged_final"] = len(final_merged)
+        debug["join_expand"] = settings.decision_join_expand
+        debug["join_expand_via"] = list(settings.decision_join_expand_via)
+
+    cands: List[DecisionCandidate] = []
+    for t in final_merged:
+        schema_name = t.schema or ""
+        area = _candidate_subject_area(t)
+        db_label = await _resolve_db_label(
+            driver,
+            schema_name=schema_name,
+            table_name=t.name or "",
+            datasource=t.datasource or "",
+        )
+        table_comment, description = _table_description_text(t)
+        cands.append(
+            DecisionCandidate(
+                db=db_label,
+                schema_name=schema_name,
+                table_name=t.name or "",
+                score=float(t.score),
+                source="vector",
+                target_class=_subject_area_to_target_class(area),
+                subject_area=area,
+                matched_columns=[],
+                table_comment=table_comment,
+                description=description,
+            )
+        )
+
+    # cand_map 을 최종 후보 기준으로 재구성 (join_groups 용)
+    cand_map = {}
+    for c in cands:
+        s = (c.schema_name or "").strip()
+        n = (c.table_name or "").strip()
+        if n:
+            fqn = f"{s}.{n}" if s else n
+            cand_map[fqn.lower()] = c
+
+    # 5) matched_columns 채움
+    columns_mode = "skipped"
+    if include_matched_columns and settings.decision_match_columns and cands:
+        keywords = _extract_keywords(hyde_out, query)
+        col_map = await _attach_matched_columns(
+            driver,
+            final_merged,
+            keywords=keywords,
+            top_m=effective_col_m,
+        )
+        for c in cands:
+            key = (c.schema_name, c.table_name)
+            c.matched_columns = col_map.get(key, [])
+        columns_mode = "neo4j_anchor"
+    elif not include_matched_columns:
+        columns_mode = "disabled_request"
+    elif not settings.decision_match_columns:
+        columns_mode = "disabled_env"
+
+    # 6) target / secondary / confidence
+    target, conf = _classify_target(cands)
+    secondary = _collect_secondary(target, cands)
+
+    # 7) join_groups — 이미 수집한 bridges_all / cand_map 재사용
+    if table_fqns and bridges_all:
         groups_dict = defaultdict(list)
         for fqn_key in cand_map.keys():
             groups_dict[find(fqn_key)].append(cand_map[fqn_key])
 
-        for root, members in groups_dict.items():
+        for _root, members in groups_dict.items():
             if len(members) < 2:
                 continue
 
@@ -598,7 +837,17 @@ async def decide(
     threshold_used = {
         "analytic": settings.decision_analytic_threshold,
         "source": settings.decision_source_threshold,
-        "topk": settings.decision_topk,
+        "topk": policy["topk"],
+        "table_limit": policy.get("table_limit"),
+        "score_gap_ratio": policy["score_gap_ratio"],
+        "score_min_step": policy["score_min_step"],
+        "score_top_radius": policy["score_top_radius"],
+        "join_expand": settings.decision_join_expand,
+        "join_expand_via": list(settings.decision_join_expand_via),
+        "table_max": policy["table_max"] or None,
+        "merged_full": debug.get("merged_full"),
+        "merged_pruned": debug.get("merged_pruned"),
+        "merged_final": debug.get("merged_final"),
         "column_top_m": effective_col_m,
         "matched_columns_mode": columns_mode,
         "hyde_weight": settings.hyde_weight,

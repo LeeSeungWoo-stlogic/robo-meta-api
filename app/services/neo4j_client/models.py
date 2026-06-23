@@ -19,6 +19,8 @@ class TableCandidate:
     name: str
     description: str
     analyzed_description: str = ""
+    datasource: str = ""
+    subject_area: str = ""
     score: float = 0.0
 
     @property

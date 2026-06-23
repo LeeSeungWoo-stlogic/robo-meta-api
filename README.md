@@ -3,18 +3,18 @@
 Neo4j meta-api **v0.7** — A안 entity resolution (`resolved_entities` 1차 해소).
 
 - Docker 포트: **8100** (v3 8099와 병행)
-- v3 fork 기반, 8 endpoint path 동일
+- v3 fork 기반, v0.7 계약 정렬 (`/meta/ref` + `/meta/fk` alias, `/query` stub 노출)
 
 ## v0.7 추가
 
 - `POST /data_decision` 응답: `resolved_entities`, `suggested_probes`, `resolution_status`
 - FK 1단: `fkTo` + `FK_TO_COLUMN`
-- entity resolution: Neo4j master/code 컬럼 → PG `db_probe`
+- entity resolution: probe registry + PG `db_probe` 기반 1차 해소
 
 ## Docker 기동
 
 ```bash
-# 의존: robo-postgres(5434), robo-neo4j(7688)
+# 의존: robo-postgres(5432), robo-neo4j(7687)
 docker start robo-postgres robo-neo4j
 cp .env.rwis-test.example .env   # OPENAI_API_KEY 입력
 docker compose up -d --build
@@ -45,5 +45,5 @@ curl -s -X POST http://127.0.0.1:8100/data_decision \
 ## smoke
 
 ```bash
-python tests/smoke_v07.py
+python tests/smoke_data_decision_only.py
 ```

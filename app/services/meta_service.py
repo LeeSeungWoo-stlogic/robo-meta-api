@@ -13,6 +13,12 @@ from typing import Any, Dict, List, Optional
 from neo4j import AsyncDriver
 
 from ..config import settings
+from .kair_graph_adapter import (
+    REL_COLUMN_FK,
+    REL_SCHEMA_DATASOURCE,
+    REL_TABLE_COLUMN,
+    REL_TABLE_SCHEMA,
+)
 from ..schemas import (
     BatchItem,
     ColumnConstraint,
@@ -52,9 +58,9 @@ async def list_batch(driver: AsyncDriver, *, batch_date: Optional[str]) -> List[
     batch_date 는 본 단계에서 무시 — 변경/추가 메타가 아직 적재되지 않았으므로 항상 전체.
     추후 `Table.updated_at` 적재 후 필터 추가 가능.
     """
-    cypher = """
-    MATCH (t:Table)-[:belongsTo|HAS_TABLE]-(s:Schema)
-    OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s)
+    cypher = f"""
+    MATCH (t:Table)-[:{REL_TABLE_SCHEMA}]-(s:Schema)
+    OPTIONAL MATCH (ds:DataSource)-[:{REL_SCHEMA_DATASOURCE}]->(s)
     WHERE COALESCE(t.text_to_sql_db_exists, true) = true
     RETURN COALESCE(s.db, ds.engine, $default_db) AS db,
            s.name AS schema_name,
@@ -88,32 +94,32 @@ async def get_table(
 
     db 가 주어지면 Schema.db 와 일치하는 행을 우선 선택, 없으면 schema+name 만으로 매칭.
     """
-    cypher = """
-    MATCH (t:Table)-[:belongsTo|HAS_TABLE]-(s:Schema)
+    cypher = f"""
+    MATCH (t:Table)-[:{REL_TABLE_SCHEMA}]-(s:Schema)
     WHERE toLower(s.name) = toLower($schema_name)
       AND toLower(t.name) = toLower($table_name)
       AND COALESCE(t.text_to_sql_db_exists, true) = true
-    OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s)
+    OPTIONAL MATCH (ds:DataSource)-[:{REL_SCHEMA_DATASOURCE}]->(s)
     WITH t, s, ds,
          COALESCE(s.db, ds.engine, $default_db) AS db_label
     WHERE $db_filter IS NULL OR toLower(db_label) = toLower($db_filter)
-    OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c:Column)
+    OPTIONAL MATCH (t)-[:{REL_TABLE_COLUMN}]->(c:Column)
     WITH t, s, ds, db_label, collect(DISTINCT c) AS cols
-    OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c1:Column)-[fk:fkTo]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
-    OPTIONAL MATCH (t2)-[:belongsTo|HAS_TABLE]-(s2:Schema)
+    OPTIONAL MATCH (t)-[:{REL_TABLE_COLUMN}]->(c1:Column)-[fk:{REL_COLUMN_FK}]->(c2:Column)<-[:{REL_TABLE_COLUMN}]-(t2:Table)
+    OPTIONAL MATCH (t2)-[:{REL_TABLE_SCHEMA}]-(s2:Schema)
     WITH t, s, ds, db_label, cols,
-         collect(DISTINCT CASE WHEN c1 IS NULL THEN NULL ELSE {
+         collect(DISTINCT CASE WHEN c1 IS NULL THEN NULL ELSE {{
              from_column: c1.name,
              ref_schema_name: s2.name,
              ref_table_name: t2.name,
              ref_column_name: c2.name
-         } END) AS fks_raw
+         }} END) AS fks_raw
     RETURN db_label AS db,
            s.name AS schema_name,
-           s {.*} AS schema_props,
-           ds {.*} AS ds_props,
-           t {.*} AS table_props,
-           [c IN cols WHERE c IS NOT NULL | c {.*}] AS columns,
+           s {{.*}} AS schema_props,
+           ds {{.*}} AS ds_props,
+           t {{.*}} AS table_props,
+           [c IN cols WHERE c IS NOT NULL | c {{.*}}] AS columns,
            [fk IN fks_raw WHERE fk IS NOT NULL] AS fks
     LIMIT 1
     """
@@ -200,17 +206,17 @@ async def get_column(
     column_name: str,
 ) -> Optional[ColumnMeta]:
     """단일 컬럼 메타. PK/FK constraint 도 함께 채움."""
-    cypher = """
-    MATCH (t:Table)-[:belongsTo|HAS_TABLE]-(s:Schema)
+    cypher = f"""
+    MATCH (t:Table)-[:{REL_TABLE_SCHEMA}]-(s:Schema)
     WHERE toLower(s.name) = toLower($schema_name)
       AND toLower(t.name) = toLower($table_name)
-    OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s)
+    OPTIONAL MATCH (ds:DataSource)-[:{REL_SCHEMA_DATASOURCE}]->(s)
     WITH t, s, ds, COALESCE(s.db, ds.engine, $default_db) AS db_label
     WHERE $db_filter IS NULL OR toLower(db_label) = toLower($db_filter)
-    MATCH (t)-[:HAS_COLUMN]->(c:Column)
+    MATCH (t)-[:{REL_TABLE_COLUMN}]->(c:Column)
     WHERE toLower(c.name) = toLower($column_name)
-    OPTIONAL MATCH (c)-[:fkTo]->(c2:Column)
-    RETURN c {.*} AS col, c2 IS NOT NULL AS is_fk
+    OPTIONAL MATCH (c)-[:{REL_COLUMN_FK}]->(c2:Column)
+    RETURN c {{.*}} AS col, c2 IS NOT NULL AS is_fk
     LIMIT 1
     """
     async with driver.session() as sess:
@@ -255,15 +261,15 @@ async def get_refs(
     schema_name: str,
     table_name: str,
 ) -> List[RefMeta]:
-    cypher = """
-    MATCH (t1:Table)-[:belongsTo|HAS_TABLE]-(s1:Schema)
+    cypher = f"""
+    MATCH (t1:Table)-[:{REL_TABLE_SCHEMA}]-(s1:Schema)
     WHERE toLower(s1.name) = toLower($schema_name)
       AND toLower(t1.name) = toLower($table_name)
-    OPTIONAL MATCH (ds:DataSource)-[:HAS_SCHEMA]->(s1)
+    OPTIONAL MATCH (ds:DataSource)-[:{REL_SCHEMA_DATASOURCE}]->(s1)
     WITH t1, s1, ds, COALESCE(s1.db, ds.engine, $default_db) AS db_label
     WHERE $db_filter IS NULL OR toLower(db_label) = toLower($db_filter)
-    MATCH (t1)-[:HAS_COLUMN]->(c1:Column)-[:fkTo]->(c2:Column)<-[:HAS_COLUMN]-(t2:Table)
-    MATCH (t2)-[:belongsTo|HAS_TABLE]-(s2:Schema)
+    MATCH (t1)-[:{REL_TABLE_COLUMN}]->(c1:Column)-[:{REL_COLUMN_FK}]->(c2:Column)<-[:{REL_TABLE_COLUMN}]-(t2:Table)
+    MATCH (t2)-[:{REL_TABLE_SCHEMA}]-(s2:Schema)
     RETURN c1.name AS column_name,
            s2.name AS ref_schema_name,
            t2.name AS ref_table_name,

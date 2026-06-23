@@ -48,7 +48,7 @@
 | 버전 헤더 | `X-Meta-Version: 0.7` (모든 응답) |
 | 빈 값 보장 | v0.6과 동일 — 미적재 시 `[]`, `null`, `"unknown"` |
 
-### Endpoint 목록 (8 + health)
+### Endpoint 목록 (9 + health)
 
 | Method | Path | meta_version | 비고 |
 |--------|------|:------------:|------|
@@ -57,6 +57,7 @@
 | POST | `/meta/batch` | 0.7 | v0.6 동일 |
 | POST | `/meta/table` | 0.7 | v0.6 동일 |
 | POST | `/meta/column` | 0.7 | v0.6 동일 |
+| POST | `/meta/ref` | 0.7 | v0.6 동일 (기본 경로) |
 | POST | `/meta/fk` | 0.7 | v0.6 동일 |
 | POST | `/query/execute` | 0.7 | deprecated, v4에서 유지 |
 | POST | `/query` | 0.7 | stub (`not_implemented`) |
@@ -251,7 +252,8 @@ Request/Response body는 **v0.6 초안 §3과 동일**. `meta_version`만 `"0.7"
 | `/meta/batch` | `{ batch_date?: string }` | `{ meta_version, items[], total }` |
 | `/meta/table` | `{ db?, schema_name, table_name }` | `MetaTableResponse` |
 | `/meta/column` | `{ db?, schema_name, table_name, column_name }` | `{ meta_version, column }` |
-| `/meta/fk` | `{ db?, schema_name, table_name }` | `{ meta_version, fk[] }` |
+| `/meta/ref` | `{ db?, schema_name, table_name }` | `{ meta_version, fk[] }` |
+| `/meta/fk` | `{ db?, schema_name, table_name }` | `{ meta_version, fk[] }` (`/meta/ref` alias) |
 
 ---
 

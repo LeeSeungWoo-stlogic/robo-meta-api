@@ -99,3 +99,9 @@ async def meta_ref(req: TableKey) -> MetaRefResponse:
         table_name=req.table_name,
     )
     return MetaRefResponse(fk=fks)
+
+
+@router.post("/meta/fk", response_model=MetaRefResponse)
+async def meta_fk(req: TableKey) -> MetaRefResponse:
+    """v0.7 문서 호환 alias. 내부 동작은 /meta/ref 와 동일."""
+    return await meta_ref(req)
