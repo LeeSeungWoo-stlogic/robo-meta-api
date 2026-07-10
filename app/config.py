@@ -65,9 +65,22 @@ class Settings:
     openai_llm_model: str = _env("OPENAI_LLM_MODEL", "gpt-4o-mini")
     openai_embedding_model: str = _env("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     openai_embedding_dim: int = int(_env("OPENAI_EMBEDDING_DIM", "1536"))
+    openai_base_url: str = _env("OPENAI_BASE_URL", "")
+    openai_embedding_base_url: str = _env("OPENAI_EMBEDDING_BASE_URL", "")
 
     # --- decision 정책 (K-AIR 와 동일 키) ---
     decision_topk: int = int(_env("DECISION_VECTOR_TOPK", "10"))
+    decision_score_gap_ratio: float = float(_env("DECISION_SCORE_GAP_RATIO", "0.85"))
+    decision_score_min_step: float = float(_env("DECISION_SCORE_MIN_STEP", "0.012"))
+    decision_score_top_radius: float = float(_env("DECISION_SCORE_TOP_RADIUS", "0.01"))
+    decision_join_expand: bool = _env("DECISION_JOIN_EXPAND", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+    )
+    decision_join_expand_via: tuple[str, ...] = _csv_list("DECISION_JOIN_EXPAND_VIA", "fk")
+    decision_table_max: int = int(_env("DECISION_TABLE_MAX", "0"))
     decision_column_top_m: int = int(_env("DECISION_COLUMN_TOP_M", "10"))
     decision_match_columns: bool = _env("DECISION_MATCH_COLUMNS", "1").strip().lower() in (
         "1",
@@ -118,6 +131,7 @@ class Settings:
     entity_resolution_enabled: bool = _env("ENTITY_RESOLUTION_ENABLED", "1").strip().lower() in (
         "1", "true", "yes", "on",
     )
+    entity_probe_datasource: str = _env("ENTITY_PROBE_DATASOURCE", "rwis")
 
     # --- meta_db 라벨 폴백 (R-3) ---
     meta_db_label: str = _env("META_DB_LABEL", "kwater_prod")

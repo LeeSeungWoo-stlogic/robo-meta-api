@@ -1,0 +1,51 @@
+# RWIS 코드성 사전 probe registry (A안)
+# 출처: 05_graphdb_meta_code_seed.sql — code 스키마 7테이블 / text_search high_value 컬럼
+# 물리 PG: SOURCE_PG_SCHEMA (기본 RWIS), 컬럼명은 PG 실제 대소문자(대문자) 기준
+
+datasource: rwis
+pg_schema: RWIS
+neo4j_schema: rwis
+
+probes:
+  - table: RDITAG_TB
+    entity_type: tag
+    code_column: TAGSN
+    label_columns:
+      - TAG_DESC
+      - TAG_ALIAS
+
+  - table: RDISAUP_TB
+    entity_type: facility
+    code_column: SUJ_CODE
+    label_columns:
+      - SUJ_NAME
+
+  - table: RDIBONBU_TB
+    entity_type: region
+    code_column: BNB_CODE
+    label_columns:
+      - BNB_NAME
+
+  - table: RDIBYUN_TB
+    entity_type: metric
+    code_column: BR_CODE
+    label_columns:
+      - BR_NAME
+
+  - table: RDITAGUNIT_TB
+    entity_type: unit
+    code_column: TAG_UNIT
+    label_columns:
+      - UNIT_DESC
+
+  - table: RDIKEPCOTAG_TB
+    entity_type: kepco_tag
+    code_column: TAGSN
+    label_columns:
+      - ICUS
+
+  - table: RDIKEPCOTYPE_TB
+    entity_type: kepco_metric
+    code_column: DATA_TYPE
+    label_columns:
+      - DATA_NAME

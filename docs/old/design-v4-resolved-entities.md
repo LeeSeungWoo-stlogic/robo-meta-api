@@ -23,6 +23,9 @@
 
 K-AIR-meta-ingest Neo4j pipeline: Table.subject_area, text_to_sql_vector, fkTo alias.
 
+RWIS code probe registry: `app/rules/rwis_code_probe.yaml` (7 코드 테이블).  
+상세: [entity_resolution_code_probe_report.md](./entity_resolution_code_probe_report.md)
+
 ## v3 대비
 
 | | v3 | v4 |

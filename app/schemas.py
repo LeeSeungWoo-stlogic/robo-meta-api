@@ -171,6 +171,15 @@ class DecisionRequest(BaseModel):
         le=50,
         description="테이블별 컬럼 벡터 매칭 상한. 미지정 시 서버 DECISION_COLUMN_TOP_M",
     )
+    table_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description=(
+            "테이블 후보 상한(검색 top-k + 최종 candidates cap 통합). "
+            "미지정 시 검색은 DECISION_VECTOR_TOPK, 최종 cap은 DECISION_TABLE_MAX(0=무제한)"
+        ),
+    )
     auto_resolve_entities: bool = Field(
         default=True,
         description="True면 1차 응답에 resolved_entities 자동 해소 시도 (v0.7 A안)",
@@ -216,6 +225,35 @@ class DecisionCandidate(TableKey):
     target_class: TargetClass = "unknown"
     subject_area: SubjectArea = "unknown"
     matched_columns: List[MatchedColumn] = Field(default_factory=list)
+    table_comment: Optional[str] = Field(
+        default=None,
+        description="원본 카탈로그 테이블 설명 (Neo4j Table.description)",
+        examples=["01분 원시"],
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="LLM 증강 설명 우선, 없으면 table_comment (Neo4j analyzed_description → description)",
+        examples=["시간별 탁도·유량 등 계측 fact 테이블. tagsn으로 태그 마스터와 조인."],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "db": "rwis",
+                    "schema_name": "rwis",
+                    "table_name": "fct_measure_hour",
+                    "score": 0.82,
+                    "source": "vector",
+                    "target_class": "unknown",
+                    "subject_area": "unknown",
+                    "matched_columns": [],
+                    "table_comment": "시간별 집계 fact",
+                    "description": "시간별 계측값 fact. suj_code·tagsn으로 정수장·태그와 조인.",
+                }
+            ]
+        }
+    }
 
 
 class JoinBridge(BaseModel):
@@ -250,7 +288,17 @@ class ResolvedValue(BaseModel):
 
 class ResolvedEntity(BaseModel):
     mention: str
-    entity_type: Literal["facility", "tag", "code", "unknown"] = "unknown"
+    entity_type: Literal[
+        "facility",
+        "tag",
+        "code",
+        "metric",
+        "unit",
+        "region",
+        "kepco_tag",
+        "kepco_metric",
+        "unknown",
+    ] = "unknown"
     db: Optional[str] = None
     schema_name: Optional[str] = None
     table: str

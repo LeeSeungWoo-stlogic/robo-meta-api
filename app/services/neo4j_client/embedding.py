@@ -15,7 +15,11 @@ class EmbeddingClient:
     """OpenAI 임베딩 생성 클라이언트 (K-AIR 원본 구조)"""
 
     def __init__(self, client: AsyncOpenAI | None = None):
-        self.client = client or AsyncOpenAI(api_key=settings.openai_api_key)
+        embed_base = settings.openai_embedding_base_url or settings.openai_base_url
+        self.client = client or AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            base_url=embed_base or None,
+        )
         self.model = settings.embedding_model
 
     async def embed_text(self, text: str) -> List[float]:

@@ -1,9 +1,6 @@
-# robo-meta-api v4 — entity resolution (A안) + join_groups 3단 fallback
+# robo-meta-api — 로컬 Docker Desktop + robo-neo4j / robo-postgres
 #
-# 외부 의존 컨테이너 (별도 기동 필수):
-#   - robo-neo4j      (호스트 bolt 7688)
-#   - robo-postgres   (호스트 PG 5434, DB rwis / schema rwis)
-#
+# 선행: robo-neo4j (bolt :7687), robo-postgres (:5432, DB rwis)
 # 기동: docker compose up -d --build
 # 헬스: curl http://127.0.0.1:8100/health
 
@@ -22,19 +19,25 @@ services:
     env_file:
       - .env
     environment:
+      API_HOST: "0.0.0.0"
       API_PORT: "8100"
-      NEO4J_URI: "bolt://host.docker.internal:7688"
+      NEO4J_URI: "bolt://host.docker.internal:7687"
       SOURCE_PG_HOST: "host.docker.internal"
-      SOURCE_PG_PORT: "5434"
-      SOURCE_PG_SCHEMA: "rwis"
-      # entity resolution db_probe (neo4j_client — SOURCE_PG 와 동일)
+      SOURCE_PG_PORT: "5432"
+      SOURCE_PG_SCHEMA: "RWIS"
       PG_HOST: "host.docker.internal"
-      PG_PORT: "5434"
+      PG_PORT: "5432"
       PG_DATABASE: "rwis"
-      PG_SCHEMAS: "rwis"
+      PG_USER: "postgres"
+      PG_PASSWORD: "postgres123"
+      PG_SCHEMAS: "RWIS,mart"
+      DECISION_JOIN_EXPAND_VIA: "fk"
       META_DB_LABEL: "rwis"
-      DECISION_SCHEMA_ALLOWLIST: "rwis"
+      DECISION_VECTOR_TOPK: "10"
+      DECISION_SCORE_GAP_RATIO: "0.85"
+      DECISION_JOIN_EXPAND: "1"
       ENTITY_RESOLUTION_ENABLED: "1"
+      ENTITY_PROBE_DATASOURCE: "rwis"
       JOIN_ONTOLOGY_ENABLED: "1"
       JOIN_CONVENTION_ENABLED: "1"
       JOIN_CONVENTION_MIN_COL_LEN: "4"

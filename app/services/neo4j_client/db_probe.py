@@ -5,6 +5,7 @@ MindsDB 경로 제거, PostgreSQL 전용으로 경량화.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -30,8 +31,11 @@ async def get_pg_pool() -> Optional[asyncpg.Pool]:
         schemas_str = ", ".join(schemas)
 
         async def _init(conn: asyncpg.Connection) -> None:
-            if schemas_str:
-                await conn.execute(f"SET search_path TO {schemas_str}")
+            if schemas:
+                quoted = ", ".join(
+                    f'"{s.replace(chr(34), "")}"' for s in schemas
+                )
+                await conn.execute(f"SET search_path TO {quoted}")
 
         _pool = await asyncpg.create_pool(
             host=settings.pg_host,
@@ -64,6 +68,28 @@ def _safe_ident(part: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "", str(part or ""))
 
 
+def _qualified_table_ident(table_name: str) -> str:
+    """search_path 비의존 — RWIS/mart 스키마 명시."""
+    table_id = _safe_ident(table_name)
+    if not table_id:
+        return ""
+    if table_name.lower().startswith("fct_"):
+        schema_id = "mart"
+    else:
+        schema_id = _safe_ident(
+            os.getenv("SOURCE_PG_SCHEMA", "RWIS") or "RWIS"
+        ) or "RWIS"
+    return f'"{schema_id}"."{table_id}"'
+
+
+def _space_insensitive_match_sql(col_ident: str, kw_esc: str) -> str:
+    """PG ILIKE — 공백 무시 (예: 탁도 ↔ 탁 도)."""
+    return (
+        f"replace({col_ident}::text, ' ', '') "
+        f"ILIKE '%' || replace('{kw_esc}', ' ', '') || '%'"
+    )
+
+
 async def limited_db_probe(
     *,
     keyword: str,
@@ -90,12 +116,14 @@ async def limited_db_probe(
         return []
 
     kw_esc = kw.replace("'", "''")
-    table_ident = ".".join([f'"{p}"' for p in [schema_id, table_id] if p])
+    table_ident = _qualified_table_ident(column.table_name)
+    if not table_ident:
+        return []
     col_ident = f'"{col_id}"'
     probe_sql = (
         f"SELECT DISTINCT {col_ident} AS value "
         f"FROM {table_ident} "
-        f"WHERE {col_ident} IS NOT NULL AND {col_ident}::text ILIKE '%{kw_esc}%' "
+        f"WHERE {col_ident} IS NOT NULL AND {_space_insensitive_match_sql(col_ident, kw_esc)} "
         f"LIMIT {int(value_limit)}"
     )
 
@@ -127,26 +155,26 @@ async def batch_db_probe(
     """
     Returns: { keyword: { column_fqn: [matched_values] } }
     PostgreSQL 미연결 시 빈 dict 반환.
+
+    키워드별 순차 처리 — 다수 키워드×컬럼 동시 실행 시 PG 풀(5) 포화로
+    probe 타임아웃·누락이 발생하는 것을 방지.
     """
     pool = await get_pg_pool()
     if pool is None:
         return {}
 
     results: Dict[str, Dict[str, List[str]]] = {}
-    sem = asyncio.Semaphore(10)
 
-    async def _one(kw: str, col: ColumnCandidate) -> None:
-        async with sem:
-            vals = await limited_db_probe(keyword=kw, column=col, pool=pool)
-        if vals:
-            results.setdefault(kw, {})[col.column_fqn] = vals
-
-    tasks = []
     for kw in keywords:
+        kw_stripped = (kw or "").strip()
+        if not kw_stripped:
+            continue
+        kw_map: Dict[str, List[str]] = {}
         for col in columns:
-            tasks.append(_one(kw, col))
-
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+            vals = await limited_db_probe(keyword=kw_stripped, column=col, pool=pool)
+            if vals:
+                kw_map[col.column_fqn] = vals
+        if kw_map:
+            results[kw_stripped] = kw_map
 
     return results

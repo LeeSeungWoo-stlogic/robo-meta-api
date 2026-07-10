@@ -208,7 +208,10 @@ def build_hyde_embedding_text(out: HydeSchemaOut, *, max_chars: int = 8000) -> s
 
 class HydeSchemaGenerator:
     def __init__(self) -> None:
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self.client = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url or None,
+        )
         self.model = settings.llm_model
         self.system_prompt = HYDE_SYSTEM_PROMPT
 

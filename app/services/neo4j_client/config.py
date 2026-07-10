@@ -15,18 +15,41 @@ class Settings:
     neo4j_user: str = field(default_factory=lambda: os.getenv("NEO4J_USER", "neo4j"))
     neo4j_password: str = field(default_factory=lambda: os.getenv("NEO4J_PASSWORD", ""))
 
-    # OpenAI
+    # OpenAI (GenOS LLMOps: chat·embedding serving_id 별 base_url 분리)
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
-    embedding_dimension: int = field(default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSION", "1536")))
-    llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", ""))
+    openai_embedding_base_url: str = field(
+        default_factory=lambda: os.getenv("OPENAI_EMBEDDING_BASE_URL", "")
+    )
+    embedding_model: str = field(
+        default_factory=lambda: os.getenv(
+            "OPENAI_EMBEDDING_MODEL",
+            os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        )
+    )
+    embedding_dimension: int = field(
+        default_factory=lambda: int(
+            os.getenv("OPENAI_EMBEDDING_DIM", os.getenv("EMBEDDING_DIMENSION", "1536"))
+        )
+    )
+    llm_model: str = field(
+        default_factory=lambda: os.getenv(
+            "OPENAI_LLM_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini")
+        )
+    )
 
     # PostgreSQL (db_probe용, 선택사항)
     pg_host: str = field(default_factory=lambda: os.getenv("PG_HOST", "127.0.0.1"))
     pg_port: int = field(default_factory=lambda: int(os.getenv("PG_PORT", "5432")))
     pg_database: str = field(default_factory=lambda: os.getenv("PG_DATABASE", "rwis"))
-    pg_user: str = field(default_factory=lambda: os.getenv("PG_USER", "postgres"))
-    pg_password: str = field(default_factory=lambda: os.getenv("PG_PASSWORD", ""))
+    pg_user: str = field(
+        default_factory=lambda: os.getenv("PG_USER") or os.getenv("SOURCE_PG_USER", "postgres")
+    )
+    pg_password: str = field(
+        default_factory=lambda: os.getenv("PG_PASSWORD")
+        or os.getenv("SOURCE_PG_PASS")
+        or os.getenv("SOURCE_PG_PASSWORD", "")
+    )
     pg_schemas: str = field(default_factory=lambda: os.getenv("PG_SCHEMAS", "RWIS"))
 
     # API

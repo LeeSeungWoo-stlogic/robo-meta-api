@@ -18,5 +18,6 @@ async def data_decision(req: DecisionRequest) -> DecisionResponse:
         query=req.query,
         include_matched_columns=req.include_matched_columns,
         column_top_m=req.column_top_m,
+        table_limit=req.table_limit,
         auto_resolve_entities=req.auto_resolve_entities,
     )
