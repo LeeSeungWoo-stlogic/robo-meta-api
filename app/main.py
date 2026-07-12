@@ -22,19 +22,19 @@ import uvicorn
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import settings
-from .db import close_neo4j, close_source_pool, init_neo4j, init_source_pool
-from .routers import decision, meta, query_exec
+from .db import close_metadata_repository, init_metadata_repository
+from .routers import decision, decision_v2, meta, query_exec
+from .runtime_config import get_runtime, init_runtime
 from .schemas import META_VERSION
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_neo4j()
-    await init_source_pool()
+    _ = app
+    init_runtime()
+    await init_metadata_repository()
     yield
-    await close_source_pool()
-    await close_neo4j()
+    await close_metadata_repository()
 
 
 app = FastAPI(
@@ -65,21 +65,25 @@ async def _attach_meta_version_header(request, call_next):
 @app.get("/health")
 async def health(response: Response) -> dict:
     """K-AIR v0.6 RC: meta_version 동봉 + X-Meta-Version 헤더 (미들웨어가 자동 부착)."""
+    runtime = get_runtime()
     return {
         "meta_version": META_VERSION,
         "status": "ok",
-        "neo4j_uri": settings.neo4j_uri,
-        "source_pg": f"{settings.source_pg_host}:{settings.source_pg_port}/{settings.source_pg_db}",
-        "openai_enabled": settings.openai_enabled,
+        "metadata_backend": runtime.metadata_backend,
+        "execution_backend": runtime.execution.backend,
+        "mindsdb_integration": runtime.execution.integration,
     }
 
 
 app.include_router(decision.router)
 app.include_router(meta.router)
 app.include_router(query_exec.router)
+# /v2/data_decision — app.state.v2_deps 배선 시 활성화 (미구성 시 503, v1 무영향)
+app.include_router(decision_v2.router)
 
 
 def main() -> None:
+    runtime = init_runtime()
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         loop = asyncio.SelectorEventLoop()
@@ -87,8 +91,8 @@ def main() -> None:
         
         config = uvicorn.Config(
             "app.main:app",
-            host=settings.api_host,
-            port=settings.api_port,
+            host=runtime.api_host,
+            port=runtime.api_port,
             reload=False,
             loop="asyncio"
         )
@@ -97,8 +101,8 @@ def main() -> None:
     else:
         uvicorn.run(
             "app.main:app",
-            host=settings.api_host,
-            port=settings.api_port,
+            host=runtime.api_host,
+            port=runtime.api_port,
             reload=False,
         )
 

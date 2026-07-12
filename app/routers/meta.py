@@ -6,7 +6,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..db import get_neo4j
+from ..db import get_metadata_repository
 from ..schemas import (
     BatchItem,
     BatchRequest,
@@ -16,7 +16,7 @@ from ..schemas import (
     RefMeta,
     TableKey,
 )
-from ..services import meta_service
+from ..services import meta_postgres
 
 router = APIRouter(tags=["meta"])
 
@@ -32,8 +32,8 @@ class BatchResponse(BaseModel):
 
 @router.post("/meta/batch", response_model=BatchResponse)
 async def meta_batch(req: BatchRequest) -> BatchResponse:
-    driver = get_neo4j()
-    items = await meta_service.list_batch(driver, batch_date=req.batch_date)
+    repository = get_metadata_repository()
+    items = await meta_postgres.list_batch(repository, batch_date=req.batch_date)
     return BatchResponse(items=items, total=len(items))
 
 
@@ -42,9 +42,9 @@ async def meta_batch(req: BatchRequest) -> BatchResponse:
 # ---------------------------------------------------------------------------
 @router.post("/meta/table", response_model=MetaTableResponse)
 async def meta_table(req: TableKey) -> MetaTableResponse:
-    driver = get_neo4j()
-    resp = await meta_service.get_table(
-        driver,
+    repository = get_metadata_repository()
+    resp = await meta_postgres.get_table(
+        repository,
         db=req.db,
         schema_name=req.schema_name,
         table_name=req.table_name,
@@ -68,9 +68,9 @@ class MetaColumnResponse(BaseModel):
 
 @router.post("/meta/column", response_model=MetaColumnResponse)
 async def meta_column(req: ColumnRequest) -> MetaColumnResponse:
-    driver = get_neo4j()
-    col = await meta_service.get_column(
-        driver,
+    repository = get_metadata_repository()
+    col = await meta_postgres.get_column(
+        repository,
         db=req.db,
         schema_name=req.schema_name,
         table_name=req.table_name,
@@ -91,9 +91,9 @@ class MetaRefResponse(BaseModel):
 
 @router.post("/meta/ref", response_model=MetaRefResponse)
 async def meta_ref(req: TableKey) -> MetaRefResponse:
-    driver = get_neo4j()
-    fks = await meta_service.get_refs(
-        driver,
+    repository = get_metadata_repository()
+    fks = await meta_postgres.get_refs(
+        repository,
         db=req.db,
         schema_name=req.schema_name,
         table_name=req.table_name,

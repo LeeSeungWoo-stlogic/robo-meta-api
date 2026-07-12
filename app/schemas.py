@@ -319,6 +319,17 @@ class SuggestedProbe(BaseModel):
 ResolutionStatus = Literal["complete", "partial", "skipped", "failed"]
 
 
+class ExecutionContext(BaseModel):
+    backend: str
+    dialect: str
+    integration: str
+    catalog: str
+    schema_name: str
+    qualification_pattern: str
+    identifier_quote: str
+    require_quoted_uppercase_identifiers: bool
+
+
 class DecisionResponse(BaseModel):
     meta_version: str = META_VERSION
     target: TargetTop
@@ -330,6 +341,7 @@ class DecisionResponse(BaseModel):
     resolved_entities: List[ResolvedEntity] = Field(default_factory=list)
     suggested_probes: List[SuggestedProbe] = Field(default_factory=list)
     resolution_status: ResolutionStatus = "skipped"
+    execution_context: Optional[ExecutionContext] = None
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +366,11 @@ class QueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class QueryExecuteRequest(BaseModel):
     sql: str = Field(..., description="SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용")
+    artifact_id: Optional[str] = Field(
+        default=None,
+        description="Semantic View 경로: published Artifact allowlist로 SQL을 "
+        "추가 검증. None이면 기존 v1 동작 그대로 (forward-compatible)",
+    )
     timeout_s: Optional[int] = Field(
         default=None, ge=1, le=60,
         description="서버 statement_timeout (기본 10s, 최대 30s)",

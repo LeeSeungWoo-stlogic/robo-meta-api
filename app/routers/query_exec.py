@@ -9,7 +9,7 @@ from ..schemas import (
     QueryRequest,
     QueryResponse,
 )
-from ..services import query_runner
+from ..services import query_runner_mindsdb as query_runner
 from ..services.sql_guard import GuardError
 
 
@@ -23,15 +23,36 @@ async def query_stub(req: QueryRequest) -> QueryResponse:
     return QueryResponse()
 
 
+async def _resolve_artifact_payload(request: Request, artifact_id: str) -> dict:
+    """Semantic View 경로: published Artifact payload를 조회한다 (fail-closed)."""
+    deps = getattr(request.app.state, "v2_deps", None)
+    if deps is None:
+        raise HTTPException(
+            status_code=503,
+            detail="artifact_id 검증에 필요한 v2 배선이 구성되지 않았습니다.")
+    # tenant는 이 경로에서도 검증된 token에서만 온다
+    from .decision_v2 import _get_auth
+    auth = _get_auth(request, deps)
+    for record in await deps.store.list_published_artifacts(auth.tenant_id):
+        if record.get("artifact_id") == artifact_id:
+            return record["payload"]
+    raise HTTPException(status_code=404,
+                        detail=f"published Artifact 없음: {artifact_id}")
+
+
 @router.post("/query/execute", response_model=QueryExecuteResponse)
 async def query_execute(req: QueryExecuteRequest, request: Request) -> QueryExecuteResponse:
     caller = request.client.host if request.client else None
+    artifact_payload = None
+    if req.artifact_id:
+        artifact_payload = await _resolve_artifact_payload(request, req.artifact_id)
     try:
         result = await query_runner.execute(
             sql=req.sql,
             timeout_s=req.timeout_s,
             max_rows=req.max_rows,
             caller=caller,
+            artifact_payload=artifact_payload,
         )
     except GuardError as exc:
         # API 단에서 사전 차단 — "조회 이외에는 사용 불가" 계열
