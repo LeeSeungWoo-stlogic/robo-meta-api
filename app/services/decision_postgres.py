@@ -98,12 +98,20 @@ async def decide(
     include_matched_columns: bool,
     column_top_m: int | None,
     auto_resolve_entities: bool,
+    table_limit: int | None = None,
 ) -> DecisionResponse:
     runtime = get_runtime()
+    # 요청 table_limit 하나로 검색 top-k와 최종 cap을 함께 제어 (v0.7 계약,
+    # decision_service._resolve_decision_policy와 동일 의미)
+    effective_top_k = (
+        max(1, min(50, int(table_limit)))
+        if table_limit is not None
+        else runtime.decision.table_top_k
+    )
     embedding = await _embed_question(query)
     tables = await repository.search_tables(
         embedding,
-        limit=runtime.decision.table_top_k,
+        limit=effective_top_k,
     )
     mappings = await repository.find_value_mappings(query)
     mapped_table_ids = {
@@ -133,7 +141,7 @@ async def decide(
         deduplicated.values(),
         key=lambda item: float(item.get("score") or 0),
         reverse=True,
-    )[: runtime.decision.table_top_k]
+    )[:effective_top_k]
 
     table_ids = [int(table["id"]) for table in tables]
     columns = (
@@ -226,7 +234,8 @@ async def decide(
         join_groups=join_groups,
         threshold_used={
             "minimum_similarity": runtime.decision.minimum_similarity,
-            "table_top_k": runtime.decision.table_top_k,
+            "table_top_k": effective_top_k,
+            "table_limit": table_limit,
             "column_top_m": column_top_m or runtime.decision.column_top_m,
         },
         resolved_entities=entities,

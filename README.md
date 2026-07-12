@@ -11,6 +11,33 @@ Neo4j meta-api **v0.7** — A안 entity resolution (`resolved_entities` 1차 해
 - FK 1단: `fkTo` + `FK_TO_COLUMN`
 - entity resolution: probe registry + PG `db_probe` 기반 1차 해소
 
+## Semantic View v2 추가 (2026-07-13)
+
+외부 T2SQL용 Semantic View Metadata Context Bundle 공급 경로.
+기존 v1 `/data_decision` 0.7 계약은 무변경이다 (회귀 시험으로 보증).
+
+- `POST /v2/data_decision` — 질문과 관련된 **published Semantic View Artifact**와
+  Metadata Context Bundle(`meta_version: "2"`) 반환. 질의 시점 View 생성 없음.
+  - 인증: Bearer JWT (`app/security/auth_context.py` — semantic-hub와 공유
+    auth contract). tenant/role은 검증된 token에서만.
+  - hard filter: tenant/role·published·유효기간·Snapshot 호환·readiness.
+  - ranking: 표준용어/동의어 우선, **vector 유사도 단독 선택 금지**.
+  - 적합 Artifact 없으면 `readiness=blocked` + blocker 반환 (fail-closed).
+  - provider 장애 시 zero-vector/lexical 강등 없이 503 (fail-closed).
+  - 배선: `app.state.v2_deps` (`routers/decision_v2.py`의 `V2Deps`).
+    미구성 시 503 — v1 경로 무영향.
+- `POST /query/execute` — optional `artifact_id` 추가 (v1 forward-compatible).
+  지정 시 기존 read-only guard에 더해 **Artifact allowlist**(허용 table·column·
+  join edge·mandatory filter, alias/CTE/subquery/OR 우회 차단)로 검증 후 실행
+  (`services/artifact_sql_guard.py`).
+- `services/embedding_provider.py` — `_embed_question()` 하드코딩 HTTP 호출을
+  provider 인터페이스로 분리 (v1 기본 동작 동일, fixture provider로 결정적 시험).
+- Artifact 데이터 원천: 공유 Metadata Store(`t2s_semantic_artifacts` 등,
+  semantic-hub가 발행) — `services/v2_store.py`.
+- Bundle 응답 계약(SoT): `semantic-hub/semantic_view/schemas/metadata-context-bundle-v2.schema.json`
+- 관련 시험: `tests/test_decision_v2.py`, `tests/test_artifact_sql_guard.py`,
+  `tests/test_auth_context_contract.py`
+
 ## Docker 기동
 
 ```bash

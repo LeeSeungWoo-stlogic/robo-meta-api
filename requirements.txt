@@ -17,5 +17,10 @@ openai>=2.0,<3.0
 # --- env ---
 python-dotenv>=1.0,<2.0
 
+# --- semantic view v2 (JWT 인증·consumer contract 시험) ---
+PyJWT[crypto]>=2.9,<3.0
+jsonschema>=4.23,<5.0
+pytest>=8.0,<10.0
+
 # --- subject_area 분류 규칙 (K-AIR 차용) ---
 PyYAML>=6.0,<7.0
