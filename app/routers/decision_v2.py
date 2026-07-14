@@ -1,7 +1,9 @@
 """`/v2/data_decision` — Semantic View Metadata Context Bundle 공급 (플랜 5C).
 
 - v1 `/data_decision` 0.7 계약과 완전히 분리된 별도 router다.
-- 인증: Bearer JWT (app/security/auth_context). tenant는 token에서만 온다.
+- 인증: auth_config가 설정된 경우에만 Bearer JWT를 요구한다.
+  소비처가 내부 T2SQL로 한정된 폐쇄망 배포(2026-07-13 결정)에서는
+  auth_config=None으로 두어 인증 없이 default_tenant_id/CONSUMER로 동작한다.
 - provider 장애 시 zero vector·lexical-only로 강등하지 않고 fail-closed(503).
 - 배선(V2Deps)은 app.state.v2_deps로 주입한다. 미구성 시 503.
 """
@@ -14,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..security.auth_context import AuthConfig, AuthError, verify_token
+from ..security.auth_context import AuthConfig, AuthContext, AuthError, verify_token
 from ..services.artifact_selector import select_artifacts
 from ..services.bundle_assembler import assemble_bundle
 from ..services.embedding_provider import EmbeddingProvider, EmbeddingProviderError
@@ -25,11 +27,13 @@ router = APIRouter(tags=["decision-v2"])
 
 @dataclass
 class V2Deps:
-    auth_config: AuthConfig
+    auth_config: AuthConfig | None
     store: V2Store
     embedding_provider: EmbeddingProvider
     execution_context: dict[str, Any] | None = None
     clock: Any = field(default=None)  # () -> ISO8601 str, 시험용 고정 가능
+    # auth_config=None(인증 비활성)일 때 사용할 고정 소비자 컨텍스트
+    default_tenant_id: str = "kwater"
 
 
 class DecisionV2Request(BaseModel):
@@ -53,6 +57,11 @@ def _get_deps(request: Request) -> V2Deps:
 
 
 def _get_auth(request: Request, deps: V2Deps):
+    if deps.auth_config is None:
+        # 폐쇄망: 소비처가 내부 T2SQL로 한정되어 인증 생략 (2026-07-13 결정)
+        return AuthContext(subject="internal-t2sql",
+                           tenant_id=deps.default_tenant_id,
+                           roles=frozenset({"CONSUMER"}))
     header = request.headers.get("authorization", "")
     if not header.lower().startswith("bearer "):
         raise HTTPException(status_code=401,

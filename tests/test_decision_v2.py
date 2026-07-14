@@ -100,10 +100,14 @@ def _token(subject="consumer-1", tenant="kwater", roles=("CONSUMER",)) -> str:
         key=pem, algorithm=cfg["algorithm"], headers={"kid": cfg["kid"]})
 
 
-def _make_client(*, artifacts=None, snapshots=None, provider=None) -> TestClient:
-    cfg = AUTH_CONTRACT["config"]
-    auth_config = AuthConfig.from_jwks_file(
-        AUTH_DIR / "jwks.json", issuer=cfg["issuer"], audience=cfg["audience"])
+def _make_client(*, artifacts=None, snapshots=None, provider=None,
+                 auth_enabled=True) -> TestClient:
+    if auth_enabled:
+        cfg = AUTH_CONTRACT["config"]
+        auth_config = AuthConfig.from_jwks_file(
+            AUTH_DIR / "jwks.json", issuer=cfg["issuer"], audience=cfg["audience"])
+    else:
+        auth_config = None
     snapshot = _golden("physical-snapshot.json")
     store = InMemoryV2Store(
         artifacts=artifacts if artifacts is not None else [_artifact_record()],
@@ -156,9 +160,20 @@ def test_bundle_ready_and_passes_consumer_contract():
 
 
 def test_missing_token_rejected():
+    """auth_config가 설정된 배포에서는 여전히 401 (외부 공개 전환 대비)."""
     client = _make_client()
     response = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION})
     assert response.status_code == 401
+
+
+def test_no_auth_mode_serves_without_token():
+    """폐쇄망 무인증 구성(2026-07-13 결정): 토큰 없이 정상 Bundle 반환."""
+    client = _make_client(auth_enabled=False)
+    response = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION})
+    assert response.status_code == 200, response.text
+    bundle = response.json()
+    assert bundle["meta_version"] == "2"
+    assert bundle["readiness"]["state"] == "ready"
 
 
 # ---------------------------------------------------------------------------

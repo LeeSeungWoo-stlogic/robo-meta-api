@@ -19,6 +19,17 @@ services:
     env_file:
       - .env
     environment:
+      # part2 postgres baseline: runtime 설정 파일이 SoT (환경변수는 비밀값 참조용)
+      ROBO_RUNTIME_SETTINGS_FILE: "/app/config/runtime-settings.docker.yaml"
+      METADATA_PG_PASSWORD: "postgres123"
+      # /v2/data_decision 배선 (Semantic View v2 공급 경로)
+      # 폐쇄망: 소비처가 내부 T2SQL로 한정되어 JWT 인증 미사용 (2026-07-13 결정).
+      # 외부 공개 전환 시 V2_JWKS_FILE·V2_ISSUER·V2_AUDIENCE를 설정하면 인증이 켜진다.
+      V2_PG_DSN: "postgresql://postgres:postgres123@host.docker.internal:5433/t2s"
+      V2_PG_SCHEMA: "public"
+      V2_TENANT_ID: "kwater"
+      V2_EMBEDDING_PROVIDER: "fixture"
+      V2_EMBEDDING_DIMENSIONS: "16"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
       NEO4J_URI: "bolt://host.docker.internal:7687"
@@ -52,6 +63,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./logs:/app/logs
+      - ./config:/app/config:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/health"]
       interval: 30s

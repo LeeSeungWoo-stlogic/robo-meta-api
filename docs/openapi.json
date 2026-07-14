@@ -1,0 +1,2056 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "robo-meta-api v4",
+    "description": "v0.7 meta-api — A안 entity resolution (resolved_entities), v0.6 8 endpoint path 유지. Semantic View v2 공급 경로 추가: `POST /v2/data_decision`은 published Semantic View Artifact 기반 Metadata Context Bundle(`meta_version:\"2\"`)을 반환한다 (폐쇄망 기본 무인증, V2_JWKS_FILE 설정 시에만 Bearer JWT 요구). `POST /query/execute`는 `artifact_id` 지정 시 해당 Artifact allowlist(테이블·컬럼·join edge·mandatory filter)로 SQL 실행을 제약한다. v1 `/data_decision` 0.7 계약은 무변경.",
+    "version": "meta-0.7"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "description": "K-AIR v0.6 RC: meta_version 동봉 + X-Meta-Version 헤더 (미들웨어가 자동 부착).",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/data_decision": {
+      "post": {
+        "tags": [
+          "decision"
+        ],
+        "summary": "Data Decision",
+        "operationId": "data_decision_data_decision_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/meta/batch": {
+      "post": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Meta Batch",
+        "operationId": "meta_batch_meta_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/meta/table": {
+      "post": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Meta Table",
+        "operationId": "meta_table_meta_table_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TableKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaTableResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/meta/column": {
+      "post": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Meta Column",
+        "operationId": "meta_column_meta_column_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ColumnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaColumnResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/meta/ref": {
+      "post": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Meta Ref",
+        "operationId": "meta_ref_meta_ref_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TableKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaRefResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/meta/fk": {
+      "post": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Meta Fk",
+        "description": "v0.7 문서 호환 alias. 내부 동작은 /meta/ref 와 동일.",
+        "operationId": "meta_fk_meta_fk_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TableKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaRefResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/query": {
+      "post": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Query Stub",
+        "description": "v0.7 정책: /query는 스텁 노출(미구현 상태 명시).",
+        "operationId": "query_stub_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/query/execute": {
+      "post": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Query Execute",
+        "operationId": "query_execute_query_execute_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryExecuteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/data_decision": {
+      "post": {
+        "tags": [
+          "decision-v2"
+        ],
+        "summary": "Data Decision V2",
+        "operationId": "data_decision_v2_v2_data_decision_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionV2Request"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Data Decision V2 V2 Data Decision Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BatchItem": {
+        "properties": {
+          "db": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db",
+            "description": "원천 라벨(t2s_tables.db). 미입력 시 schema+이름 동일 행 중 첫 행. ERP_SIM·RWIS 등 다중 카탈로그 구분 시 지정.",
+            "examples": [
+              "RWIS",
+              "ERP_SIM"
+            ]
+          },
+          "schema_name": {
+            "type": "string",
+            "title": "Schema Name",
+            "examples": [
+              "RWIS"
+            ]
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name",
+            "examples": [
+              "RDF01HH_TB"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_name",
+          "table_name"
+        ],
+        "title": "BatchItem"
+      },
+      "BatchRequest": {
+        "properties": {
+          "batch_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Date",
+            "description": "null=전체, 'YYYYMMDD'=해당 날짜 기준 변경·추가분",
+            "examples": [
+              null,
+              "20260420"
+            ]
+          }
+        },
+        "type": "object",
+        "title": "BatchRequest"
+      },
+      "BatchResponse": {
+        "properties": {
+          "meta_version": {
+            "type": "string",
+            "title": "Meta Version",
+            "default": "0.7"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BatchItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "BatchResponse"
+      },
+      "CodeLookup": {
+        "properties": {
+          "ref_schema_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref Schema Name"
+          },
+          "ref_table_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref Table Name"
+          },
+          "ref_column_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref Column Name"
+          },
+          "via": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "fk",
+                  "convention",
+                  "term"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Via"
+          }
+        },
+        "type": "object",
+        "title": "CodeLookup",
+        "description": "FK가 명시되지 않은 코드성 컬럼이 어떤 마스터 테이블을 참조하는지 힌트.\nvia=fk(직접 FK 메타) / convention(명명 규약) / term(표준용어 매핑)."
+      },
+      "ColumnMeta": {
+        "properties": {
+          "column_name": {
+            "type": "string",
+            "title": "Column Name"
+          },
+          "column_name_kr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Name Kr"
+          },
+          "data_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Type"
+          },
+          "column_comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Comment"
+          },
+          "constraints": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "PK",
+                "FK",
+                "UNIQUE"
+              ]
+            },
+            "type": "array",
+            "title": "Constraints"
+          },
+          "is_null": {
+            "type": "boolean",
+            "title": "Is Null",
+            "default": true
+          },
+          "column_is_active": {
+            "type": "string",
+            "enum": [
+              "Y",
+              "N"
+            ],
+            "title": "Column Is Active",
+            "default": "Y"
+          },
+          "code_lookup": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodeLookup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "term_mapping": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TermMapping"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "value_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Value Examples"
+          }
+        },
+        "type": "object",
+        "required": [
+          "column_name"
+        ],
+        "title": "ColumnMeta"
+      },
+      "ColumnRequest": {
+        "properties": {
+          "db": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db",
+            "description": "원천 라벨(t2s_tables.db). 미입력 시 schema+이름 동일 행 중 첫 행. ERP_SIM·RWIS 등 다중 카탈로그 구분 시 지정.",
+            "examples": [
+              "RWIS",
+              "ERP_SIM"
+            ]
+          },
+          "schema_name": {
+            "type": "string",
+            "title": "Schema Name",
+            "examples": [
+              "RWIS"
+            ]
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name",
+            "examples": [
+              "RDF01HH_TB"
+            ]
+          },
+          "column_name": {
+            "type": "string",
+            "title": "Column Name",
+            "examples": [
+              "TAGSN"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_name",
+          "table_name",
+          "column_name"
+        ],
+        "title": "ColumnRequest"
+      },
+      "DataSourceInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "description": "DataSource ID (예: kwater_source_rwis)"
+          },
+          "dialect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dialect",
+            "description": "postgresql/oracle/tibero/sap_hana 등"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain",
+            "description": "계측·전사·분석 등 업무 도메인"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner",
+            "description": "소관 부서·담당"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "DataSourceInfo",
+        "description": "원천 DB 식별자·접속 메타. K-AIR-analyzer가 채움.\n데이터 미적재 시 None."
+      },
+      "DecisionCandidate": {
+        "properties": {
+          "db": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db",
+            "description": "원천 라벨(t2s_tables.db). 미입력 시 schema+이름 동일 행 중 첫 행. ERP_SIM·RWIS 등 다중 카탈로그 구분 시 지정.",
+            "examples": [
+              "RWIS",
+              "ERP_SIM"
+            ]
+          },
+          "schema_name": {
+            "type": "string",
+            "title": "Schema Name",
+            "examples": [
+              "RWIS"
+            ]
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name",
+            "examples": [
+              "RDF01HH_TB"
+            ]
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "vector",
+              "schema_rule",
+              "name_rule"
+            ],
+            "title": "Source",
+            "default": "vector"
+          },
+          "target_class": {
+            "type": "string",
+            "enum": [
+              "analytic",
+              "source",
+              "collect",
+              "mixed",
+              "unknown"
+            ],
+            "title": "Target Class",
+            "default": "unknown"
+          },
+          "subject_area": {
+            "type": "string",
+            "enum": [
+              "agg",
+              "raw",
+              "code",
+              "hist",
+              "master",
+              "link",
+              "unknown"
+            ],
+            "title": "Subject Area",
+            "default": "unknown"
+          },
+          "matched_columns": {
+            "items": {
+              "$ref": "#/components/schemas/MatchedColumn"
+            },
+            "type": "array",
+            "title": "Matched Columns"
+          },
+          "table_comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Comment",
+            "description": "원본 카탈로그 테이블 설명 (Neo4j Table.description)",
+            "examples": [
+              "01분 원시"
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "LLM 증강 설명 우선, 없으면 table_comment (Neo4j analyzed_description → description)",
+            "examples": [
+              "시간별 탁도·유량 등 계측 fact 테이블. tagsn으로 태그 마스터와 조인."
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_name",
+          "table_name",
+          "score"
+        ],
+        "title": "DecisionCandidate",
+        "examples": [
+          {
+            "db": "rwis",
+            "description": "시간별 계측값 fact. suj_code·tagsn으로 정수장·태그와 조인.",
+            "matched_columns": [],
+            "schema_name": "rwis",
+            "score": 0.82,
+            "source": "vector",
+            "subject_area": "unknown",
+            "table_comment": "시간별 집계 fact",
+            "table_name": "fct_measure_hour",
+            "target_class": "unknown"
+          }
+        ]
+      },
+      "DecisionRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Query",
+            "examples": [
+              "최근 일주일간 시간별 탁도 평균"
+            ]
+          },
+          "include_matched_columns": {
+            "type": "boolean",
+            "title": "Include Matched Columns",
+            "description": "False면 candidates[].matched_columns 를 채우지 않음",
+            "default": true
+          },
+          "column_top_m": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 50.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Top M",
+            "description": "테이블별 컬럼 벡터 매칭 상한. 미지정 시 서버 DECISION_COLUMN_TOP_M"
+          },
+          "table_limit": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 50.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Limit",
+            "description": "테이블 후보 상한(검색 top-k + 최종 candidates cap 통합). 미지정 시 검색은 DECISION_VECTOR_TOPK, 최종 cap은 DECISION_TABLE_MAX(0=무제한)"
+          },
+          "auto_resolve_entities": {
+            "type": "boolean",
+            "title": "Auto Resolve Entities",
+            "description": "True면 1차 응답에 resolved_entities 자동 해소 시도 (v0.7 A안)",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "DecisionRequest"
+      },
+      "DecisionResponse": {
+        "properties": {
+          "meta_version": {
+            "type": "string",
+            "title": "Meta Version",
+            "default": "0.7"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "analytic",
+              "source",
+              "collect",
+              "none"
+            ],
+            "title": "Target"
+          },
+          "secondary_targets": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "analytic",
+                "source",
+                "collect"
+              ]
+            },
+            "type": "array",
+            "title": "Secondary Targets"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionCandidate"
+            },
+            "type": "array",
+            "title": "Candidates"
+          },
+          "join_groups": {
+            "items": {
+              "$ref": "#/components/schemas/JoinGroup"
+            },
+            "type": "array",
+            "title": "Join Groups"
+          },
+          "threshold_used": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Threshold Used"
+          },
+          "resolved_entities": {
+            "items": {
+              "$ref": "#/components/schemas/ResolvedEntity"
+            },
+            "type": "array",
+            "title": "Resolved Entities"
+          },
+          "suggested_probes": {
+            "items": {
+              "$ref": "#/components/schemas/SuggestedProbe"
+            },
+            "type": "array",
+            "title": "Suggested Probes"
+          },
+          "resolution_status": {
+            "type": "string",
+            "enum": [
+              "complete",
+              "partial",
+              "skipped",
+              "failed"
+            ],
+            "title": "Resolution Status",
+            "default": "skipped"
+          },
+          "execution_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "target",
+          "confidence",
+          "candidates",
+          "threshold_used"
+        ],
+        "title": "DecisionResponse"
+      },
+      "DecisionV2Request": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Query"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "DecisionV2Request"
+      },
+      "ExecutionContext": {
+        "properties": {
+          "backend": {
+            "type": "string",
+            "title": "Backend"
+          },
+          "dialect": {
+            "type": "string",
+            "title": "Dialect"
+          },
+          "integration": {
+            "type": "string",
+            "title": "Integration"
+          },
+          "catalog": {
+            "type": "string",
+            "title": "Catalog"
+          },
+          "schema_name": {
+            "type": "string",
+            "title": "Schema Name"
+          },
+          "qualification_pattern": {
+            "type": "string",
+            "title": "Qualification Pattern"
+          },
+          "identifier_quote": {
+            "type": "string",
+            "title": "Identifier Quote"
+          },
+          "require_quoted_uppercase_identifiers": {
+            "type": "boolean",
+            "title": "Require Quoted Uppercase Identifiers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "backend",
+          "dialect",
+          "integration",
+          "catalog",
+          "schema_name",
+          "qualification_pattern",
+          "identifier_quote",
+          "require_quoted_uppercase_identifiers"
+        ],
+        "title": "ExecutionContext"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "JoinBridge": {
+        "properties": {
+          "from": {
+            "type": "string",
+            "title": "From"
+          },
+          "to": {
+            "type": "string",
+            "title": "To"
+          },
+          "via": {
+            "type": "string",
+            "enum": [
+              "fk",
+              "ontology",
+              "embedding",
+              "term",
+              "convention"
+            ],
+            "title": "Via"
+          },
+          "path": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Path",
+            "description": "ontology 매개 시 경유 노드 라벨"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "via"
+        ],
+        "title": "JoinBridge",
+        "description": "JOIN 매개 단일 신호. fk/ontology/embedding/term 중 하나."
+      },
+      "JoinGroup": {
+        "properties": {
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/TableKey"
+            },
+            "type": "array",
+            "title": "Members"
+          },
+          "bridge_tables": {
+            "items": {
+              "$ref": "#/components/schemas/TableKey"
+            },
+            "type": "array",
+            "title": "Bridge Tables"
+          },
+          "cross_db": {
+            "type": "boolean",
+            "title": "Cross Db",
+            "default": false
+          },
+          "recommended_strategy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "simple_join",
+                  "derived_join",
+                  "cte_then_join",
+                  "exists_filter",
+                  "split_execute"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Strategy"
+          },
+          "bridges": {
+            "items": {
+              "$ref": "#/components/schemas/JoinBridge"
+            },
+            "type": "array",
+            "title": "Bridges"
+          },
+          "group_score": {
+            "type": "number",
+            "title": "Group Score",
+            "default": 0.0
+          },
+          "score_breakdown": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Score Breakdown"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          }
+        },
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "title": "JoinGroup",
+        "description": "JOIN 매개 후보 묶음. 4순위 알고리즘이 채움.\n데이터·알고리즘 미구현 시 빈 배열."
+      },
+      "LineageBrief": {
+        "properties": {
+          "upstream": {
+            "items": {
+              "$ref": "#/components/schemas/LineageRef"
+            },
+            "type": "array",
+            "title": "Upstream"
+          },
+          "downstream": {
+            "items": {
+              "$ref": "#/components/schemas/LineageRef"
+            },
+            "type": "array",
+            "title": "Downstream"
+          }
+        },
+        "type": "object",
+        "title": "LineageBrief",
+        "description": "이 테이블의 상류·하류 인접 테이블 간단 요약.\nK-AIR-analyzer의 SP·DDL 파싱 결과(`analyzer_lineage_*`) 기반.\n데이터 미적재 시 두 배열 모두 빈 배열."
+      },
+      "LineageRef": {
+        "properties": {
+          "db": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db",
+            "description": "원천 라벨(t2s_tables.db). 미입력 시 schema+이름 동일 행 중 첫 행. ERP_SIM·RWIS 등 다중 카탈로그 구분 시 지정.",
+            "examples": [
+              "RWIS",
+              "ERP_SIM"
+            ]
+          },
+          "schema_name": {
+            "type": "string",
+            "title": "Schema Name",
+            "examples": [
+              "RWIS"
+            ]
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name",
+            "examples": [
+              "RDF01HH_TB"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_name",
+          "table_name"
+        ],
+        "title": "LineageRef",
+        "description": "리니지 그래프의 인접 테이블 식별자."
+      },
+      "MatchedColumn": {
+        "properties": {
+          "column_name": {
+            "type": "string",
+            "title": "Column Name"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score",
+            "default": 0.0
+          },
+          "constraints": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "PK",
+                "FK",
+                "UNIQUE"
+              ]
+            },
+            "type": "array",
+            "title": "Constraints"
+          },
+          "column_name_kr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Name Kr"
+          },
+          "data_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Type"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "column_name"
+        ],
+        "title": "MatchedColumn",
+        "description": "자연어 질의-컬럼 매칭 결과. 컬럼 RAG(`embedding_columns`) 활성화 후 채워짐.\n미적재 시 빈 배열.\n\n슬롯 매핑 정책 (테이블 측 column_name_kr/column_comment 와 동일):\n  - column_name_kr : 짧은 원본 한글명 (t2s_columns.description).\n  - description    : 풍부한 LLM 증강 한국어 설명 우선 + 원본 폴백\n                     (t2s_columns.analyzed_description or .description).\n                     v0.6.x forward-compatible 신규 필드 — 미적재 시 None."
+      },
+      "MetaColumnResponse": {
+        "properties": {
+          "meta_version": {
+            "type": "string",
+            "title": "Meta Version",
+            "default": "0.7"
+          },
+          "column": {
+            "$ref": "#/components/schemas/ColumnMeta"
+          }
+        },
+        "type": "object",
+        "required": [
+          "column"
+        ],
+        "title": "MetaColumnResponse"
+      },
+      "MetaRefResponse": {
+        "properties": {
+          "meta_version": {
+            "type": "string",
+            "title": "Meta Version",
+            "default": "0.7"
+          },
+          "fk": {
+            "items": {
+              "$ref": "#/components/schemas/RefMeta"
+            },
+            "type": "array",
+            "title": "Fk"
+          }
+        },
+        "type": "object",
+        "required": [
+          "fk"
+        ],
+        "title": "MetaRefResponse"
+      },
+      "MetaTableResponse": {
+        "properties": {
+          "meta_version": {
+            "type": "string",
+            "title": "Meta Version",
+            "default": "0.7"
+          },
+          "table_info": {
+            "$ref": "#/components/schemas/TableInfo"
+          },
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/ColumnMeta"
+            },
+            "type": "array",
+            "title": "Columns"
+          },
+          "fk": {
+            "items": {
+              "$ref": "#/components/schemas/RefMeta"
+            },
+            "type": "array",
+            "title": "Fk"
+          }
+        },
+        "type": "object",
+        "required": [
+          "table_info",
+          "columns",
+          "fk"
+        ],
+        "title": "MetaTableResponse"
+      },
+      "OntologyAnchor": {
+        "properties": {
+          "layer": {
+            "type": "string",
+            "enum": [
+              "KPI",
+              "Measure",
+              "Process",
+              "Resource",
+              "Driver"
+            ],
+            "title": "Layer"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "온톨로지 노드 이름 (예: '탁도')"
+          },
+          "relation": {
+            "type": "string",
+            "title": "Relation",
+            "description": "엣지 타입 (예: SUPPORTS, MEASURES, PRODUCES)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "layer",
+          "name",
+          "relation"
+        ],
+        "title": "OntologyAnchor",
+        "description": "이 테이블이 5계층 온톨로지의 어느 노드와 어떻게 연결되는지.\nK-AIR 에이전트의 온톨로지 부여 결과(`ontology_graph` 엣지) 기반."
+      },
+      "QueryExecuteRequest": {
+        "properties": {
+          "sql": {
+            "type": "string",
+            "title": "Sql",
+            "description": "SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용"
+          },
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id",
+            "description": "Semantic View 경로: published Artifact allowlist로 SQL을 추가 검증. None이면 기존 v1 동작 그대로 (forward-compatible)"
+          },
+          "timeout_s": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 60.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout S",
+            "description": "서버 statement_timeout (기본 10s, 최대 30s)"
+          },
+          "max_rows": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100000.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Rows",
+            "description": "반환 최대 행수 (기본 1000, 최대 10000)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sql"
+        ],
+        "title": "QueryExecuteRequest"
+      },
+      "QueryExecuteResponse": {
+        "properties": {
+          "meta_version": {
+            "type": "string",
+            "title": "Meta Version",
+            "default": "0.7"
+          },
+          "audit_id": {
+            "type": "string",
+            "title": "Audit Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "timeout",
+              "db_error",
+              "error",
+              "rejected"
+            ],
+            "title": "Status"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "sql_executed": {
+            "type": "string",
+            "title": "Sql Executed"
+          },
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Columns"
+          },
+          "rows": {
+            "items": {
+              "items": {},
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count",
+            "default": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          },
+          "elapsed_ms": {
+            "type": "number",
+            "title": "Elapsed Ms",
+            "default": 0.0
+          },
+          "timeout_s_applied": {
+            "type": "integer",
+            "title": "Timeout S Applied",
+            "default": 0
+          },
+          "max_rows_applied": {
+            "type": "integer",
+            "title": "Max Rows Applied",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "audit_id",
+          "status",
+          "sql_executed"
+        ],
+        "title": "QueryExecuteResponse"
+      },
+      "QueryRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "QueryRequest"
+      },
+      "QueryResponse": {
+        "properties": {
+          "meta_version": {
+            "type": "string",
+            "title": "Meta Version",
+            "default": "0.7"
+          },
+          "status": {
+            "type": "string",
+            "const": "not_implemented",
+            "title": "Status",
+            "default": "not_implemented"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "v0.5 문서에 /query 요청/응답 스펙이 정의되어 있지 않습니다 (R9). v0.6 스펙 확정 후 /data_decision + /meta/table을 오케스트레이션하여 구현 예정."
+          },
+          "decision_hint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "QueryResponse"
+      },
+      "RefMeta": {
+        "properties": {
+          "column_name": {
+            "type": "string",
+            "title": "Column Name"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position",
+            "default": 1
+          },
+          "ref_schema_name": {
+            "type": "string",
+            "title": "Ref Schema Name"
+          },
+          "ref_table_name": {
+            "type": "string",
+            "title": "Ref Table Name"
+          },
+          "ref_column_name": {
+            "type": "string",
+            "title": "Ref Column Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "column_name",
+          "ref_schema_name",
+          "ref_table_name",
+          "ref_column_name"
+        ],
+        "title": "RefMeta"
+      },
+      "ResolvedEntity": {
+        "properties": {
+          "mention": {
+            "type": "string",
+            "title": "Mention"
+          },
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "facility",
+              "tag",
+              "code",
+              "metric",
+              "unit",
+              "region",
+              "kepco_tag",
+              "kepco_metric",
+              "unknown"
+            ],
+            "title": "Entity Type",
+            "default": "unknown"
+          },
+          "db": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db"
+          },
+          "schema_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Name"
+          },
+          "table": {
+            "type": "string",
+            "title": "Table"
+          },
+          "name_column": {
+            "type": "string",
+            "title": "Name Column"
+          },
+          "code_column": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code Column"
+          },
+          "values": {
+            "items": {
+              "$ref": "#/components/schemas/ResolvedValue"
+            },
+            "type": "array",
+            "title": "Values"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "db_probe",
+              "value_examples"
+            ],
+            "title": "Source",
+            "default": "db_probe"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mention",
+          "table",
+          "name_column"
+        ],
+        "title": "ResolvedEntity"
+      },
+      "ResolvedValue": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence",
+            "default": 1.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "title": "ResolvedValue"
+      },
+      "SuggestedProbe": {
+        "properties": {
+          "purpose": {
+            "type": "string",
+            "title": "Purpose",
+            "default": "code_lookup"
+          },
+          "sql": {
+            "type": "string",
+            "title": "Sql"
+          },
+          "expected_columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Expected Columns"
+          },
+          "maps_to_filter": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maps To Filter"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sql"
+        ],
+        "title": "SuggestedProbe"
+      },
+      "TableInfo": {
+        "properties": {
+          "db": {
+            "type": "string",
+            "title": "Db"
+          },
+          "schema_name": {
+            "type": "string",
+            "title": "Schema Name"
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name"
+          },
+          "table_name_kr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Name Kr"
+          },
+          "table_comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Comment"
+          },
+          "subject_area": {
+            "type": "string",
+            "enum": [
+              "agg",
+              "raw",
+              "code",
+              "hist",
+              "master",
+              "link",
+              "unknown"
+            ],
+            "title": "Subject Area",
+            "default": "unknown"
+          },
+          "table_is_active": {
+            "type": "string",
+            "enum": [
+              "Y",
+              "N"
+            ],
+            "title": "Table Is Active",
+            "default": "Y"
+          },
+          "pk_columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pk Columns"
+          },
+          "datasource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DataSourceInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lineage_brief": {
+            "$ref": "#/components/schemas/LineageBrief"
+          },
+          "ontology_anchors": {
+            "items": {
+              "$ref": "#/components/schemas/OntologyAnchor"
+            },
+            "type": "array",
+            "title": "Ontology Anchors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "db",
+          "schema_name",
+          "table_name"
+        ],
+        "title": "TableInfo"
+      },
+      "TableKey": {
+        "properties": {
+          "db": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Db",
+            "description": "원천 라벨(t2s_tables.db). 미입력 시 schema+이름 동일 행 중 첫 행. ERP_SIM·RWIS 등 다중 카탈로그 구분 시 지정.",
+            "examples": [
+              "RWIS",
+              "ERP_SIM"
+            ]
+          },
+          "schema_name": {
+            "type": "string",
+            "title": "Schema Name",
+            "examples": [
+              "RWIS"
+            ]
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name",
+            "examples": [
+              "RDF01HH_TB"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_name",
+          "table_name"
+        ],
+        "title": "TableKey"
+      },
+      "TermMapping": {
+        "properties": {
+          "standard_term": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Standard Term"
+          },
+          "physical_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Physical Name"
+          },
+          "synonyms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Synonyms"
+          }
+        },
+        "type": "object",
+        "title": "TermMapping",
+        "description": "Argus Catalog 합류 후 채워지는 표준용어 매핑.\n데이터 미적재 시 None."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

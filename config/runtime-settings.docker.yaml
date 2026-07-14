@@ -1,0 +1,55 @@
+# robo-meta-api runtime settings (Docker 컨테이너용)
+# - 컨테이너 안에서 host.docker.internal로 호스트 Docker의 저장소에 연결한다.
+# - 비밀값은 파일에 두지 않고 process_env 참조만 사용한다 (.env / compose environment).
+robo_meta_api:
+  api_host: "0.0.0.0"
+  api_port: 8100
+  metadata_backend: postgres
+
+  metadata_store:
+    host: host.docker.internal
+    port: 5433
+    database: t2s
+    schema: public
+    user: postgres
+    password_ref:
+      provider: process_env
+      env_key: METADATA_PG_PASSWORD
+
+  embedding:
+    base_url: https://api.openai.com/v1
+    model: text-embedding-3-small
+    dimensions: 1536
+    auth_mode: bearer
+    api_key_ref:
+      provider: process_env
+      env_key: OPENAI_API_KEY
+    timeout_seconds: 30
+
+  decision:
+    table_top_k: 10
+    column_top_m: 10
+    minimum_similarity: 0.2
+    verified_join_confidence: 1.0
+    convention_join_confidence: 0.7
+
+  execution:
+    backend: mindsdb
+    sql_api_url: http://host.docker.internal:47334/api/sql/query
+    integration: rwis_part1_pg
+    catalog: rwis_part1_pg
+    schema: RWIS
+    dialect: mysql
+    qualification_pattern: "{catalog}.{schema}.{table}"
+    identifier_quote: "`"
+    require_quoted_uppercase_identifiers: true
+    allowed_catalogs:
+      - rwis_part1_pg
+    allowed_schemas:
+      - rwis
+    default_timeout_seconds: 10
+    maximum_timeout_seconds: 30
+    default_max_rows: 1000
+    maximum_rows: 10000
+    maximum_response_bytes: 10485760
+    audit_log_path: /app/logs/query_audit.jsonl
