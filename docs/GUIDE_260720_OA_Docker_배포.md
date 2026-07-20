@@ -55,12 +55,10 @@ docker compose up -d --no-build --pull never mindsdb
 bash scripts/register-mindsdb-source.sh
 ```
 
-`.env`의 `SOURCE_DB_*`는 현재 Metastore metadata와 같은 원천을 가리켜야 한다.
-260720 dump가 RWIS metadata인 상태에서 `analysis_mart`를 실행 원천으로 지정하면
-테이블과 컬럼이 달라 SQL execution이 실패하거나 잘못된 대상을 조회할 수 있다.
-
-analysis mart를 사용하려면 먼저 해당 mart metadata를 재수집·승인·활성화하고
-`runtime-settings.oa.yaml`의 integration, catalog, schema를 함께 변경한다.
+Metastore는 dump 없이 빈 DB로 시작한다. OA에서 실제 사용할 원천 metadata를
+수집·증강·승인·활성화하고 `.env`의 `SOURCE_DB_*`에도 같은 원천을 지정한다.
+원천을 바꾸면 `runtime-settings.oa.yaml`의 integration, catalog, schema도 함께
+변경한다.
 
 ## 4. API 검증
 
