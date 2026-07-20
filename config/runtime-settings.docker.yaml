@@ -19,7 +19,7 @@ robo_meta_api:
   embedding:
     base_url: https://api.openai.com/v1
     model: text-embedding-3-small
-    dimensions: 1536
+    dimensions: 1024
     auth_mode: bearer
     api_key_ref:
       provider: process_env
@@ -36,15 +36,15 @@ robo_meta_api:
   execution:
     backend: mindsdb
     sql_api_url: http://host.docker.internal:47334/api/sql/query
-    integration: rwis_part1_pg
-    catalog: rwis_part1_pg
+    integration: rwis_postgres_active
+    catalog: rwis_postgres_active
     schema: RWIS
     dialect: mysql
-    qualification_pattern: "{catalog}.{schema}.{table}"
+    qualification_pattern: "{catalog}.{table}"
     identifier_quote: "`"
     require_quoted_uppercase_identifiers: true
     allowed_catalogs:
-      - rwis_part1_pg
+      - rwis_postgres_active
     allowed_schemas:
       - rwis
     default_timeout_seconds: 10

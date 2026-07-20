@@ -328,6 +328,8 @@ class ExecutionContext(BaseModel):
     qualification_pattern: str
     identifier_quote: str
     require_quoted_uppercase_identifiers: bool
+    source_instance_id: Optional[str] = None
+    allowed_objects: List[str] = Field(default_factory=list)
 
 
 class DecisionResponse(BaseModel):
@@ -366,6 +368,10 @@ class QueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class QueryExecuteRequest(BaseModel):
     sql: str = Field(..., description="SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용")
+    execution_context: Optional[ExecutionContext] = Field(
+        default=None,
+        description="/v1/data_decision이 반환한 단일 datasource 실행 허용범위",
+    )
     artifact_id: Optional[str] = Field(
         default=None,
         description="Semantic View 경로: published Artifact allowlist로 SQL을 "
@@ -394,3 +400,5 @@ class QueryExecuteResponse(BaseModel):
     elapsed_ms: float = 0.0
     timeout_s_applied: int = 0
     max_rows_applied: int = 0
+    datasource: Optional[str] = None
+    query_id: Optional[str] = None

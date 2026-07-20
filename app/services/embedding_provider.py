@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import hashlib
+import math
+import re
 import struct
 from typing import Protocol
 
@@ -43,7 +45,11 @@ class HttpEmbeddingProvider:
         headers = {"Content-Type": "application/json"}
         if runtime.embedding.auth_mode == "bearer" and runtime.embedding.api_key:
             headers["Authorization"] = f"Bearer {runtime.embedding.api_key}"
-        payload = {"model": runtime.embedding.model, "input": text}
+        payload = {
+            "model": runtime.embedding.model,
+            "input": text,
+            "dimensions": runtime.embedding.dimensions,
+        }
         try:
             async with httpx.AsyncClient(
                 timeout=runtime.embedding.timeout_seconds
@@ -96,6 +102,24 @@ class FixtureEmbeddingProvider:
                 "EMBED_TEXT_NOT_ALLOWED",
                 "fixture provider는 기준 질문만 embedding할 수 있습니다.")
         return _fixed_embedding(text, self.dimensions)
+
+
+class LexicalHashEmbeddingProvider:
+    """K-AIR-meta-ingest의 비운영 1024차원 검색 회귀 provider."""
+
+    model = "lexical-hash-test"
+    dimensions = 1024
+
+    async def embed(self, text: str) -> list[float]:
+        vector = [0.0] * self.dimensions
+        tokens = re.findall(r"[A-Za-z0-9_]+|[가-힣]{2,}", text.lower())
+        for token in tokens:
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            index = int.from_bytes(digest[:4], "big") % self.dimensions
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            vector[index] += sign
+        norm = math.sqrt(sum(value * value for value in vector))
+        return [value / norm for value in vector] if norm else vector
 
 
 class FailingEmbeddingProvider:

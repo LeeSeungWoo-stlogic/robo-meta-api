@@ -23,14 +23,24 @@ class PostgresMetadataRepository:
         limit: int,
     ) -> list[dict[str, Any]]:
         query = """
-        SELECT id, db, schema_name, name, original_name,
-               description, analyzed_description,
+        SELECT t.id, t.db, t.schema_name, t.name, t.original_name,
+               t.description, t.analyzed_description,
+               d.profile_id AS source_instance_id, d.engine,
+               d.mindsdb_integration, d.mindsdb_catalog,
                1 - (text_to_sql_vector <=> $1::vector) AS score
-        FROM t2s_tables
-        WHERE text_to_sql_vector IS NOT NULL
-          AND text_to_sql_is_valid = true
-          AND 1 - (text_to_sql_vector <=> $1::vector) >= $3
-        ORDER BY text_to_sql_vector <=> $1::vector
+        FROM t2s_tables t
+        JOIN t2s_datasources d ON d.id=t.datasource_id
+        JOIN t2s_snapshot_activations a
+          ON a.source_instance_id=d.profile_id
+         AND a.sink_name='t2s_serving'
+         AND a.snapshot_id=t.metadata->>'snapshot_id'
+        WHERE t.text_to_sql_vector IS NOT NULL
+          AND t.text_to_sql_is_valid = true
+          AND t.review_status='approved'
+          AND t.metadata->>'embedding_model'=$4
+          AND (t.metadata->>'embedding_dimensions')::int=$5
+          AND 1 - (t.text_to_sql_vector <=> $1::vector) >= $3
+        ORDER BY t.text_to_sql_vector <=> $1::vector
         LIMIT $2
         """
         async with self._pool.acquire() as connection:
@@ -39,6 +49,8 @@ class PostgresMetadataRepository:
                 _vector_literal(embedding),
                 limit,
                 self._runtime.decision.minimum_similarity,
+                self._runtime.embedding.model,
+                self._runtime.embedding.dimensions,
             )
         return [dict(row) for row in rows]
 
@@ -61,8 +73,17 @@ class PostgresMetadataRepository:
                    ORDER BY c.vector <=> $1::vector
                  ) AS rank_in_table
           FROM t2s_columns c
+          JOIN t2s_tables t ON t.id=c.table_id
+          JOIN t2s_datasources d ON d.id=t.datasource_id
+          JOIN t2s_snapshot_activations a
+            ON a.source_instance_id=d.profile_id
+           AND a.sink_name='t2s_serving'
+           AND a.snapshot_id=t.metadata->>'snapshot_id'
           WHERE c.table_id = ANY($2::bigint[])
             AND c.vector IS NOT NULL
+            AND c.review_status='approved'
+            AND c.metadata->>'embedding_model'=$4
+            AND (c.metadata->>'embedding_dimensions')::int=$5
         )
         SELECT * FROM ranked
         WHERE rank_in_table <= $3
@@ -74,6 +95,8 @@ class PostgresMetadataRepository:
                 _vector_literal(embedding),
                 table_ids,
                 per_table_limit,
+                self._runtime.embedding.model,
+                self._runtime.embedding.dimensions,
             )
         grouped: dict[int, list[dict[str, Any]]] = {}
         for row in rows:
@@ -89,6 +112,8 @@ class PostgresMetadataRepository:
         LEFT JOIN t2s_columns c ON c.id=vm.column_id
         LEFT JOIN t2s_tables t ON t.id=c.table_id
         WHERE vm.verified = true
+          AND t.text_to_sql_is_valid=true
+          AND t.review_status='approved'
           AND position(lower(vm.natural_value) in lower($1)) > 0
         ORDER BY length(vm.natural_value) DESC, vm.code_value
         """
@@ -100,10 +125,15 @@ class PostgresMetadataRepository:
         if not table_ids:
             return []
         query = """
-        SELECT id, db, schema_name, name, original_name,
-               description, analyzed_description
-        FROM t2s_tables
-        WHERE id = ANY($1::bigint[])
+        SELECT t.id, t.db, t.schema_name, t.name, t.original_name,
+               t.description, t.analyzed_description,
+               d.profile_id AS source_instance_id, d.engine,
+               d.mindsdb_integration, d.mindsdb_catalog
+        FROM t2s_tables t
+        JOIN t2s_datasources d ON d.id=t.datasource_id
+        WHERE t.id = ANY($1::bigint[])
+          AND t.text_to_sql_is_valid=true
+          AND t.review_status='approved'
         """
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, list(table_ids))
@@ -121,8 +151,15 @@ class PostgresMetadataRepository:
         FROM t2s_fk_constraints fk
         JOIN t2s_columns c_from ON c_from.id=fk.from_column_id
         JOIN t2s_columns c_to ON c_to.id=fk.to_column_id
-        WHERE c_from.table_id = ANY($1::bigint[])
-           OR c_to.table_id = ANY($1::bigint[])
+        JOIN t2s_tables t_from ON t_from.id=c_from.table_id
+        JOIN t2s_tables t_to ON t_to.id=c_to.table_id
+        WHERE (
+          c_from.table_id = ANY($1::bigint[])
+          OR c_to.table_id = ANY($1::bigint[])
+        )
+          AND t_from.datasource_id=t_to.datasource_id
+          AND t_from.text_to_sql_is_valid=true
+          AND t_to.text_to_sql_is_valid=true
         """
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, list(table_ids))
@@ -149,6 +186,9 @@ class PostgresMetadataRepository:
         JOIN t2s_tables t_to ON t_to.id=c_to.table_id
         WHERE t_from.id = ANY($1::bigint[])
           AND t_to.id = ANY($1::bigint[])
+          AND t_from.datasource_id=t_to.datasource_id
+          AND t_from.text_to_sql_is_valid=true
+          AND t_to.text_to_sql_is_valid=true
         ORDER BY t_from.name, c_from.name, t_to.name
         """
         async with self._pool.acquire() as connection:
@@ -159,31 +199,9 @@ class PostgresMetadataRepository:
         self,
         table_ids: list[int],
     ) -> list[dict[str, Any]]:
-        if len(table_ids) < 2:
-            return []
-        query = """
-        SELECT t1.id AS from_table_id, t1.schema_name AS from_schema,
-               t1.name AS from_table, c1.name AS from_column,
-               t2.id AS to_table_id, t2.schema_name AS to_schema,
-               t2.name AS to_table, c2.name AS to_column
-        FROM t2s_columns c1
-        JOIN t2s_tables t1 ON t1.id=c1.table_id
-        JOIN t2s_columns c2
-          ON lower(c2.name)=lower(c1.name)
-         AND c2.table_id > c1.table_id
-        JOIN t2s_tables t2 ON t2.id=c2.table_id
-        WHERE c1.table_id = ANY($1::bigint[])
-          AND c2.table_id = ANY($1::bigint[])
-          AND (
-            c1.is_primary_key OR c2.is_primary_key
-            OR upper(c1.name) LIKE '%[_]CODE'
-            OR upper(c1.name) LIKE '%SN'
-          )
-        ORDER BY t1.name, c1.name, t2.name
-        """
-        async with self._pool.acquire() as connection:
-            rows = await connection.fetch(query, table_ids)
-        return [dict(row) for row in rows]
+        # Canonical v1에서는 승인된 join만 t2s_fk_constraints로 투영한다.
+        # repository에서 이름 규칙을 다시 추론하면 review gate를 우회하므로 금지한다.
+        return []
 
     async def list_tables(self) -> list[dict[str, Any]]:
         query = """

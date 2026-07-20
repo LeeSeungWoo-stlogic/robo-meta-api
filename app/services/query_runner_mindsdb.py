@@ -34,7 +34,10 @@ def _append_audit(entry: dict[str, Any]) -> None:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _validate_namespaces(sql: str) -> None:
+def _validate_namespaces(
+    sql: str,
+    execution_context: dict[str, Any] | None = None,
+) -> None:
     runtime = get_runtime()
     try:
         expression = parse_one(sql, read=runtime.execution.dialect)
@@ -45,20 +48,58 @@ def _validate_namespaces(sql: str) -> None:
         for cte in expression.find_all(exp.CTE)
         if cte.alias_or_name
     }
+    expected_catalogs = (
+        {str(execution_context["catalog"]).lower()}
+        if execution_context and execution_context.get("catalog")
+        else runtime.execution.allowed_catalogs
+    )
+    expected_schemas = (
+        {str(execution_context["schema_name"]).lower()}
+        if execution_context and execution_context.get("schema_name")
+        else runtime.execution.allowed_schemas
+    )
+    allowed_objects = {
+        str(value).lower()
+        for value in (
+            execution_context.get("allowed_objects", [])
+            if execution_context
+            else []
+        )
+    }
+    require_quoted_uppercase = bool(
+        execution_context
+        and execution_context.get("require_quoted_uppercase_identifiers")
+    )
     for table in expression.find_all(exp.Table):
         name = str(table.name or "")
         catalog = str(table.catalog or "")
         schema = str(table.db or "")
         if not catalog and not schema and name.lower() in cte_names:
             continue
-        if not catalog or not schema:
+        # MindsDB integration SQL의 실제 이름 형식은 integration.table이다.
+        # sqlglot은 이때 integration을 db로 파싱하므로 catalog로 승격한다.
+        if not catalog and schema:
+            catalog, schema = schema, ""
+        if not catalog:
             raise GuardError(
-                "MindsDB 실행 테이블은 catalog.schema.table 형식으로 완전 수식해야 합니다."
+                "MindsDB 실행 테이블은 integration.table 형식으로 완전 수식해야 합니다."
             )
-        if catalog.lower() not in runtime.execution.allowed_catalogs:
+        if catalog.lower() not in expected_catalogs:
             raise GuardError(f"허용되지 않은 catalog: {catalog}")
-        if schema.lower() not in runtime.execution.allowed_schemas:
+        if schema and schema.lower() not in expected_schemas:
             raise GuardError(f"허용되지 않은 schema: {schema}")
+        if allowed_objects and name.lower() not in allowed_objects:
+            raise GuardError(f"허용되지 않은 table: {name}")
+        if require_quoted_uppercase:
+            identifier = table.this
+            quoted = bool(
+                isinstance(identifier, exp.Identifier)
+                and identifier.args.get("quoted")
+            )
+            if not quoted or name != name.upper():
+                raise GuardError(
+                    "Tibero 식별자는 대문자 인용 식별자를 사용해야 합니다."
+                )
 
 
 async def execute(
@@ -68,12 +109,13 @@ async def execute(
     max_rows: int | None,
     caller: str | None = None,
     artifact_payload: dict[str, Any] | None = None,
+    execution_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     runtime = get_runtime()
     audit_id = str(uuid4())
     try:
         report = check(sql)
-        _validate_namespaces(report.normalized_sql)
+        _validate_namespaces(report.normalized_sql, execution_context)
         if artifact_payload is not None:
             # Semantic View 경로: Artifact allowlist(object/column/join/
             # mandatory filter)를 read-only guard와 결합해 추가 검증
@@ -166,6 +208,7 @@ async def execute(
         "sql": report.normalized_sql,
         "backend": runtime.execution.backend,
         "integration": runtime.execution.integration,
+        "execution_context": execution_context,
         "timeout_s_applied": applied_timeout,
         "max_rows_applied": applied_rows,
         "row_count": len(rows),
@@ -186,4 +229,10 @@ async def execute(
         "elapsed_ms": elapsed_ms,
         "timeout_s_applied": applied_timeout,
         "max_rows_applied": applied_rows,
+        "datasource": (
+            execution_context.get("source_instance_id")
+            if execution_context
+            else runtime.execution.integration
+        ),
+        "query_id": audit_id,
     }
