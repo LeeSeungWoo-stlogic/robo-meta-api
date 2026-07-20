@@ -84,6 +84,9 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
         _validate_namespaces(
             "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`"
         )
+        _validate_namespaces(
+            "SELECT * FROM `allowed_catalog`.`SAMPLE_TABLE`"
+        )
 
     def test_unqualified_table_is_rejected(self) -> None:
         with self.assertRaises(GuardError):
@@ -101,6 +104,40 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
             "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`"
             ") SELECT * FROM sample"
         )
+
+    def test_execution_context_restricts_table_allowlist(self) -> None:
+        context = {
+            "catalog": "allowed_catalog",
+            "schema_name": "allowed_schema",
+            "allowed_objects": ["SAMPLE_TABLE"],
+            "require_quoted_uppercase_identifiers": False,
+        }
+        _validate_namespaces(
+            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
+            context,
+        )
+        with self.assertRaises(GuardError):
+            _validate_namespaces(
+                "SELECT * FROM `allowed_catalog`.`allowed_schema`.`OTHER_TABLE`",
+                context,
+            )
+
+    def test_tibero_execution_context_requires_quoted_uppercase(self) -> None:
+        context = {
+            "catalog": "allowed_catalog",
+            "schema_name": "allowed_schema",
+            "allowed_objects": ["SAMPLE_TABLE"],
+            "require_quoted_uppercase_identifiers": True,
+        }
+        _validate_namespaces(
+            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
+            context,
+        )
+        with self.assertRaises(GuardError):
+            _validate_namespaces(
+                "SELECT * FROM allowed_catalog.allowed_schema.SAMPLE_TABLE",
+                context,
+            )
 
 
 if __name__ == "__main__":

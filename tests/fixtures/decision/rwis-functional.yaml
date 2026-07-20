@@ -1,0 +1,20 @@
+contract_version: "1.0"
+source_instance_id: rwis-pg
+search_cases:
+  - question: "RDF01HH_TB 시간 단위 원시 자료"
+    expected_table: RDF01HH_TB
+  - question: "RDR15MI_TB 15분 자료"
+    expected_table: RDR15MI_TB
+  - question: "RDIRSINFO_TB 시스템 정보"
+    expected_table: RDIRSINFO_TB
+  - question: "RDISAUP_TB 사업장 정보"
+    expected_table: RDISAUP_TB
+  - question: "RDD01DD_TB 일 단위 데이터"
+    expected_table: RDD01DD_TB
+join_cases:
+  - question: "RDISAMU_TB 문자 발송 정보"
+    expected_from: RWIS.RDISAMU_TB.SMS_CODE
+    expected_to: RWIS.RDISAUP_TB.SMS_CODE
+entity_negative_cases:
+  - question: "존재하지 않는 사업장 자연어 값"
+    expected_resolved_count: 0

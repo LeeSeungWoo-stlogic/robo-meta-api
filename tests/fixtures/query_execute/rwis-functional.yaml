@@ -1,0 +1,49 @@
+contract_version: "1.0"
+execution_context:
+  backend: mindsdb
+  dialect: postgres
+  integration: rwis_postgres_active
+  catalog: rwis_postgres_active
+  schema_name: RWIS
+  qualification_pattern: "{catalog}.{table}"
+  identifier_quote: "`"
+  require_quoted_uppercase_identifiers: false
+  source_instance_id: rwis-pg
+  allowed_objects:
+    - RDF01HH_TB
+accepted:
+  - sql: "SELECT tagsn FROM rwis_postgres_active.RDF01HH_TB LIMIT 1"
+    expected_status: ok
+  - sql: "SELECT * FROM gios_tibero_active.`T_G10001` LIMIT 1"
+    expected_status: ok
+    execution_context:
+      backend: mindsdb
+      dialect: tibero
+      integration: gios_tibero_active
+      catalog: gios_tibero_active
+      schema_name: GIOS_TEST
+      qualification_pattern: "{catalog}.{table}"
+      identifier_quote: "`"
+      require_quoted_uppercase_identifiers: true
+      source_instance_id: gios-tibero
+      allowed_objects:
+        - T_G10001
+  - sql: "SELECT * FROM hdaps_tibero_active.`DTBCODE` LIMIT 1"
+    expected_status: ok
+    execution_context:
+      backend: mindsdb
+      dialect: tibero
+      integration: hdaps_tibero_active
+      catalog: hdaps_tibero_active
+      schema_name: HDAPS_TEST
+      qualification_pattern: "{catalog}.{table}"
+      identifier_quote: "`"
+      require_quoted_uppercase_identifiers: true
+      source_instance_id: hdaps-tibero
+      allowed_objects:
+        - DTBCODE
+rejected:
+  - sql: "DELETE FROM rwis_postgres_active.RDF01HH_TB"
+  - sql: "SELECT * FROM other.RDF01HH_TB"
+  - sql: "SELECT * FROM rwis_postgres_active.OTHER_TABLE"
+  - sql: "SELECT * FROM RDF01HH_TB"

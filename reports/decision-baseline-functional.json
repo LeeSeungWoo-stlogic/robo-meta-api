@@ -1,0 +1,93 @@
+{
+  "contract_version": "1.0",
+  "provider": "text-embedding-3-small",
+  "dimensions": 1024,
+  "search": [
+    {
+      "question": "RDF01HH_TB 시간 단위 원시 자료",
+      "expected_table": "RDF01HH_TB",
+      "actual_top3": [
+        "RDF01HH_TB",
+        "RDD01DD_TB",
+        "CALC_KEPCO_RDF01HH_MAST_TB"
+      ],
+      "passed": true
+    },
+    {
+      "question": "RDR15MI_TB 15분 자료",
+      "expected_table": "RDR15MI_TB",
+      "actual_top3": [
+        "RDR15MI_TB",
+        "RDD01DD_TB",
+        "RDIRSSYS_TB"
+      ],
+      "passed": true
+    },
+    {
+      "question": "RDIRSINFO_TB 시스템 정보",
+      "expected_table": "RDIRSINFO_TB",
+      "actual_top3": [
+        "RDIRSSYS_TB",
+        "RDIRSINFO_TB",
+        "RDISAUP_TB"
+      ],
+      "passed": true
+    },
+    {
+      "question": "RDISAUP_TB 사업장 정보",
+      "expected_table": "RDISAUP_TB",
+      "actual_top3": [
+        "RDISAUP_TB",
+        "RDISAMU_TB",
+        "RDIRSSYS_TB"
+      ],
+      "passed": true
+    },
+    {
+      "question": "RDD01DD_TB 일 단위 데이터",
+      "expected_table": "RDD01DD_TB",
+      "actual_top3": [
+        "RDD01DD_TB",
+        "RDISAMU_TB",
+        "RDR15MI_TB"
+      ],
+      "passed": true
+    }
+  ],
+  "join": [
+    {
+      "question": "RDISAMU_TB 문자 발송 정보",
+      "expected_from": "RWIS.RDISAMU_TB.SMS_CODE",
+      "expected_to": "RWIS.RDISAUP_TB.SMS_CODE",
+      "actual_bridges": [
+        {
+          "from": "RWIS.CALC_KEPCO_RDF01HH_MAST_TB.TAGSN",
+          "to": "RWIS.RDD01DD_TB.TAGSN"
+        },
+        {
+          "from": "RWIS.RDISAMU_TB.BNB_CODE",
+          "to": "RWIS.RDISAUP_TB.BNB_CODE"
+        },
+        {
+          "from": "RWIS.RDISAMU_TB.SMS_CODE",
+          "to": "RWIS.RDISAUP_TB.SMS_CODE"
+        },
+        {
+          "from": "RWIS.RDISAUP_TB.SMS_CODE",
+          "to": "RWIS.RDISAMU_TB.SMS_CODE"
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "entity_negative": [
+    {
+      "question": "존재하지 않는 사업장 자연어 값",
+      "expected_resolved_count": 0,
+      "actual_resolved_count": 0,
+      "passed": true
+    }
+  ],
+  "passed": 7,
+  "total": 7
+}

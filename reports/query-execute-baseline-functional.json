@@ -1,0 +1,77 @@
+{
+  "contract_version": "1.0",
+  "accepted": [
+    {
+      "sql": "SELECT tagsn FROM rwis_postgres_active.RDF01HH_TB LIMIT 1",
+      "expected_status": "ok",
+      "actual_status": "ok",
+      "row_count": 1,
+      "query_id_present": true,
+      "passed": true
+    },
+    {
+      "sql": "SELECT * FROM gios_tibero_active.`T_G10001` LIMIT 1",
+      "expected_status": "ok",
+      "execution_context": {
+        "backend": "mindsdb",
+        "dialect": "tibero",
+        "integration": "gios_tibero_active",
+        "catalog": "gios_tibero_active",
+        "schema_name": "GIOS_TEST",
+        "qualification_pattern": "{catalog}.{table}",
+        "identifier_quote": "`",
+        "require_quoted_uppercase_identifiers": true,
+        "source_instance_id": "gios-tibero",
+        "allowed_objects": [
+          "T_G10001"
+        ]
+      },
+      "actual_status": "ok",
+      "row_count": 1,
+      "query_id_present": true,
+      "passed": true
+    },
+    {
+      "sql": "SELECT * FROM hdaps_tibero_active.`DTBCODE` LIMIT 1",
+      "expected_status": "ok",
+      "execution_context": {
+        "backend": "mindsdb",
+        "dialect": "tibero",
+        "integration": "hdaps_tibero_active",
+        "catalog": "hdaps_tibero_active",
+        "schema_name": "HDAPS_TEST",
+        "qualification_pattern": "{catalog}.{table}",
+        "identifier_quote": "`",
+        "require_quoted_uppercase_identifiers": true,
+        "source_instance_id": "hdaps-tibero",
+        "allowed_objects": [
+          "DTBCODE"
+        ]
+      },
+      "actual_status": "ok",
+      "row_count": 1,
+      "query_id_present": true,
+      "passed": true
+    }
+  ],
+  "rejected": [
+    {
+      "sql": "DELETE FROM rwis_postgres_active.RDF01HH_TB",
+      "passed": true
+    },
+    {
+      "sql": "SELECT * FROM other.RDF01HH_TB",
+      "passed": true
+    },
+    {
+      "sql": "SELECT * FROM rwis_postgres_active.OTHER_TABLE",
+      "passed": true
+    },
+    {
+      "sql": "SELECT * FROM RDF01HH_TB",
+      "passed": true
+    }
+  ],
+  "passed": 7,
+  "total": 7
+}
