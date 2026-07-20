@@ -7,7 +7,7 @@
 - 신규 API: host `8100` → container `8100`
 - 기존 `kair-meta-api:8096`과 병행 운영
 - Metadata Store: host `15433`
-- MindsDB: host `47334`, `47335`
+- Query execution: VM 152 MindsDB `10.40.4.152:47334`
 
 ## 1. 반입·기동
 
@@ -47,18 +47,23 @@ decision:
 
 ## 3. MindsDB
 
-VM 163 기본 가이드에는 MindsDB가 없으므로 260720 bundle에
-`kair-mindsdb-neo4j:260720`을 포함한다.
+MindsDB 이미지는 163에 반입하지 않는다. VM 152의 기존 `nk-mindsdb`가 사용하는
+integration을 그대로 사용한다.
 
 ```bash
-docker compose up -d --no-build --pull never mindsdb
-bash scripts/register-mindsdb-source.sh
+curl -fsS http://10.40.4.152:47334/api/status
 ```
 
-Metastore는 dump 없이 빈 DB로 시작한다. OA에서 실제 사용할 원천 metadata를
-수집·증강·승인·활성화하고 `.env`의 `SOURCE_DB_*`에도 같은 원천을 지정한다.
-원천을 바꾸면 `runtime-settings.oa.yaml`의 integration, catalog, schema도 함께
-변경한다.
+```yaml
+execution:
+  sql_api_url: http://10.40.4.152:47334/api/sql/query
+  integration: rwis_postgres_active
+  catalog: rwis_postgres_active
+  schema: RWIS
+```
+
+VM 152에서는 47334 포트를 163에 공개하고 접근 출발지를 163으로 제한한다.
+원천을 변경하면 152 integration과 163 runtime namespace를 함께 변경한다.
 
 ## 4. API 검증
 
@@ -111,10 +116,8 @@ API는 SQLGlot 기반으로 다음을 검증한 후 MindsDB로 전달한다.
 ```bash
 docker compose ps
 docker compose logs --since 10m metadata-store
-docker compose logs --since 10m mindsdb
 docker compose logs --since 10m robo-meta-api
-docker compose exec -T mindsdb \
-  curl -fsS http://127.0.0.1:47334/api/status
+curl -fsS http://10.40.4.152:47334/api/status
 ```
 
 - decision LLM 오류: serving 16과 Bearer 확인
