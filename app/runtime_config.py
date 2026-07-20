@@ -23,6 +23,21 @@ def _required(mapping: dict[str, Any], path: str) -> Any:
     return current
 
 
+def _optional(mapping: dict[str, Any], path: str, default: Any) -> Any:
+    current: Any = mapping
+    for key in path.split("."):
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return default if current is None or current == "" else current
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _secret(reference: dict[str, Any]) -> str:
     provider = _required(reference, "provider")
     if provider != "process_env":
@@ -68,6 +83,19 @@ class DecisionRuntime:
     minimum_similarity: float
     verified_join_confidence: float
     convention_join_confidence: float
+    hyde_enabled: bool = True
+    hyde_model: str = "gpt-4o-mini"
+    hyde_weight: float = 0.6
+    question_weight: float = 0.4
+    role_weight: float = 0.35
+    role_top_k: int = 3
+    role_min_score_ratio: float = 0.8
+    role_semantic_floor: float = 0.55
+    score_gap_ratio: float = 0.85
+    score_min_step: float = 0.012
+    score_top_radius: float = 0.01
+    fk_max_hops: int = 3
+    fk_path_limit: int = 50
 
 
 @dataclass(frozen=True)
@@ -152,6 +180,45 @@ def load_runtime(path: str | Path) -> RoboRuntime:
             ),
             convention_join_confidence=float(
                 _required(decision, "convention_join_confidence")
+            ),
+            hyde_enabled=_as_bool(
+                _optional(decision, "hyde_enabled", True)
+            ),
+            hyde_model=str(
+                _optional(decision, "hyde_model", "gpt-4o-mini")
+            ),
+            hyde_weight=float(
+                _optional(decision, "hyde_weight", 0.6)
+            ),
+            question_weight=float(
+                _optional(decision, "question_weight", 0.4)
+            ),
+            role_weight=float(
+                _optional(decision, "role_weight", 0.35)
+            ),
+            role_top_k=int(
+                _optional(decision, "role_top_k", 3)
+            ),
+            role_min_score_ratio=float(
+                _optional(decision, "role_min_score_ratio", 0.8)
+            ),
+            role_semantic_floor=float(
+                _optional(decision, "role_semantic_floor", 0.55)
+            ),
+            score_gap_ratio=float(
+                _optional(decision, "score_gap_ratio", 0.85)
+            ),
+            score_min_step=float(
+                _optional(decision, "score_min_step", 0.012)
+            ),
+            score_top_radius=float(
+                _optional(decision, "score_top_radius", 0.01)
+            ),
+            fk_max_hops=int(
+                _optional(decision, "fk_max_hops", 3)
+            ),
+            fk_path_limit=int(
+                _optional(decision, "fk_path_limit", 50)
             ),
         ),
         execution=ExecutionRuntime(

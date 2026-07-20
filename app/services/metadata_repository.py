@@ -21,6 +21,7 @@ class PostgresMetadataRepository:
         embedding: list[float],
         *,
         limit: int,
+        source_instance_id: str | None = None,
     ) -> list[dict[str, Any]]:
         query = """
         SELECT t.id, t.db, t.schema_name, t.name, t.original_name,
@@ -39,6 +40,7 @@ class PostgresMetadataRepository:
           AND t.review_status='approved'
           AND t.metadata->>'embedding_model'=$4
           AND (t.metadata->>'embedding_dimensions')::int=$5
+          AND ($6::text IS NULL OR d.profile_id=$6)
           AND 1 - (t.text_to_sql_vector <=> $1::vector) >= $3
         ORDER BY t.text_to_sql_vector <=> $1::vector
         LIMIT $2
@@ -51,6 +53,7 @@ class PostgresMetadataRepository:
                 self._runtime.decision.minimum_similarity,
                 self._runtime.embedding.model,
                 self._runtime.embedding.dimensions,
+                source_instance_id,
             )
         return [dict(row) for row in rows]
 
@@ -82,6 +85,7 @@ class PostgresMetadataRepository:
           WHERE c.table_id = ANY($2::bigint[])
             AND c.vector IS NOT NULL
             AND c.review_status='approved'
+            AND t.text_to_sql_is_valid=true
             AND c.metadata->>'embedding_model'=$4
             AND (c.metadata->>'embedding_dimensions')::int=$5
         )
@@ -193,6 +197,52 @@ class PostgresMetadataRepository:
         """
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, table_ids)
+        return [dict(row) for row in rows]
+
+    async def fetch_join_edges(
+        self,
+        *,
+        source_instance_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return the approved serving JOIN graph for one source instance.
+
+        t2s_fk_constraints is populated only from approved canonical join
+        artifacts, so the serving table itself is the approval boundary.
+        """
+        query = """
+        SELECT t_from.id AS from_table_id,
+               t_from.schema_name AS from_schema,
+               t_from.original_name AS from_table,
+               c_from.name AS from_column,
+               t_to.id AS to_table_id,
+               t_to.schema_name AS to_schema,
+               t_to.original_name AS to_table,
+               c_to.name AS to_column,
+               fk.constraint_name,
+               fk.metadata
+        FROM t2s_fk_constraints fk
+        JOIN t2s_columns c_from ON c_from.id=fk.from_column_id
+        JOIN t2s_tables t_from ON t_from.id=c_from.table_id
+        JOIN t2s_datasources d_from ON d_from.id=t_from.datasource_id
+        JOIN t2s_columns c_to ON c_to.id=fk.to_column_id
+        JOIN t2s_tables t_to ON t_to.id=c_to.table_id
+        JOIN t2s_datasources d_to ON d_to.id=t_to.datasource_id
+        JOIN t2s_snapshot_activations a
+          ON a.source_instance_id=d_from.profile_id
+         AND a.sink_name='t2s_serving'
+         AND a.snapshot_id=t_from.metadata->>'snapshot_id'
+         AND a.snapshot_id=t_to.metadata->>'snapshot_id'
+        WHERE d_from.profile_id=$1
+          AND d_to.profile_id=$1
+          AND t_from.datasource_id=t_to.datasource_id
+          AND t_from.text_to_sql_is_valid=true
+          AND t_to.text_to_sql_is_valid=true
+          AND c_from.review_status='approved'
+          AND c_to.review_status='approved'
+        ORDER BY t_from.id, t_to.id, c_from.name, c_to.name
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query, source_instance_id)
         return [dict(row) for row in rows]
 
     async def convention_bridges(

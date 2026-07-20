@@ -199,6 +199,121 @@ RecommendedStrategy = Literal[
 BridgeVia = Literal["fk", "ontology", "embedding", "term", "convention"]
 
 
+AnalysisStatus = Literal["complete", "degraded", "failed"]
+RoleNecessity = Literal["required", "optional"]
+RoleCardinality = Literal["one", "many"]
+FilterOperator = Literal[
+    "EQ",
+    "NE",
+    "IN",
+    "BETWEEN",
+    "GT",
+    "GTE",
+    "LT",
+    "LTE",
+    "LIKE",
+    "ILIKE",
+    "IS_NULL",
+    "IS_NOT_NULL",
+]
+PlanCompleteness = Literal["complete", "partial", "degraded", "failed"]
+
+
+class MeasurementRequirement(BaseModel):
+    metric: Optional[str] = None
+    aggregation: Optional[str] = None
+    storage_type_hint: Optional[str] = None
+
+
+class SchemaRoleRequirement(BaseModel):
+    role: str
+    necessity: RoleNecessity = "required"
+    cardinality: RoleCardinality = "one"
+    search_terms: List[str] = Field(default_factory=list)
+
+
+class JoinRequirement(BaseModel):
+    from_role: str
+    to_role: str
+    required: bool = True
+    key_meanings: List[str] = Field(default_factory=list)
+
+
+class FilterRequirement(BaseModel):
+    meaning: str
+    required: bool = True
+    operator_hint: FilterOperator = "EQ"
+    value_text: Optional[str] = None
+
+
+class QuerySearchKeywords(BaseModel):
+    tables: List[str] = Field(default_factory=list)
+    columns: List[str] = Field(default_factory=list)
+
+
+class QueryAnalysis(BaseModel):
+    status: AnalysisStatus
+    reason: Optional[str] = None
+    fallback: Optional[Literal["question_vector"]] = None
+    intent: str = ""
+    entities_include: List[str] = Field(default_factory=list)
+    entities_exclude: List[str] = Field(default_factory=list)
+    measurement: MeasurementRequirement = Field(
+        default_factory=MeasurementRequirement
+    )
+    schema_roles: List[SchemaRoleRequirement] = Field(default_factory=list)
+    join_requirements: List[JoinRequirement] = Field(default_factory=list)
+    filter_requirements: List[FilterRequirement] = Field(default_factory=list)
+    search_keywords: QuerySearchKeywords = Field(
+        default_factory=QuerySearchKeywords
+    )
+
+
+class PlannedTable(TableKey):
+    table_id: Optional[int] = None
+    role: str
+    roles: List[str] = Field(default_factory=list)
+    necessity: RoleNecessity = "required"
+    required_columns: List[str] = Field(default_factory=list)
+    score: float = 0.0
+
+
+class PlannedJoinCondition(BaseModel):
+    from_: str = Field(..., alias="from")
+    to: str
+    origin: Optional[str] = None
+    confidence: float = 0.0
+
+    model_config = {"populate_by_name": True}
+
+
+class PlannedJoinPath(BaseModel):
+    from_table: TableKey
+    to_table: TableKey
+    hop_count: int
+    conditions: List[PlannedJoinCondition] = Field(default_factory=list)
+    bridge_tables: List[TableKey] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class PlannedFilter(BaseModel):
+    meaning: str
+    column: Optional[str] = None
+    operator: FilterOperator
+    value: Optional[str] = None
+    resolution_status: Literal["resolved", "unresolved"] = "unresolved"
+    confidence: float = 0.0
+
+
+class QueryPlan(BaseModel):
+    completeness: PlanCompleteness
+    strategy: Optional[RecommendedStrategy] = None
+    required_tables: List[PlannedTable] = Field(default_factory=list)
+    bridge_tables: List[TableKey] = Field(default_factory=list)
+    join_paths: List[PlannedJoinPath] = Field(default_factory=list)
+    filters: List[PlannedFilter] = Field(default_factory=list)
+    unresolved_requirements: List[str] = Field(default_factory=list)
+
 class MatchedColumn(BaseModel):
     """자연어 질의-컬럼 매칭 결과. 컬럼 RAG(`embedding_columns`) 활성화 후 채워짐.
     미적재 시 빈 배열.
@@ -344,6 +459,8 @@ class DecisionResponse(BaseModel):
     suggested_probes: List[SuggestedProbe] = Field(default_factory=list)
     resolution_status: ResolutionStatus = "skipped"
     execution_context: Optional[ExecutionContext] = None
+    query_analysis: Optional[QueryAnalysis] = None
+    query_plan: Optional[QueryPlan] = None
 
 
 # ---------------------------------------------------------------------------

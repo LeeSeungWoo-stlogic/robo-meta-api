@@ -32,6 +32,19 @@ robo_meta_api:
     minimum_similarity: 0.2
     verified_join_confidence: 1.0
     convention_join_confidence: 0.7
+    hyde_enabled: true
+    hyde_model: gpt-4o-mini
+    hyde_weight: 0.6
+    question_weight: 0.4
+    role_weight: 0.35
+    role_top_k: 3
+    role_min_score_ratio: 0.8
+    role_semantic_floor: 0.55
+    score_gap_ratio: 0.85
+    score_min_step: 0.012
+    score_top_radius: 0.01
+    fk_max_hops: 3
+    fk_path_limit: 50
 
   execution:
     backend: mindsdb

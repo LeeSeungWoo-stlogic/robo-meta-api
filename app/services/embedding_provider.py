@@ -30,6 +30,7 @@ class EmbeddingProvider(Protocol):
     dimensions: int
 
     async def embed(self, text: str) -> list[float]: ...
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class HttpEmbeddingProvider:
@@ -41,13 +42,18 @@ class HttpEmbeddingProvider:
         self.dimensions = runtime.embedding.dimensions
 
     async def embed(self, text: str) -> list[float]:
+        return (await self.embed_batch([text]))[0]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
         runtime = get_runtime()
         headers = {"Content-Type": "application/json"}
         if runtime.embedding.auth_mode == "bearer" and runtime.embedding.api_key:
             headers["Authorization"] = f"Bearer {runtime.embedding.api_key}"
         payload = {
             "model": runtime.embedding.model,
-            "input": text,
+            "input": texts,
             "dimensions": runtime.embedding.dimensions,
         }
         try:
@@ -64,12 +70,20 @@ class HttpEmbeddingProvider:
         except httpx.HTTPError as e:
             raise EmbeddingProviderError(
                 "EMBED_PROVIDER_DOWN", f"embedding provider 호출 실패: {e}") from e
-        vector = body["data"][0]["embedding"]
-        if len(vector) != runtime.embedding.dimensions:
+        rows = sorted(body["data"], key=lambda item: int(item.get("index", 0)))
+        if len(rows) != len(texts):
             raise EmbeddingProviderError(
-                "EMBED_DIM_MISMATCH",
-                f"Question embedding dimension mismatch: {len(vector)}")
-        return vector
+                "EMBED_BATCH_MISMATCH",
+                f"Embedding response count mismatch: {len(rows)} != {len(texts)}",
+            )
+        vectors = [row["embedding"] for row in rows]
+        for vector in vectors:
+            if len(vector) != runtime.embedding.dimensions:
+                raise EmbeddingProviderError(
+                    "EMBED_DIM_MISMATCH",
+                    f"Question embedding dimension mismatch: {len(vector)}",
+                )
+        return vectors
 
 
 def _fixed_embedding(text: str, dim: int) -> list[float]:
@@ -103,6 +117,9 @@ class FixtureEmbeddingProvider:
                 "fixture provider는 기준 질문만 embedding할 수 있습니다.")
         return _fixed_embedding(text, self.dimensions)
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed(text) for text in texts]
+
 
 class LexicalHashEmbeddingProvider:
     """K-AIR-meta-ingest의 비운영 1024차원 검색 회귀 provider."""
@@ -121,12 +138,19 @@ class LexicalHashEmbeddingProvider:
         norm = math.sqrt(sum(value * value for value in vector))
         return [value / norm for value in vector] if norm else vector
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed(text) for text in texts]
+
 
 class FailingEmbeddingProvider:
     model = "failing-v1"
     dimensions = 16
 
     async def embed(self, text: str) -> list[float]:
+        raise EmbeddingProviderError("EMBED_PROVIDER_DOWN", "embedding provider 장애")
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        del texts
         raise EmbeddingProviderError("EMBED_PROVIDER_DOWN", "embedding provider 장애")
 
 
