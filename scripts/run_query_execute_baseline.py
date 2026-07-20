@@ -88,7 +88,7 @@ def main() -> None:
     parser.add_argument(
         "--settings",
         type=Path,
-        default=ROOT / "config" / "runtime-settings.docker.yaml",
+        default=ROOT / "config" / "runtime-settings.docker.local.yaml",
     )
     parser.add_argument(
         "--fixture",

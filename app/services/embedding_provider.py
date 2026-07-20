@@ -160,7 +160,12 @@ _provider: EmbeddingProvider | None = None
 def get_embedding_provider() -> EmbeddingProvider:
     global _provider
     if _provider is None:
-        _provider = HttpEmbeddingProvider()
+        runtime = get_runtime()
+        _provider = (
+            LexicalHashEmbeddingProvider()
+            if runtime.embedding.provider == "lexical_test"
+            else HttpEmbeddingProvider()
+        )
     return _provider
 
 

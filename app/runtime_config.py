@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 import yaml
 
@@ -49,6 +50,72 @@ def _secret(reference: dict[str, Any]) -> str:
     return value
 
 
+def _source_bindings(
+    execution: dict[str, Any],
+) -> tuple[Mapping[str, SourceBindingRuntime], str]:
+    raw = _required(execution, "source_bindings")
+    if not isinstance(raw, dict) or not raw:
+        raise RuntimeConfigError("execution.source_bindings must be a non-empty mapping")
+    default_id = str(_required(execution, "default_source_instance_id"))
+    bindings: dict[str, SourceBindingRuntime] = {}
+    for raw_id, raw_binding in raw.items():
+        source_id = str(raw_id).strip()
+        if not source_id or not isinstance(raw_binding, dict):
+            raise RuntimeConfigError("source binding key/value가 올바르지 않습니다")
+        integration = str(_required(raw_binding, "integration"))
+        catalog = str(_required(raw_binding, "catalog"))
+        schema = str(_required(raw_binding, "schema"))
+        allowed_catalogs = frozenset(
+            str(item).lower()
+            for item in _optional(
+                raw_binding,
+                "allowed_catalogs",
+                [integration],
+            )
+        )
+        allowed_schemas = frozenset(
+            str(item).lower()
+            for item in _optional(
+                raw_binding,
+                "allowed_schemas",
+                [schema],
+            )
+        )
+        if integration.lower() not in allowed_catalogs:
+            raise RuntimeConfigError(
+                f"source binding {source_id}: integration이 allowed_catalogs에 없습니다"
+            )
+        if schema.lower() not in allowed_schemas:
+            raise RuntimeConfigError(
+                f"source binding {source_id}: schema가 allowed_schemas에 없습니다"
+            )
+        bindings[source_id] = SourceBindingRuntime(
+            source_instance_id=source_id,
+            integration=integration,
+            catalog=catalog,
+            schema=schema,
+            source_engine=str(_required(raw_binding, "source_engine")),
+            parser_dialect=str(_required(raw_binding, "parser_dialect")),
+            qualification_pattern=str(
+                _required(raw_binding, "qualification_pattern")
+            ),
+            identifier_quote=str(_required(raw_binding, "identifier_quote")),
+            require_quoted_uppercase_identifiers=_as_bool(
+                _required(
+                    raw_binding,
+                    "require_quoted_uppercase_identifiers",
+                )
+            ),
+            allowed_catalogs=allowed_catalogs,
+            allowed_schemas=allowed_schemas,
+        )
+    if default_id not in bindings:
+        raise RuntimeConfigError(
+            "execution.default_source_instance_id가 source_bindings에 없습니다"
+        )
+    return MappingProxyType(bindings), default_id
+
+
 @dataclass(frozen=True)
 class MetadataRuntime:
     host: str
@@ -74,6 +141,7 @@ class EmbeddingRuntime:
     auth_mode: str
     api_key: str | None
     timeout_seconds: float
+    provider: str = "http"
 
 
 @dataclass(frozen=True)
@@ -100,6 +168,21 @@ class DecisionRuntime:
 
 
 @dataclass(frozen=True)
+class SourceBindingRuntime:
+    source_instance_id: str
+    integration: str
+    catalog: str
+    schema: str
+    source_engine: str
+    parser_dialect: str
+    qualification_pattern: str
+    identifier_quote: str
+    require_quoted_uppercase_identifiers: bool
+    allowed_catalogs: frozenset[str]
+    allowed_schemas: frozenset[str]
+
+
+@dataclass(frozen=True)
 class ExecutionRuntime:
     backend: str
     sql_api_url: str
@@ -118,6 +201,39 @@ class ExecutionRuntime:
     maximum_rows: int
     maximum_response_bytes: int
     audit_log_path: str
+    source_bindings: Mapping[str, SourceBindingRuntime] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    default_source_instance_id: str | None = None
+
+    def binding_for(
+        self,
+        source_instance_id: str | None = None,
+    ) -> SourceBindingRuntime:
+        selected = source_instance_id or self.default_source_instance_id
+        if self.source_bindings:
+            if not selected or selected not in self.source_bindings:
+                raise RuntimeConfigError(
+                    f"등록되지 않은 source_instance_id: {selected or '<empty>'}"
+                )
+            return self.source_bindings[selected]
+        # 수동으로 ExecutionRuntime을 만드는 기존 단위시험만을 위한 호환 경로다.
+        legacy_id = selected or "legacy-default"
+        return SourceBindingRuntime(
+            source_instance_id=legacy_id,
+            integration=self.integration,
+            catalog=self.catalog,
+            schema=self.schema,
+            source_engine=self.dialect,
+            parser_dialect=self.dialect,
+            qualification_pattern=self.qualification_pattern,
+            identifier_quote=self.identifier_quote,
+            require_quoted_uppercase_identifiers=(
+                self.require_quoted_uppercase_identifiers
+            ),
+            allowed_catalogs=self.allowed_catalogs,
+            allowed_schemas=self.allowed_schemas,
+        )
 
 
 @dataclass(frozen=True)
@@ -145,6 +261,8 @@ def load_runtime(path: str | Path) -> RoboRuntime:
     embedding = _required(robo, "embedding")
     decision = _required(robo, "decision")
     execution = _required(robo, "execution")
+    bindings, default_binding_id = _source_bindings(execution)
+    default_binding = bindings[default_binding_id]
     auth_mode = str(_required(embedding, "auth_mode"))
     api_key = (
         _secret(_required(embedding, "api_key_ref"))
@@ -171,6 +289,7 @@ def load_runtime(path: str | Path) -> RoboRuntime:
             auth_mode=auth_mode,
             api_key=api_key,
             timeout_seconds=float(_required(embedding, "timeout_seconds")),
+            provider=str(_optional(embedding, "provider", "http")),
         ),
         decision=DecisionRuntime(
             table_top_k=int(_required(decision, "table_top_k")),
@@ -229,23 +348,17 @@ def load_runtime(path: str | Path) -> RoboRuntime:
         execution=ExecutionRuntime(
             backend=str(_required(execution, "backend")),
             sql_api_url=str(_required(execution, "sql_api_url")),
-            integration=str(_required(execution, "integration")),
-            catalog=str(_required(execution, "catalog")),
-            schema=str(_required(execution, "schema")),
-            dialect=str(_required(execution, "dialect")),
-            qualification_pattern=str(_required(execution, "qualification_pattern")),
-            identifier_quote=str(_required(execution, "identifier_quote")),
-            require_quoted_uppercase_identifiers=bool(
-                _required(execution, "require_quoted_uppercase_identifiers")
+            integration=default_binding.integration,
+            catalog=default_binding.catalog,
+            schema=default_binding.schema,
+            dialect=default_binding.parser_dialect,
+            qualification_pattern=default_binding.qualification_pattern,
+            identifier_quote=default_binding.identifier_quote,
+            require_quoted_uppercase_identifiers=(
+                default_binding.require_quoted_uppercase_identifiers
             ),
-            allowed_catalogs=frozenset(
-                str(item).lower()
-                for item in _required(execution, "allowed_catalogs")
-            ),
-            allowed_schemas=frozenset(
-                str(item).lower()
-                for item in _required(execution, "allowed_schemas")
-            ),
+            allowed_catalogs=default_binding.allowed_catalogs,
+            allowed_schemas=default_binding.allowed_schemas,
             default_timeout_seconds=int(
                 _required(execution, "default_timeout_seconds")
             ),
@@ -258,6 +371,8 @@ def load_runtime(path: str | Path) -> RoboRuntime:
                 _required(execution, "maximum_response_bytes")
             ),
             audit_log_path=str(_required(execution, "audit_log_path")),
+            source_bindings=bindings,
+            default_source_instance_id=default_binding_id,
         ),
     )
     if runtime.metadata_backend != "postgres":
@@ -266,6 +381,20 @@ def load_runtime(path: str | Path) -> RoboRuntime:
         raise RuntimeConfigError("Part 2 requires execution.backend=mindsdb")
     if runtime.embedding.auth_mode not in {"none", "bearer"}:
         raise RuntimeConfigError("Unsupported embedding auth_mode")
+    if runtime.embedding.provider not in {"http", "lexical_test"}:
+        raise RuntimeConfigError("Unsupported embedding.provider")
+    if (
+        runtime.embedding.provider == "lexical_test"
+        and (
+            runtime.embedding.model != "lexical-hash-test"
+            or runtime.embedding.dimensions != 1024
+            or runtime.embedding.auth_mode != "none"
+        )
+    ):
+        raise RuntimeConfigError(
+            "lexical_test provider requires model=lexical-hash-test, "
+            "dimensions=1024, auth_mode=none"
+        )
     return runtime
 
 

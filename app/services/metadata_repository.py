@@ -16,6 +16,43 @@ class PostgresMetadataRepository:
         self._pool = pool
         self._runtime = runtime
 
+    async def execution_source_scope(
+        self,
+        source_instance_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one datasource and its active approved execution allowlist."""
+
+        query = """
+        SELECT d.profile_id AS source_instance_id,
+               d.engine,
+               d.source_schema,
+               d.mindsdb_integration,
+               d.mindsdb_catalog,
+               coalesce(
+                 array_agg(DISTINCT t.original_name)
+                   FILTER (
+                     WHERE t.original_name IS NOT NULL
+                       AND a.snapshot_id IS NOT NULL
+                   ),
+                 ARRAY[]::text[]
+               ) AS allowed_objects
+        FROM t2s_datasources d
+        LEFT JOIN t2s_tables t
+          ON t.datasource_id=d.id
+         AND t.text_to_sql_is_valid=true
+         AND t.review_status='approved'
+        LEFT JOIN t2s_snapshot_activations a
+          ON a.source_instance_id=d.profile_id
+         AND a.sink_name='t2s_serving'
+         AND a.snapshot_id=t.metadata->>'snapshot_id'
+        WHERE d.profile_id=$1
+        GROUP BY d.profile_id, d.engine, d.source_schema,
+                 d.mindsdb_integration, d.mindsdb_catalog
+        """
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(query, source_instance_id)
+        return dict(row) if row is not None else None
+
     async def search_tables(
         self,
         embedding: list[float],

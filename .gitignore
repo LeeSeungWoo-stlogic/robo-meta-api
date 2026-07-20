@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !.env.rwis-test.example
+config/runtime-settings.*.local.yaml
 *.pem
 *.key
 

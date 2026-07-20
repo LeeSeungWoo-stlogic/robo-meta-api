@@ -41,9 +41,10 @@ LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector
 
 - SELECT 계열 읽기 전용 SQL만 허용
 - 허용 catalog/schema와 완전 수식 table 검증
-- `execution_context` namespace 검증
+- client `execution_context`를 server-side source binding과 재검증
+- 활성·승인 metadata에서 table allowlist 재계산
 - timeout, 최대 행 수, 최대 응답 크기 제한
-- 실행 결과와 오류의 audit ID 기록
+- resolved integration·parser dialect·실행 결과의 audit 기록
 
 `artifact_id`가 지정된 경우 Semantic View Artifact의 table·column·join edge·
 mandatory filter allowlist를 추가 적용합니다.
@@ -81,7 +82,8 @@ mandatory filter allowlist를 추가 적용합니다.
 - query analysis와 embedding에 사용할 OpenAI 호환 endpoint
 
 Neo4j 관련 모듈은 이전 호환 경로로 남아 있지만 `/v1/data_decision`의 metadata
-backend는 PostgreSQL입니다.
+backend는 PostgreSQL입니다. 현재 v1 운영 경로와 본 저장소의 기본 시험에는
+Neo4j 또는 Apache AGE/GraphDB가 필요하지 않습니다.
 
 ## 설정
 
@@ -89,17 +91,36 @@ Runtime 설정의 기준은 YAML 파일이며 비밀번호와 API Key는 process
 주입합니다.
 
 ```bash
-export ROBO_RUNTIME_SETTINGS_FILE="$PWD/config/runtime-settings.docker.yaml"
+cp config/runtime-settings.example.yaml \
+   config/runtime-settings.docker.local.yaml
+export ROBO_RUNTIME_SETTINGS_FILE="$PWD/config/runtime-settings.docker.local.yaml"
 export METADATA_PG_PASSWORD='<metadata-store-password>'
 export OPENAI_API_KEY='<api-key>'
 ```
+
+`*.local.yaml`은 Git 제외 대상입니다.
 
 주요 설정 영역:
 
 - `metadata_store`: PostgreSQL Metadata Store
 - `embedding`: embedding endpoint, model, dimension
 - `decision`: query analysis, HyDE, 다축 검색, score pruning, join path 정책
-- `execution`: MindsDB endpoint, integration, catalog/schema, SQL 제한
+- `execution`: MindsDB endpoint, source별 binding 및 SQL 제한
+
+`execution.source_bindings`의 key는 활성 Metadata Store에 존재하는 정확한
+`source_instance_id`여야 합니다. 각 binding은 다음 값을 server-side에서
+소유합니다.
+
+- MindsDB integration과 catalog
+- source schema와 source DB dialect
+- MindsDB/sqlglot parser dialect
+- qualification/identifier quote 규칙
+- 허용 catalog/schema
+
+Direct ingest datasource의 legacy `mindsdb_integration`·`mindsdb_catalog`이
+NULL이면 runtime binding을 사용합니다. 값이 존재하면서 binding과 다르면
+startup 또는 요청 시 거부합니다. 클라이언트가 보낸 integration/catalog/schema와
+allowed object는 권한 정보로 신뢰하지 않습니다.
 
 `decision.analysis_base_url`을 설정하면 query analysis/HyDE용 chat endpoint를
 embedding endpoint와 분리할 수 있습니다.
@@ -137,7 +158,8 @@ curl -sS -X POST http://127.0.0.1:8100/v1/data_decision \
 python -m pytest tests -q
 ```
 
-PostgreSQL 통합 시험은 테스트용 DSN 환경 변수가 설정된 경우에만 실행됩니다.
+현재 suite는 source binding·위조 context·dialect 분리·audit 검증을 포함해
+`78/78`입니다.
 
 ## 코드 구조
 
@@ -145,6 +167,7 @@ PostgreSQL 통합 시험은 테스트용 DSN 환경 변수가 설정된 경우�
 - `app/services/decision_postgres.py`: 다축 검색과 decision 응답 조립
 - `app/services/decision_planner.py`: 최소 테이블 집합·join path 계획
 - `app/services/metadata_repository.py`: Metadata Store 검색
+- `app/services/execution_context_resolver.py`: server-side source binding과 allowlist
 - `app/services/sql_guard.py`: 읽기 전용 SQL·namespace 검증
 - `app/services/query_runner_mindsdb.py`: MindsDB 실행 및 결과 제한
 - `app/services/artifact_sql_guard.py`: Semantic View allowlist 검증

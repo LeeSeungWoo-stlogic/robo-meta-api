@@ -1,10 +1,8 @@
-# robo-meta-api — 로컬 Docker Desktop + robo-neo4j / robo-postgres
+# robo-meta-api — 외부 K-AIR-METASTORE + MindsDB 실행 backend
 #
-# 선행: robo-neo4j (bolt :7687), robo-postgres (:5432, DB rwis)
+# 선행: runtime local YAML의 Metadata Store와 source_bindings가 준비되어야 한다.
 # 기동: docker compose up -d --build
 # 헬스: curl http://127.0.0.1:8100/health
-
-version: "3.9"
 
 services:
   robo-meta-api-v4:
@@ -19,46 +17,34 @@ services:
     env_file:
       - .env
     environment:
-      # part2 postgres baseline: runtime 설정 파일이 SoT (환경변수는 비밀값 참조용)
-      ROBO_RUNTIME_SETTINGS_FILE: "/app/config/runtime-settings.docker.yaml"
-      METADATA_PG_PASSWORD: "postgres123"
+      # runtime template은 commit하고 실제 source binding 파일은 local mount한다.
+      ROBO_RUNTIME_SETTINGS_FILE: "${ROBO_RUNTIME_SETTINGS_FILE:-/app/config/runtime-settings.docker.local.yaml}"
+      METADATA_PG_PASSWORD: "${METADATA_PG_PASSWORD:?METADATA_PG_PASSWORD is required}"
       # /v2/data_decision 배선 (Semantic View v2 공급 경로)
       # 폐쇄망: 소비처가 내부 T2SQL로 한정되어 JWT 인증 미사용 (2026-07-13 결정).
       # 외부 공개 전환 시 V2_JWKS_FILE·V2_ISSUER·V2_AUDIENCE를 설정하면 인증이 켜진다.
-      V2_PG_DSN: "postgresql://postgres:postgres123@host.docker.internal:5433/t2s"
+      V2_PG_DSN: "${V2_PG_DSN:-}"
       V2_PG_SCHEMA: "public"
       V2_TENANT_ID: "kwater"
       V2_EMBEDDING_PROVIDER: "fixture"
       V2_EMBEDDING_DIMENSIONS: "16"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
-      NEO4J_URI: "bolt://host.docker.internal:7687"
-      SOURCE_PG_HOST: "host.docker.internal"
-      SOURCE_PG_PORT: "5432"
-      SOURCE_PG_SCHEMA: "RWIS"
-      PG_HOST: "host.docker.internal"
-      PG_PORT: "5432"
-      PG_DATABASE: "rwis"
-      PG_USER: "postgres"
-      PG_PASSWORD: "postgres123"
-      PG_SCHEMAS: "RWIS,mart"
-      DECISION_JOIN_EXPAND_VIA: "fk"
-      META_DB_LABEL: "rwis"
-      DECISION_VECTOR_TOPK: "10"
-      DECISION_SCORE_GAP_RATIO: "0.85"
-      DECISION_JOIN_EXPAND: "1"
+      # 선택: entity value probe. query_execute 경로와 무관하다.
+      SOURCE_PG_HOST: "${SOURCE_PG_HOST:-host.docker.internal}"
+      SOURCE_PG_PORT: "${SOURCE_PG_PORT:-5432}"
+      SOURCE_PG_DB: "${SOURCE_PG_DB:-rwis}"
+      SOURCE_PG_USER: "${SOURCE_PG_USER:-postgres}"
+      SOURCE_PG_PASS: "${SOURCE_PG_PASS:-}"
+      SOURCE_PG_SCHEMA: "${SOURCE_PG_SCHEMA:-RWIS}"
+      PG_HOST: "${SOURCE_PG_HOST:-host.docker.internal}"
+      PG_PORT: "${SOURCE_PG_PORT:-5432}"
+      PG_DATABASE: "${SOURCE_PG_DB:-rwis}"
+      PG_USER: "${SOURCE_PG_USER:-postgres}"
+      PG_PASSWORD: "${SOURCE_PG_PASS:-}"
+      PG_SCHEMAS: "${SOURCE_PG_SCHEMA:-RWIS}"
       ENTITY_RESOLUTION_ENABLED: "1"
       ENTITY_PROBE_DATASOURCE: "rwis"
-      JOIN_ONTOLOGY_ENABLED: "1"
-      JOIN_CONVENTION_ENABLED: "1"
-      JOIN_CONVENTION_MIN_COL_LEN: "4"
-      JOIN_CONVENTION_CONFIDENCE: "0.5"
-      JOIN_CONVENTION_CONFIDENCE_MISMATCH: "0.35"
-      JOIN_ONTOLOGY_REL_TYPES: "fkToTable,FK_TO_TABLE,FK_TO_COLUMN,RELATED_TO,REFERENCES,DOMAIN_RELATED,dataFlowsTo"
-      JOIN_FK_LIMIT: "50"
-      JOIN_ONTOLOGY_LIMIT: "50"
-      JOIN_CONVENTION_LIMIT: "30"
-      NEO4J_TABLE_VECTOR_INDEX: "text_to_sql_table_vec_index"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

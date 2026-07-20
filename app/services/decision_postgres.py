@@ -33,6 +33,10 @@ from .decision_planner import (
     select_minimal_tables,
 )
 from .embedding_provider import get_embedding_provider
+from .execution_context_resolver import (
+    ExecutionBindingError,
+    resolve_execution_context,
+)
 from .metadata_repository import PostgresMetadataRepository
 from .query_analysis import (
     analysis_embedding_text,
@@ -309,19 +313,21 @@ async def _decide_single_vector_legacy(
         )
 
     entities = _resolved_entities(mappings) if auto_resolve_entities else []
-    top_table = tables[0] if tables else {}
-    integration = str(
-        top_table.get("mindsdb_integration")
-        or runtime.execution.integration
-    )
-    source_engine = str(top_table.get("engine") or runtime.execution.dialect)
-    schema_name = (
-        str(top_table.get("schema_name") or runtime.execution.schema)
-    )
     allowed_objects = [
         str(table.get("original_name") or table.get("name") or "")
         for table in tables
     ]
+    execution_context = None
+    if selected_source_instance and allowed_objects:
+        try:
+            resolved = await resolve_execution_context(
+                repository,
+                source_instance_id=selected_source_instance,
+                requested_objects=allowed_objects,
+            )
+            execution_context = ExecutionContext(**resolved.public_dict())
+        except ExecutionBindingError:
+            execution_context = None
     return DecisionResponse(
         target="source" if candidates else "none",
         secondary_targets=[],
@@ -337,20 +343,7 @@ async def _decide_single_vector_legacy(
         resolved_entities=entities,
         suggested_probes=[],
         resolution_status="complete" if entities else "partial",
-        execution_context=ExecutionContext(
-            backend=runtime.execution.backend,
-            dialect=source_engine,
-            integration=integration,
-            catalog=integration,
-            schema_name=schema_name,
-            qualification_pattern=runtime.execution.qualification_pattern,
-            identifier_quote=runtime.execution.identifier_quote,
-            require_quoted_uppercase_identifiers=(
-                source_engine.lower() == "tibero"
-            ),
-            source_instance_id=selected_source_instance or None,
-            allowed_objects=allowed_objects,
-        ),
+        execution_context=execution_context,
     )
 
 
@@ -1017,19 +1010,6 @@ async def decide(
         for table in ordered_tables[:effective_top_k]
     ]
     entities = _resolved_entities(mappings) if auto_resolve_entities else []
-    top_table = (
-        tables_by_id.get(plan_table_ids[0], {})
-        if plan_table_ids
-        else (ordered_tables[0] if ordered_tables else {})
-    )
-    integration = str(
-        top_table.get("mindsdb_integration")
-        or runtime.execution.integration
-    )
-    source_engine = str(top_table.get("engine") or runtime.execution.dialect)
-    schema_name = str(
-        top_table.get("schema_name") or runtime.execution.schema
-    )
     allowed_objects = [
         str(
             tables_by_id[table_id].get("original_name")
@@ -1039,23 +1019,17 @@ async def decide(
         for table_id in plan_table_ids
         if table_id in tables_by_id
     ]
-    execution_context = (
-        ExecutionContext(
-            backend=runtime.execution.backend,
-            dialect=source_engine,
-            integration=integration,
-            catalog=integration,
-            schema_name=schema_name,
-            qualification_pattern=runtime.execution.qualification_pattern,
-            identifier_quote=runtime.execution.identifier_quote,
-            require_quoted_uppercase_identifiers=source_engine.lower()
-            == "tibero",
-            source_instance_id=selected_source_instance or None,
-            allowed_objects=allowed_objects,
-        )
-        if completeness == "complete" and allowed_objects
-        else None
-    )
+    execution_context = None
+    if completeness == "complete" and selected_source_instance and allowed_objects:
+        try:
+            resolved = await resolve_execution_context(
+                repository,
+                source_instance_id=selected_source_instance,
+                requested_objects=allowed_objects,
+            )
+            execution_context = ExecutionContext(**resolved.public_dict())
+        except ExecutionBindingError:
+            execution_context = None
 
     secondary = sorted(
         {

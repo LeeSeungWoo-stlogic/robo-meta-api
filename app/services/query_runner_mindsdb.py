@@ -12,6 +12,7 @@ from sqlglot import exp, parse_one
 
 from ..runtime_config import get_runtime
 from .artifact_sql_guard import ArtifactGuardError, enforce as enforce_artifact
+from .execution_context_resolver import ResolvedExecutionContext
 from .sql_guard import GuardError, check
 
 
@@ -36,11 +37,45 @@ def _append_audit(entry: dict[str, Any]) -> None:
 
 def _validate_namespaces(
     sql: str,
-    execution_context: dict[str, Any] | None = None,
+    execution_context: ResolvedExecutionContext | dict[str, Any] | None = None,
 ) -> None:
     runtime = get_runtime()
+    if isinstance(execution_context, ResolvedExecutionContext):
+        parser_dialect = execution_context.parser_dialect
+        expected_catalogs = execution_context.allowed_catalogs
+        expected_schemas = execution_context.allowed_schemas
+        allowed_objects = {
+            value.lower() for value in execution_context.allowed_objects
+        }
+        require_quoted_uppercase = (
+            execution_context.require_quoted_uppercase_identifiers
+        )
+    else:
+        parser_dialect = runtime.execution.dialect
+        expected_catalogs = (
+            {str(execution_context["catalog"]).lower()}
+            if execution_context and execution_context.get("catalog")
+            else runtime.execution.allowed_catalogs
+        )
+        expected_schemas = (
+            {str(execution_context["schema_name"]).lower()}
+            if execution_context and execution_context.get("schema_name")
+            else runtime.execution.allowed_schemas
+        )
+        allowed_objects = {
+            str(value).lower()
+            for value in (
+                execution_context.get("allowed_objects", [])
+                if execution_context
+                else []
+            )
+        }
+        require_quoted_uppercase = bool(
+            execution_context
+            and execution_context.get("require_quoted_uppercase_identifiers")
+        )
     try:
-        expression = parse_one(sql, read=runtime.execution.dialect)
+        expression = parse_one(sql, read=parser_dialect)
     except Exception as exc:
         raise GuardError(f"SQL parser validation failed: {exc}") from exc
     cte_names = {
@@ -48,28 +83,6 @@ def _validate_namespaces(
         for cte in expression.find_all(exp.CTE)
         if cte.alias_or_name
     }
-    expected_catalogs = (
-        {str(execution_context["catalog"]).lower()}
-        if execution_context and execution_context.get("catalog")
-        else runtime.execution.allowed_catalogs
-    )
-    expected_schemas = (
-        {str(execution_context["schema_name"]).lower()}
-        if execution_context and execution_context.get("schema_name")
-        else runtime.execution.allowed_schemas
-    )
-    allowed_objects = {
-        str(value).lower()
-        for value in (
-            execution_context.get("allowed_objects", [])
-            if execution_context
-            else []
-        )
-    }
-    require_quoted_uppercase = bool(
-        execution_context
-        and execution_context.get("require_quoted_uppercase_identifiers")
-    )
     for table in expression.find_all(exp.Table):
         name = str(table.name or "")
         catalog = str(table.catalog or "")
@@ -109,19 +122,24 @@ async def execute(
     max_rows: int | None,
     caller: str | None = None,
     artifact_payload: dict[str, Any] | None = None,
-    execution_context: dict[str, Any] | None = None,
+    execution_context: ResolvedExecutionContext,
 ) -> dict[str, Any]:
     runtime = get_runtime()
     audit_id = str(uuid4())
     try:
+        if not isinstance(execution_context, ResolvedExecutionContext):
+            raise GuardError("server-side resolved execution context가 필요합니다")
         report = check(sql)
         _validate_namespaces(report.normalized_sql, execution_context)
         if artifact_payload is not None:
             # Semantic View 경로: Artifact allowlist(object/column/join/
             # mandatory filter)를 read-only guard와 결합해 추가 검증
             try:
-                enforce_artifact(report.normalized_sql, artifact_payload,
-                                 dialect=runtime.execution.dialect)
+                enforce_artifact(
+                    report.normalized_sql,
+                    artifact_payload,
+                    dialect=execution_context.parser_dialect,
+                )
             except ArtifactGuardError as artifact_exc:
                 raise GuardError(
                     f"Artifact allowlist 위반: {artifact_exc}") from artifact_exc
@@ -134,6 +152,9 @@ async def execute(
                 "reason": str(exc),
                 "caller": caller,
                 "sql": sql,
+                "integration": execution_context.integration,
+                "resolved_integration": execution_context.integration,
+                "execution_context": execution_context.audit_dict(),
             }
         )
         raise
@@ -207,8 +228,10 @@ async def execute(
         "caller": caller,
         "sql": report.normalized_sql,
         "backend": runtime.execution.backend,
-        "integration": runtime.execution.integration,
-        "execution_context": execution_context,
+        "integration": execution_context.integration,
+        "resolved_integration": execution_context.integration,
+        "parser_dialect": execution_context.parser_dialect,
+        "execution_context": execution_context.audit_dict(),
         "timeout_s_applied": applied_timeout,
         "max_rows_applied": applied_rows,
         "row_count": len(rows),
@@ -230,9 +253,7 @@ async def execute(
         "timeout_s_applied": applied_timeout,
         "max_rows_applied": applied_rows,
         "datasource": (
-            execution_context.get("source_instance_id")
-            if execution_context
-            else runtime.execution.integration
+            execution_context.source_instance_id
         ),
         "query_id": audit_id,
     }

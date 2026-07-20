@@ -268,6 +268,18 @@ class FakeRepository:
             {**self.tables[1], "score": 0.85},
         ]
 
+    async def execution_source_scope(self, source_instance_id):
+        if source_instance_id != "rwis-pg":
+            return None
+        return {
+            "source_instance_id": source_instance_id,
+            "engine": "mysql",
+            "source_schema": "RWIS",
+            "mindsdb_integration": "rwis",
+            "mindsdb_catalog": "rwis",
+            "allowed_objects": ["RDISAUP_TB", "RDISAMU_TB"],
+        }
+
     async def find_value_mappings(self, question):
         del question
         return []

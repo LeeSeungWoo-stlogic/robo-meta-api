@@ -33,6 +33,7 @@ from .services.embedding_provider import (
     FixtureEmbeddingProvider,
     HttpEmbeddingProvider,
 )
+from .services.execution_context_resolver import validate_runtime_bindings
 from .services.v2_store import PostgresV2Store
 
 
@@ -77,7 +78,8 @@ def _build_v2_deps(pool) -> V2Deps:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_runtime()
-    await init_metadata_repository()
+    metadata_repository = await init_metadata_repository()
+    await validate_runtime_bindings(metadata_repository)
 
     # /v2/data_decision 배선 — V2_PG_DSN이 있을 때 활성화.
     # 미설정 시 app.state.v2_deps 부재로 503 유지 (v1 무영향, fail-closed).
@@ -138,6 +140,10 @@ async def health(response: Response) -> dict:
         "metadata_backend": runtime.metadata_backend,
         "execution_backend": runtime.execution.backend,
         "mindsdb_integration": runtime.execution.integration,
+        "default_source_instance_id": (
+            runtime.execution.default_source_instance_id
+        ),
+        "source_binding_count": len(runtime.execution.source_bindings),
     }
 
 

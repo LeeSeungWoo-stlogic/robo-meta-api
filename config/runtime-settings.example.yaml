@@ -1,6 +1,5 @@
-# robo-meta-api runtime settings (Docker 컨테이너용)
-# - 컨테이너 안에서 host.docker.internal로 호스트 Docker의 저장소에 연결한다.
-# - 비밀값은 파일에 두지 않고 process_env 참조만 사용한다 (.env / compose environment).
+# Commit-safe template. Copy to runtime-settings.docker.local.yaml and replace
+# SOURCE_INSTANCE_ID / MindsDB mapping with deployment-specific values.
 robo_meta_api:
   api_host: "0.0.0.0"
   api_port: 8100
@@ -17,6 +16,7 @@ robo_meta_api:
       env_key: METADATA_PG_PASSWORD
 
   embedding:
+    provider: http
     base_url: https://api.openai.com/v1
     model: text-embedding-3-small
     dimensions: 1024
@@ -49,17 +49,21 @@ robo_meta_api:
   execution:
     backend: mindsdb
     sql_api_url: http://host.docker.internal:47334/api/sql/query
-    integration: rwis_postgres_active
-    catalog: rwis_postgres_active
-    schema: RWIS
-    dialect: mysql
-    qualification_pattern: "{catalog}.{table}"
-    identifier_quote: "`"
-    require_quoted_uppercase_identifiers: true
-    allowed_catalogs:
-      - rwis_postgres_active
-    allowed_schemas:
-      - rwis
+    default_source_instance_id: "SOURCE_INSTANCE_ID"
+    source_bindings:
+      SOURCE_INSTANCE_ID:
+        integration: "MINDSDB_INTEGRATION"
+        catalog: "MINDSDB_CATALOG"
+        schema: "SOURCE_SCHEMA"
+        source_engine: "postgresql"
+        parser_dialect: "mysql"
+        qualification_pattern: "{catalog}.{table}"
+        identifier_quote: "`"
+        require_quoted_uppercase_identifiers: false
+        allowed_catalogs:
+          - "MINDSDB_INTEGRATION"
+        allowed_schemas:
+          - "source_schema"
     default_timeout_seconds: 10
     maximum_timeout_seconds: 30
     default_max_rows: 1000
