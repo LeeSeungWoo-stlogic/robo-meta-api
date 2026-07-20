@@ -1,44 +1,15 @@
-# robo-meta-api 260720 OA Docker 배포 가이드
+# robo-meta-api 260720 OA VM 163 배포
 
-## 범위
+## 배포 위치와 포트
 
+- 대상 VM: `10.40.4.163`
 - 이미지: `robo-meta-api-v4:260720`
-- 내부 포트: `8100`
-- OA 기본 호스트 포트: `8100`
-- 대상: Rocky Linux 9 `linux/amd64`, OA 폐쇄망 VM 152
-- 전체 bundle: `nas_260720_metadata_bundle.tar.gz`
+- 신규 API: host `8100` → container `8100`
+- 기존 `kair-meta-api:8096`과 병행 운영
+- Metadata Store: host `15433`
+- MindsDB: host `47334`, `47335`
 
-## 1. Docker 설치 확인
-
-```bash
-docker version
-docker compose version
-systemctl is-active docker
-docker info | grep 'Docker Root Dir'
-```
-
-Docker가 없다면 인터넷 연결된 동일 Rocky Linux 9 PC에서 다음 패키지와 의존 RPM을
-`dnf download --resolve --alldeps`로 준비해 반입한다.
-
-```text
-docker-ce
-docker-ce-cli
-containerd.io
-docker-buildx-plugin
-docker-compose-plugin
-```
-
-OA 설치:
-
-```bash
-sudo dnf install -y --disablerepo='*' ./docker-rpms/*.rpm
-sudo systemctl enable --now docker
-sudo usermod -aG docker dhub_ontol
-```
-
-VM 152의 기존 `/DATA/docker-data`와 `nk-net` 설정은 유지한다.
-
-## 2. bundle 반입·이미지 load
+## 1. 반입·기동
 
 ```bash
 cd /home/dhub_ontol
@@ -47,61 +18,51 @@ tar -xzf nas_260720_metadata_bundle.tar.gz
 cd 260720
 sha256sum -c SHA256SUMS
 bash scripts/load-images.sh
-```
 
-OA에서는 build/pull 없이 load된 이미지로만 기동한다.
-
-## 3. 런타임 설정
-
-```bash
 cp env.oa.example .env
 vi .env
 chmod 600 .env
-```
-
-주요 값:
-
-```env
-METADATA_PG_PASSWORD=<현장 비밀번호>
-ROBO_META_API_PORT=8100
-ROBO_RUNTIME_CONFIG=./config/runtime-settings.oa.yaml
-KAIR_METADATA_NETWORK=nk-net
-OPENAI_API_KEY=genos-via-proxy
-```
-
-`config/runtime-settings.oa.yaml` 기준 의존성:
-
-- Metadata Store: `metadata-store:5432/t2s`
-- LLM/embedding: `http://genos-proxy/v1`
-- Query execution: `http://mindsdb:47334/api/sql/query`
-- MindsDB integration: `rwis_postgres_active`
-
-기반 서비스 확인:
-
-```bash
-docker network inspect nk-net
-docker ps --format '{{.Names}} {{.Status}}' |
-  grep -E 'nk-mindsdb|nk-genos-proxy'
-```
-
-genos-proxy에는 최소한 `gpt-4o-mini`와 `text-embedding-3-small` 라우팅이 필요하다.
-
-## 4. 단계별 기동
-
-```bash
-cd /home/dhub_ontol/260720
 bash scripts/up-oa.sh
 ```
 
-수동 기동:
+OA에서는 build/pull을 하지 않고 반입 이미지로만 기동한다.
 
-```bash
-docker compose up -d --no-build --pull never metadata-store
-bash scripts/restore-metadata.sh
-docker compose up -d --no-build --pull never robo-meta-api
+## 2. VM 163 GenOS 직접 연동
+
+VM 163은 VM 152의 `genos-proxy`를 재사용하지 않는다.
+`config/runtime-settings.oa.yaml`에서 chat과 embedding endpoint를 분리한다.
+
+```yaml
+embedding:
+  base_url: http://10.40.4.215:30908/api/gateway/rep/serving/10/v1
+  model: bge-m3
+  dimensions: 1024
+
+decision:
+  analysis_base_url: http://10.40.4.215:30908/api/gateway/rep/serving/16/v1
+  hyde_model: gpt-oss-120b
 ```
 
-## 5. API 검증
+`.env`의 `OPENAI_API_KEY`에는 GenOS에서 사용하는 실제 Bearer를 입력한다.
+
+## 3. MindsDB
+
+VM 163 기본 가이드에는 MindsDB가 없으므로 260720 bundle에
+`kair-mindsdb-neo4j:260720`을 포함한다.
+
+```bash
+docker compose up -d --no-build --pull never mindsdb
+bash scripts/register-mindsdb-source.sh
+```
+
+`.env`의 `SOURCE_DB_*`는 현재 Metastore metadata와 같은 원천을 가리켜야 한다.
+260720 dump가 RWIS metadata인 상태에서 `analysis_mart`를 실행 원천으로 지정하면
+테이블과 컬럼이 달라 SQL execution이 실패하거나 잘못된 대상을 조회할 수 있다.
+
+analysis mart를 사용하려면 먼저 해당 mart metadata를 재수집·승인·활성화하고
+`runtime-settings.oa.yaml`의 integration, catalog, schema를 함께 변경한다.
+
+## 4. API 검증
 
 ```bash
 curl -fsS http://127.0.0.1:8100/health
@@ -112,18 +73,10 @@ docker compose logs --since 10m robo-meta-api
 Swagger:
 
 ```text
-http://10.40.4.152:8100/docs
+http://10.40.4.163:8100/docs
 ```
 
-주요 API:
-
-| API | 역할 |
-|---|---|
-| `POST /v1/data_decision` | 자연어 의미·역할·테이블·JOIN·필터 계획 반환 |
-| `POST /v1/query_execute` | 검증된 조회 SQL을 MindsDB로 실행 |
-| `GET /health` | metadata 및 execution backend 상태 |
-
-간단한 decision 요청:
+Decision 요청:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8100/v1/data_decision \
@@ -134,48 +87,51 @@ curl -sS -X POST http://127.0.0.1:8100/v1/data_decision \
   }'
 ```
 
-`query_plan.completeness`, `required_tables`, `join_paths`, `filters`를 확인한다.
+주요 API:
 
-## 6. query execution 주의
+| API | 역할 |
+|---|---|
+| `POST /v1/data_decision` | 의미·역할·테이블·JOIN·필터 계획 |
+| `POST /v1/query_execute` | 검증된 SQL을 MindsDB로 실행 |
+| `GET /health` | API backend 상태 |
 
-외부 생성형 AI가 `/v1/data_decision`의 실행 계획을 참고해 SQL을 생성하고
-`/v1/query_execute`로 전달한다.
+## 5. query execution 조건
 
-API는 SQLGlot 기반으로 다음을 검증한다.
+외부 생성형 AI는 decision의 `execution_context`를 이용해 SQL을 생성한다.
+API는 SQLGlot 기반으로 다음을 검증한 후 MindsDB로 전달한다.
 
 - 읽기 전용 SQL
 - 허용 catalog/schema
-- 완전 수식된 MindsDB integration table
-- timeout·최대 행·응답 크기
-- 제공된 execution context와 namespace 일치
+- integration table 완전 수식
+- execution context namespace
+- timeout·행 수·응답 크기
 
-현재 MindsDB 실행 dialect는 `mysql`이다. 단순한 “ANSI SQL 변환 서비스”가 아니다.
+현재 실행 dialect는 `mysql`이다.
 
-## 7. 장애 확인 순서
+## 6. 장애 확인
 
 ```bash
 docker compose ps
 docker compose logs --since 10m metadata-store
+docker compose logs --since 10m mindsdb
 docker compose logs --since 10m robo-meta-api
-docker compose exec -T robo-meta-api \
-  curl -fsS http://genos-proxy/v1/models
+docker compose exec -T mindsdb \
+  curl -fsS http://127.0.0.1:47334/api/status
 ```
 
-판단 기준:
+- decision LLM 오류: serving 16과 Bearer 확인
+- embedding 오류: serving 10, bge-m3, 1024 차원 확인
+- query execution 오류: MindsDB integration과 metadata/source 일치 확인
 
-- `/health` 실패: runtime config, Metastore 연결, 비밀번호 확인
-- decision의 LLM 오류: genos-proxy chat/embedding 라우팅 확인
-- query execution 오류: MindsDB integration과 namespace 확인
+## 7. 기존 서비스와 병행
 
-## 8. 중지·재기동
-
-```bash
-docker compose stop robo-meta-api
-docker compose start robo-meta-api
+```text
+기존: http://10.40.4.163:8096
+신규: http://10.40.4.163:8100
 ```
 
-Metastore volume 보존을 위해 `docker compose down -v`를 사용하지 않는다.
+신규 검증 완료 전 기존 8096 서비스를 제거하지 않는다.
+`docker compose down -v`와 기존 `kair-net` 삭제도 금지한다.
 
-통합 설치 절차는
-`K_Water_v1/oa_work/docker_part/docs/GUIDE_VM_152_260720_메타데이터_Docker_배포.md`
-를 기준으로 한다.
+통합 기준:
+`K_Water_v1/oa_work/docker_part/docs/GUIDE_VM_163_260720_메타데이터_Docker_배포.md`

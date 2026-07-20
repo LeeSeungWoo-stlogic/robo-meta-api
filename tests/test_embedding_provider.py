@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +15,7 @@ from app.runtime_config import (
     RoboRuntime,
 )
 from app.services.embedding_provider import HttpEmbeddingProvider
+from app.services.query_analysis import QueryAnalyzer
 
 
 class HttpEmbeddingProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -76,6 +79,48 @@ class HttpEmbeddingProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(vector), 1024)
         payload = client.post.await_args.kwargs["json"]
         self.assertEqual(payload["dimensions"], 1024)
+
+    async def test_query_analysis_uses_separate_chat_base_url(self) -> None:
+        runtime_config._runtime = replace(
+            runtime_config._runtime,
+            decision=replace(
+                runtime_config._runtime.decision,
+                analysis_base_url="http://chat.test/v1",
+            ),
+        )
+        response = MagicMock()
+        response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content=json.dumps(
+                        {
+                            "intent": "사업장 조회",
+                            "schema_roles": [
+                                {
+                                    "role": "사업장 마스터",
+                                    "necessity": "required",
+                                    "cardinality": "many",
+                                    "search_terms": ["사업장 코드"],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            )
+        ]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=response)
+        with patch(
+            "app.services.query_analysis.AsyncOpenAI",
+            return_value=client,
+        ) as client_factory:
+            analysis = await QueryAnalyzer().analyze("사업장을 보여줘")
+        self.assertEqual(analysis.status, "complete")
+        client_factory.assert_called_once_with(
+            api_key="test-key",
+            base_url="http://chat.test/v1",
+        )
 
 
 if __name__ == "__main__":

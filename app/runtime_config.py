@@ -96,6 +96,7 @@ class DecisionRuntime:
     score_top_radius: float = 0.01
     fk_max_hops: int = 3
     fk_path_limit: int = 50
+    analysis_base_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,10 @@ def load_runtime(path: str | Path) -> RoboRuntime:
             ),
             fk_path_limit=int(
                 _optional(decision, "fk_path_limit", 50)
+            ),
+            analysis_base_url=(
+                str(_optional(decision, "analysis_base_url", "")).strip()
+                or None
             ),
         ),
         execution=ExecutionRuntime(

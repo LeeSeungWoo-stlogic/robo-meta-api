@@ -236,7 +236,11 @@ class QueryAnalyzer:
 
         client = AsyncOpenAI(
             api_key=runtime.embedding.api_key,
-            base_url=runtime.embedding.base_url or None,
+            base_url=(
+                runtime.decision.analysis_base_url
+                or runtime.embedding.base_url
+                or None
+            ),
         )
         try:
             response = await client.chat.completions.create(
