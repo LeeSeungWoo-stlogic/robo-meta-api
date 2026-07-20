@@ -157,7 +157,8 @@ API는 SQLGlot 기반으로 다음을 검증한다.
 docker compose ps
 docker compose logs --since 10m metadata-store
 docker compose logs --since 10m robo-meta-api
-curl -fsS http://genos-proxy/v1/models
+docker compose exec -T robo-meta-api \
+  curl -fsS http://genos-proxy/v1/models
 ```
 
 판단 기준:
