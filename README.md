@@ -34,6 +34,17 @@ question
 LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector` fallback을
 반환하며 검색 결과를 근거 없이 확장하지 않습니다.
 
+### 내용 품질 가드 (스키마 불변, 2026-07-31)
+
+`/data_decision` 경로·응답 키는 유지하고, 내부 선별·매칭만 보강합니다.
+
+- **Hangul mention**: value mapping에서 `정수`⊂`정수장` 같은 중간 글자 오탐을 차단하되, `충청`⊂`충청지역` 등 지명 접미사 복합어는 허용
+- **value mapping 승격**: 매핑된 테이블이 약한 vector score로 gap-prune 되지 않도록 score를 유지·승격
+- **차원 질의 랭킹**: 시설/개수·목록 질의에서 `hist`/`link` demote, `master` 우선
+- **역할 보강**: HyDE가 사업장+계측을 한 역할로 붕괴할 때 사업장·본부·태그·일별 팩트 역할을 분리(목록형 inventory vs 시계열 구분)
+- **filter**: verified value mapping의 컬럼·코드값을 semantic 컬럼 후보보다 우선
+- **embedding**: OpenAI `text-embedding-3-*`는 Store와 맞추기 위해 `dimensions`(예: 1024)를 요청하고, GenOS bge-m3 등 matryoshka 미지원 모델에는 해당 필드를 넣지 않음
+
 ## `/query/execute`
 
 외부 SQL 생성기가 작성한 SQL을 다음 정책으로 검사한 뒤 MindsDB HTTP SQL API에
@@ -122,6 +133,10 @@ allowed object는 권한 정보로 신뢰하지 않습니다.
 
 `decision.analysis_base_url`을 설정하면 query analysis/HyDE용 chat endpoint를
 embedding endpoint와 분리할 수 있습니다.
+
+로컬 Docker에서 K-AIR-metadata-platform Store와 같은 네트워크로 붙일 때는
+`config/runtime-settings.docker.local.yaml`의 `metadata_store`·`embedding.dimensions`·
+`execution.source_bindings`가 게시된 `source_instance_id`와 일치해야 합니다.
 
 ## 실행
 

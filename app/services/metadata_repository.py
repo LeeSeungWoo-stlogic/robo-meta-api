@@ -162,7 +162,55 @@ class PostgresMetadataRepository:
         """
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, question)
-        return [dict(row) for row in rows]
+        return [
+            dict(row)
+            for row in rows
+            if self._natural_value_is_standalone_mention(
+                question, str(row.get("natural_value") or "")
+            )
+        ]
+
+    @staticmethod
+    def _natural_value_is_standalone_mention(question: str, natural_value: str) -> bool:
+        """Reject Hangul mid-word hits (e.g. natural_value '정수' inside '정수장').
+
+        Allow verified geo/admin compounds: '충청' inside '충청지역'.
+        """
+        if not natural_value:
+            return False
+        q = question.casefold()
+        n = natural_value.casefold()
+        compound_suffixes = (
+            "지역",
+            "권역",
+            "본부",
+            "유역",
+            "지구",
+            "권",
+            "시",
+            "군",
+            "도",
+            "부",
+        )
+
+        def _is_hangul(ch: str) -> bool:
+            return bool(ch) and "\uac00" <= ch <= "\ud7a3"
+
+        start = 0
+        while True:
+            idx = q.find(n, start)
+            if idx < 0:
+                return False
+            before = q[idx - 1] if idx > 0 else ""
+            after = q[idx + len(n)] if idx + len(n) < len(q) else ""
+            if not _is_hangul(before) and not _is_hangul(after):
+                return True
+            if not _is_hangul(before) and _is_hangul(after):
+                rest = q[idx + len(n) :]
+                if any(rest.startswith(suffix) for suffix in compound_suffixes):
+                    return True
+            start = idx + 1
+        return False
 
     async def fetch_tables_by_ids(self, table_ids: set[int]) -> list[dict[str, Any]]:
         if not table_ids:
