@@ -1,6 +1,6 @@
 """Metadata Context Bundle v2 조립 (플랜 5C).
 
-선택된 published Artifact와 Snapshot·glossary에서 `/v2/data_decision` 응답을
+선택된 published Artifact와 Snapshot·glossary에서 `/semantic_decision` 응답을
 만든다. v1 `DecisionResponse`와 완전히 독립된 meta_version="2" 계약이다.
 적합 Artifact가 없으면 readiness=blocked와 blocker를 반환한다 (즉석 생성 금지).
 """

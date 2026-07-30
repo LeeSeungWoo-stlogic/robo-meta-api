@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "robo-meta-api v4",
-    "description": "v0.7 meta-api — A안 entity resolution (resolved_entities), v0.6 8 endpoint path 유지. Semantic View v2 공급 경로 추가: `POST /v2/data_decision`은 published Semantic View Artifact 기반 Metadata Context Bundle(`meta_version:\"2\"`)을 반환한다 (폐쇄망 기본 무인증, V2_JWKS_FILE 설정 시에만 Bearer JWT 요구). `POST /query/execute`는 `artifact_id` 지정 시 해당 Artifact allowlist(테이블·컬럼·join edge·mandatory filter)로 SQL 실행을 제약한다. v1 `/data_decision` 0.7 계약은 무변경.",
+    "description": "v0.7 meta-api — A안 entity resolution (resolved_entities), v0.6 8 endpoint path 유지. Semantic View v2 공급 경로 추가: `POST /semantic_decision`은 published Semantic View Artifact 기반 Metadata Context Bundle(`meta_version:\"2\"`)을 반환한다 (폐쇄망 기본 무인증, V2_JWKS_FILE 설정 시에만 Bearer JWT 요구). `POST /query/execute`는 `artifact_id` 지정 시 해당 Artifact allowlist(테이블·컬럼·join edge·mandatory filter)로 SQL 실행을 제약한다. v1 `/data_decision` 0.7 계약은 무변경.",
     "version": "meta-0.7"
   },
   "paths": {
@@ -357,13 +357,13 @@
         }
       }
     },
-    "/v2/data_decision": {
+    "/semantic_decision": {
       "post": {
         "tags": [
           "decision-v2"
         ],
-        "summary": "Data Decision V2",
-        "operationId": "data_decision_v2_v2_data_decision_post",
+        "summary": "Semantic Decision",
+        "operationId": "semantic_decision_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -382,7 +382,7 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object",
-                  "title": "Response Data Decision V2 V2 Data Decision Post"
+                  "title": "Response Semantic Decision V2 Data Decision Post"
                 }
               }
             }

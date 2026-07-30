@@ -487,7 +487,7 @@ class QueryExecuteRequest(BaseModel):
     sql: str = Field(..., description="SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용")
     execution_context: Optional[ExecutionContext] = Field(
         default=None,
-        description="/v1/data_decision이 반환한 단일 datasource 실행 허용범위",
+        description="/data_decision이 반환한 단일 datasource 실행 허용범위",
     )
     artifact_id: Optional[str] = Field(
         default=None,

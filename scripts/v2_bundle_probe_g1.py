@@ -1,4 +1,4 @@
-"""/v2/data_decision G1 질문 세트 probe.
+"""/semantic_decision G1 질문 세트 probe.
 
 golden 질문 + SV-RWIS-MEASURE-DAY representative questions로
 Bundle 수신·View 선택·readiness를 일괄 확인한다.
@@ -38,7 +38,7 @@ def main() -> int:
     failures = 0
     for label, question in QUESTIONS:
         response = requests.post(
-            f"{BASE}/v2/data_decision",
+            f"{BASE}/semantic_decision",
             json={"query": question},
             timeout=60,
         )

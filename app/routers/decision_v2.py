@@ -1,6 +1,6 @@
-"""`/v2/data_decision` — Semantic View Metadata Context Bundle 공급 (플랜 5C).
+"""`/semantic_decision` — Semantic View Metadata Context Bundle 공급 (플랜 5C).
 
-- v1 `/data_decision` 0.7 계약과 완전히 분리된 별도 router다.
+- `/data_decision` 0.7 계약과 완전히 분리된 별도 router다.
 - 인증: auth_config가 설정된 경우에만 Bearer JWT를 요구한다.
   소비처가 내부 T2SQL로 한정된 폐쇄망 배포(2026-07-13 결정)에서는
   auth_config=None으로 두어 인증 없이 default_tenant_id/CONSUMER로 동작한다.
@@ -52,7 +52,7 @@ def _get_deps(request: Request) -> V2Deps:
         raise HTTPException(
             status_code=503,
             detail={"code": "V2_NOT_CONFIGURED",
-                    "message": "/v2/data_decision 배선이 구성되지 않았습니다."})
+                    "message": "/semantic_decision 배선이 구성되지 않았습니다."})
     return deps
 
 
@@ -74,8 +74,8 @@ def _get_auth(request: Request, deps: V2Deps):
                             detail={"code": e.code, "message": str(e)})
 
 
-@router.post("/v2/data_decision")
-async def data_decision_v2(request: Request, body: DecisionV2Request) -> dict[str, Any]:
+@router.post("/semantic_decision")
+async def semantic_decision(request: Request, body: DecisionV2Request) -> dict[str, Any]:
     deps = _get_deps(request)
     auth = _get_auth(request, deps)
 

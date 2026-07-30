@@ -4,7 +4,7 @@ semantic-hub의 auth_context와 구현은 독립이지만 동일 auth contract f
 (semantic-hub/tests/fixtures/auth_contract/)를 공유하며 같은 시나리오를
 통과해야 한다. 검증된 `sub`, `tenant_id`, role만 권한 판단에 사용한다.
 v1 `/data_decision` 경로의 기존 인증 방식은 변경하지 않는다. 이 모듈은
-`/v2/data_decision` 등 Semantic View 경로 전용이다.
+`/semantic_decision` 등 Semantic View 경로 전용이다.
 """
 from __future__ import annotations
 

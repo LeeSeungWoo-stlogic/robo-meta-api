@@ -1,4 +1,4 @@
-"""5C 완료 게이트 — `/v2/data_decision` Bundle 공급.
+"""5C 완료 게이트 — `/semantic_decision` Bundle 공급.
 
 - Bundle이 metadata-context-bundle-v2.schema.json(독립 consumer contract)을 통과
 - expired/stale/unauthorized/not-ready Artifact 검색 차단
@@ -140,7 +140,7 @@ def _headers(**kwargs) -> dict:
 def test_bundle_ready_and_passes_consumer_contract():
     jsonschema = pytest.importorskip("jsonschema")
     client = _make_client()
-    response = client.post("/v2/data_decision",
+    response = client.post("/semantic_decision",
                            json={"query": BASELINE_QUESTION}, headers=_headers())
     assert response.status_code == 200, response.text
     bundle = response.json()
@@ -162,14 +162,14 @@ def test_bundle_ready_and_passes_consumer_contract():
 def test_missing_token_rejected():
     """auth_config가 설정된 배포에서는 여전히 401 (외부 공개 전환 대비)."""
     client = _make_client()
-    response = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION})
+    response = client.post("/semantic_decision", json={"query": BASELINE_QUESTION})
     assert response.status_code == 401
 
 
 def test_no_auth_mode_serves_without_token():
     """폐쇄망 무인증 구성(2026-07-13 결정): 토큰 없이 정상 Bundle 반환."""
     client = _make_client(auth_enabled=False)
-    response = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION})
+    response = client.post("/semantic_decision", json={"query": BASELINE_QUESTION})
     assert response.status_code == 200, response.text
     bundle = response.json()
     assert bundle["meta_version"] == "2"
@@ -188,7 +188,7 @@ def test_expired_artifact_blocked():
     record = _artifact_record()
     record["valid_to"] = "2026-07-01T00:00:00Z"  # NOW 이전에 만료
     client = _make_client(artifacts=[record])
-    bundle = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION},
+    bundle = client.post("/semantic_decision", json={"query": BASELINE_QUESTION},
                          headers=_headers()).json()
     assert bundle["readiness"]["state"] == "blocked"
     assert "SV_SELECT_EXPIRED" in _blocked_codes(bundle)
@@ -197,7 +197,7 @@ def test_expired_artifact_blocked():
 
 def test_stale_snapshot_blocked():
     client = _make_client(snapshots={})  # Snapshot 미등록 → 호환성 실패
-    bundle = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION},
+    bundle = client.post("/semantic_decision", json={"query": BASELINE_QUESTION},
                          headers=_headers()).json()
     assert bundle["readiness"]["state"] == "blocked"
     assert "SV_SELECT_STALE_SNAPSHOT" in _blocked_codes(bundle)
@@ -208,7 +208,7 @@ def test_not_ready_artifact_blocked():
     record["readiness"] = {"state": "blocked", "blockers": [
         {"code": "X", "message": "m", "missing_kind": "policy", "reference": None}]}
     client = _make_client(artifacts=[record])
-    bundle = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION},
+    bundle = client.post("/semantic_decision", json={"query": BASELINE_QUESTION},
                          headers=_headers()).json()
     assert bundle["readiness"]["state"] == "blocked"
     assert "SV_SELECT_NOT_READY" in _blocked_codes(bundle)
@@ -216,7 +216,7 @@ def test_not_ready_artifact_blocked():
 
 def test_unauthorized_role_blocked():
     client = _make_client()
-    bundle = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION},
+    bundle = client.post("/semantic_decision", json={"query": BASELINE_QUESTION},
                          headers=_headers(subject="editor-x",
                                           roles=("EDITOR",))).json()
     assert bundle["readiness"]["state"] == "blocked"
@@ -225,7 +225,7 @@ def test_unauthorized_role_blocked():
 
 def test_cross_tenant_sees_nothing():
     client = _make_client()
-    bundle = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION},
+    bundle = client.post("/semantic_decision", json={"query": BASELINE_QUESTION},
                          headers=_headers(tenant="other-corp")).json()
     assert bundle["readiness"]["state"] == "blocked"
     assert bundle["semantic_views"] == []
@@ -236,7 +236,7 @@ def test_inactive_artifact_blocked():
     record = _artifact_record()
     record["status"] = "INACTIVE"
     client = _make_client(artifacts=[record])
-    bundle = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION},
+    bundle = client.post("/semantic_decision", json={"query": BASELINE_QUESTION},
                          headers=_headers()).json()
     assert bundle["readiness"]["state"] == "blocked"
     assert "SV_SELECT_NOT_PUBLISHED" in _blocked_codes(bundle)
@@ -248,7 +248,7 @@ def test_inactive_artifact_blocked():
 
 def test_provider_failure_is_fail_closed():
     client = _make_client(provider=FailingEmbeddingProvider())
-    response = client.post("/v2/data_decision", json={"query": BASELINE_QUESTION},
+    response = client.post("/semantic_decision", json={"query": BASELINE_QUESTION},
                            headers=_headers())
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "EMBED_PROVIDER_DOWN"
@@ -256,7 +256,7 @@ def test_provider_failure_is_fail_closed():
 
 def test_unknown_question_rejected_by_fixture_provider():
     client = _make_client()
-    response = client.post("/v2/data_decision", json={"query": "임의의 다른 질문"},
+    response = client.post("/semantic_decision", json={"query": "임의의 다른 질문"},
                            headers=_headers())
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "EMBED_TEXT_NOT_ALLOWED"
@@ -265,7 +265,7 @@ def test_unknown_question_rejected_by_fixture_provider():
 def test_vector_only_signal_not_selected():
     """표준용어·동의어 일치가 없으면 vector 유사도만으로 선택되지 않는다."""
     client = _make_client(provider=FixtureEmbeddingProvider(dimensions=16))
-    bundle = client.post("/v2/data_decision",
+    bundle = client.post("/semantic_decision",
                          json={"query": "관계없는 재무 회계 질의"},
                          headers=_headers()).json()
     assert bundle["readiness"]["state"] == "blocked"

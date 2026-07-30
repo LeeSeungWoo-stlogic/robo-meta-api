@@ -61,6 +61,7 @@
 | POST | `/meta/fk` | 0.7 | v0.6 동일 |
 | POST | `/query/execute` | 0.7 | deprecated, v4에서 유지 |
 | POST | `/query` | 0.7 | stub (`not_implemented`) |
+| POST | `/semantic_decision` | 2 | Semantic View Bundle |
 
 ---
 

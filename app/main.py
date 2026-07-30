@@ -38,7 +38,7 @@ from .services.v2_store import PostgresV2Store
 
 
 def _build_v2_deps(pool) -> V2Deps:
-    """env 기반 `/v2/data_decision` 배선. 호출 전 runtime init·env 존재 확인 필수."""
+    """env 기반 `/semantic_decision` 배선. 호출 전 runtime init·env 존재 확인 필수."""
     # 인증은 V2_JWKS_FILE·V2_ISSUER·V2_AUDIENCE가 모두 있을 때만 활성화.
     # 폐쇄망(소비처=내부 T2SQL 한정, 2026-07-13 결정)에서는 미설정 → 인증 없음.
     auth_config = None
@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
     metadata_repository = await init_metadata_repository()
     await validate_runtime_bindings(metadata_repository)
 
-    # /v2/data_decision 배선 — V2_PG_DSN이 있을 때 활성화.
+    # /semantic_decision 배선 — V2_PG_DSN이 있을 때 활성화.
     # 미설정 시 app.state.v2_deps 부재로 503 유지 (v1 무영향, fail-closed).
     # 인증(JWT)은 V2_JWKS_FILE 등이 추가로 설정된 경우에만 켜진다.
     v2_pool = None
@@ -104,12 +104,12 @@ app = FastAPI(
     description=(
         "v0.7 meta-api — A안 entity resolution (resolved_entities), "
         "v0.6 8 endpoint path 유지. "
-        "Semantic View v2 공급 경로 추가: `POST /v2/data_decision`은 "
+        "Semantic View 공급 경로: `POST /semantic_decision`은 "
         "published Semantic View Artifact 기반 Metadata Context Bundle(`meta_version:\"2\"`)을 "
         "반환한다 (폐쇄망 기본 무인증, V2_JWKS_FILE 설정 시에만 Bearer JWT 요구). "
         "`POST /query/execute`는 `artifact_id` 지정 시 해당 Artifact allowlist"
         "(테이블·컬럼·join edge·mandatory filter)로 SQL 실행을 제약한다. "
-        "v1 `/data_decision` 0.7 계약은 무변경."
+        "`/data_decision` 0.7 계약은 무변경."
     ),
     version=f"meta-{META_VERSION}",
     lifespan=lifespan,
@@ -150,7 +150,7 @@ async def health(response: Response) -> dict:
 app.include_router(decision.router)
 app.include_router(meta.router)
 app.include_router(query_exec.router)
-# /v2/data_decision — app.state.v2_deps 배선 시 활성화 (미구성 시 503, v1 무영향)
+# /semantic_decision — app.state.v2_deps 배선 시 활성화 (미구성 시 503, /data_decision 무영향)
 app.include_router(decision_v2.router)
 
 

@@ -60,16 +60,25 @@ def _target_class(subject_area: str) -> str:
     return "unknown"
 
 
+def _resolve_subject_area(table: dict[str, Any]) -> str:
+    """Prefer platform-published subject_area; fall back to local YAML rules."""
+    for key in ("subject_area_override", "subject_area"):
+        value = str(table.get(key) or "").strip().casefold()
+        if value:
+            return value
+    return subject_area_service.classify(
+        str(table.get("schema_name") or ""),
+        str(table.get("original_name") or table.get("name") or ""),
+    )
+
+
 def _candidate(
     table: dict[str, Any],
     columns: list[dict[str, Any]],
     *,
     source: str,
 ) -> DecisionCandidate:
-    subject_area = subject_area_service.classify(
-        str(table.get("schema_name") or ""),
-        str(table.get("original_name") or table.get("name") or ""),
-    )
+    subject_area = _resolve_subject_area(table)
     matched = [
         MatchedColumn(
             column_name=str(column["name"]),

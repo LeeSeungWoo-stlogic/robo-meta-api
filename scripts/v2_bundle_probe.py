@@ -1,4 +1,4 @@
-"""/v2/data_decision Bundle 수신 검증 probe.
+"""/semantic_decision Bundle 수신 검증 probe.
 
 폐쇄망 무인증 구성(2026-07-13 결정)이라 토큰 없이
 기준 질문의 Metadata Context Bundle(meta_version="2") 수신을 확인한다.
@@ -16,7 +16,7 @@ QUESTION = "2025년 9월 1일 낙동강에서 강우량이 가장 많은 곳은?
 
 def main() -> int:
     response = requests.post(
-        f"{BASE}/v2/data_decision",
+        f"{BASE}/semantic_decision",
         json={"query": QUESTION},
         timeout=60,
     )

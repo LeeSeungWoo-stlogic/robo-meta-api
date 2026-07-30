@@ -63,6 +63,8 @@ class PostgresMetadataRepository:
         query = """
         SELECT t.id, t.db, t.schema_name, t.name, t.original_name,
                t.description, t.analyzed_description,
+               NULLIF(t.metadata->>'subject_area_override', '') AS subject_area_override,
+               NULLIF(t.metadata->>'subject_area', '') AS subject_area,
                d.profile_id AS source_instance_id, d.engine,
                d.mindsdb_integration, d.mindsdb_catalog,
                1 - (text_to_sql_vector <=> $1::vector) AS score
@@ -168,6 +170,8 @@ class PostgresMetadataRepository:
         query = """
         SELECT t.id, t.db, t.schema_name, t.name, t.original_name,
                t.description, t.analyzed_description,
+               NULLIF(t.metadata->>'subject_area_override', '') AS subject_area_override,
+               NULLIF(t.metadata->>'subject_area', '') AS subject_area,
                d.profile_id AS source_instance_id, d.engine,
                d.mindsdb_integration, d.mindsdb_catalog
         FROM t2s_tables t

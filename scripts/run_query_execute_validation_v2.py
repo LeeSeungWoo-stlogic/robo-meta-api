@@ -24,7 +24,7 @@ async def run(api_url: str) -> dict[str, Any]:
         contexts: dict[str, dict[str, Any]] = {}
         for question, table, column in TABLE_CASES:
             decision = await client.post(
-                api_url.rstrip("/") + "/v1/data_decision",
+                api_url.rstrip("/") + "/data_decision",
                 json={
                     "query": question,
                     "include_matched_columns": True,
@@ -39,7 +39,7 @@ async def run(api_url: str) -> dict[str, Any]:
                 f"rwis_postgres_active.{table} LIMIT 1"
             )
             response = await client.post(
-                api_url.rstrip("/") + "/v1/query_execute",
+                api_url.rstrip("/") + "/query/execute",
                 json={
                     "sql": sql,
                     "execution_context": context,
@@ -92,7 +92,7 @@ async def run(api_url: str) -> dict[str, Any]:
         ]
         for case_id, sql in blocked_cases:
             response = await client.post(
-                api_url.rstrip("/") + "/v1/query_execute",
+                api_url.rstrip("/") + "/query/execute",
                 json={"sql": sql, "execution_context": context},
             )
             rejected.append(
@@ -105,7 +105,7 @@ async def run(api_url: str) -> dict[str, Any]:
             )
     results = accepted + rejected
     return {
-        "endpoint": "/v1/query_execute",
+        "endpoint": "/query/execute",
         "accepted": accepted,
         "rejected": rejected,
         "counts": {

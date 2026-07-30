@@ -43,8 +43,6 @@ async def _resolve_artifact_payload(request: Request, artifact_id: str) -> dict:
 
 
 @router.post("/query/execute", response_model=QueryExecuteResponse)
-@router.post("/query_execute", response_model=QueryExecuteResponse)
-@router.post("/v1/query_execute", response_model=QueryExecuteResponse)
 async def query_execute(req: QueryExecuteRequest, request: Request) -> QueryExecuteResponse:
     caller = request.client.host if request.client else None
     artifact_payload = None

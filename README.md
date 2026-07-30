@@ -6,7 +6,7 @@
 Metadata Store의 승인·활성화된 테이블, 컬럼, embedding, FK 및 논리 join hint를
 조회하며 API가 SQL을 직접 생성하지는 않습니다.
 
-## `/v1/data_decision`
+## `/data_decision`
 
 자연어 질문을 다음 순서로 처리합니다.
 
@@ -34,7 +34,7 @@ question
 LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector` fallback을
 반환하며 검색 결과를 근거 없이 확장하지 않습니다.
 
-## `/v1/query_execute`
+## `/query/execute`
 
 외부 SQL 생성기가 작성한 SQL을 다음 정책으로 검사한 뒤 MindsDB HTTP SQL API에
 전달합니다.
@@ -54,35 +54,33 @@ mandatory filter allowlist를 추가 적용합니다.
 | Method | Path | 역할 |
 |---|---|---|
 | `GET` | `/health` | Metadata Store 및 execution backend 설정 확인 |
-| `POST` | `/v1/data_decision` | 자연어 질의 분석과 Metadata Context 계획 |
-| `POST` | `/v1/query_execute` | 검증된 읽기 전용 SQL 실행 |
+| `POST` | `/data_decision` | 자연어 질의 분석과 Metadata Context 계획 |
+| `POST` | `/query/execute` | 검증된 읽기 전용 SQL 실행 |
 | `POST` | `/meta/batch` | metadata batch 조회 |
 | `POST` | `/meta/table` | table metadata 조회 |
 | `POST` | `/meta/column` | column metadata 조회 |
 | `POST` | `/meta/ref`, `/meta/fk` | FK·논리 관계 조회 |
-| `POST` | `/v2/data_decision` | published Semantic View Context Bundle 조회 |
+| `POST` | `/semantic_decision` | published Semantic View Context Bundle 조회 |
 
-`/data_decision`, `/query_execute`, `/query/execute`는 호환 alias로 유지합니다.
+## Semantic View
 
-## Semantic View v2
-
-`/v2/data_decision`은 질의 시점에 View를 만들지 않고 published Artifact만
+`/semantic_decision`은 질의 시점에 View를 만들지 않고 published Artifact만
 조회합니다.
 
 - tenant/role, published 상태, 유효기간, snapshot 호환성 hard filter
 - 준비된 Artifact가 없으면 `readiness=blocked`
 - embedding provider 장애 시 임의 lexical 결과로 강등하지 않고 503
-- `V2_PG_DSN`이 없으면 v2 배선은 비활성화되고 v1에는 영향을 주지 않음
+- `V2_PG_DSN`이 없으면 Semantic View 배선은 비활성화되고 `/data_decision`에는 영향을 주지 않음
 - `V2_JWKS_FILE`, `V2_ISSUER`, `V2_AUDIENCE` 설정 시 JWT 검증 활성화
 
 ## 실행 전제
 
 - 승인·활성화된 `t2s_*` metadata를 제공하는 PostgreSQL Metadata Store
-- `/v1/query_execute`에서 사용할 MindsDB HTTP SQL API와 source integration
+- `/query/execute`에서 사용할 MindsDB HTTP SQL API와 source integration
 - query analysis와 embedding에 사용할 OpenAI 호환 endpoint
 
-Neo4j 관련 모듈은 이전 호환 경로로 남아 있지만 `/v1/data_decision`의 metadata
-backend는 PostgreSQL입니다. 현재 v1 운영 경로와 본 저장소의 기본 시험에는
+Neo4j 관련 모듈은 이전 호환 경로로 남아 있지만 `/data_decision`의 metadata
+backend는 PostgreSQL입니다. 현재 `/data_decision` 운영 경로와 본 저장소의 기본 시험에는
 Neo4j 또는 Apache AGE/GraphDB가 필요하지 않습니다.
 
 ## 설정
@@ -144,7 +142,7 @@ curl http://127.0.0.1:8100/health
 ## 요청 예시
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8100/v1/data_decision \
+curl -sS -X POST http://127.0.0.1:8100/data_decision \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{
     "query": "사업장 코드와 사업장 이름을 보여줘",

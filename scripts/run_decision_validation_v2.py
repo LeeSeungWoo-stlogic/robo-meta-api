@@ -57,7 +57,7 @@ async def _decision(
     question: str,
 ) -> dict[str, Any]:
     response = await client.post(
-        api_url.rstrip("/") + "/v1/data_decision",
+        api_url.rstrip("/") + "/data_decision",
         json={
             "query": question,
             "include_matched_columns": True,
@@ -258,7 +258,7 @@ async def run(
         "contract_version": fixture["contract_version"],
         **fixture_hashes,
         "fixture_revision": fixture.get("fixture_revision"),
-        "endpoint": "/v1/data_decision",
+        "endpoint": "/data_decision",
         "counts": {
             "search": len(search_details),
             "columns": len(column_cases),

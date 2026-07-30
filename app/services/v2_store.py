@@ -1,4 +1,4 @@
-"""`/v2/data_decision` 데이터 접근 계층 (플랜 5C).
+"""`/semantic_decision` 데이터 접근 계층 (플랜 5C).
 
 - InMemoryV2Store: deterministic E2E·시험용 (네트워크·DB 0건).
 - PostgresV2Store: Metadata Store(t2s_semantic_artifacts 등) 운영 구현.

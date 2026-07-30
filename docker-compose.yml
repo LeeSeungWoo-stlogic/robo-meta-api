@@ -1,7 +1,7 @@
-# robo-meta-api — 외부 K-AIR-METASTORE + MindsDB 실행 backend
+# robo-meta-api — K-AIR-metadata-platform store + MindsDB (control-plane network)
 #
-# 선행: runtime local YAML의 Metadata Store와 source_bindings가 준비되어야 한다.
 # 기동: docker compose up -d --build
+# OpenAPI: http://127.0.0.1:8100/docs
 # 헬스: curl http://127.0.0.1:8100/health
 
 services:
@@ -17,12 +17,8 @@ services:
     env_file:
       - .env
     environment:
-      # runtime template은 commit하고 실제 source binding 파일은 local mount한다.
       ROBO_RUNTIME_SETTINGS_FILE: "${ROBO_RUNTIME_SETTINGS_FILE:-/app/config/runtime-settings.docker.local.yaml}"
       METADATA_PG_PASSWORD: "${METADATA_PG_PASSWORD:?METADATA_PG_PASSWORD is required}"
-      # /v2/data_decision 배선 (Semantic View v2 공급 경로)
-      # 폐쇄망: 소비처가 내부 T2SQL로 한정되어 JWT 인증 미사용 (2026-07-13 결정).
-      # 외부 공개 전환 시 V2_JWKS_FILE·V2_ISSUER·V2_AUDIENCE를 설정하면 인증이 켜진다.
       V2_PG_DSN: "${V2_PG_DSN:-}"
       V2_PG_SCHEMA: "public"
       V2_TENANT_ID: "kwater"
@@ -30,7 +26,6 @@ services:
       V2_EMBEDDING_DIMENSIONS: "16"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
-      # 선택: entity value probe. query_execute 경로와 무관하다.
       SOURCE_PG_HOST: "${SOURCE_PG_HOST:-host.docker.internal}"
       SOURCE_PG_PORT: "${SOURCE_PG_PORT:-5432}"
       SOURCE_PG_DB: "${SOURCE_PG_DB:-rwis}"
@@ -50,9 +45,17 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./config:/app/config:ro
+    networks:
+      - default
+      - kair-control-plane
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+networks:
+  kair-control-plane:
+    external: true
+    name: kair-metadata-platform_control-plane

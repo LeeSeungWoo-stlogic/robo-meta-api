@@ -11,7 +11,6 @@ router = APIRouter(tags=["decision"])
 
 
 @router.post("/data_decision", response_model=DecisionResponse)
-@router.post("/v1/data_decision", response_model=DecisionResponse)
 async def data_decision(req: DecisionRequest) -> DecisionResponse:
     repository = get_metadata_repository()
     return await decision_postgres.decide(
