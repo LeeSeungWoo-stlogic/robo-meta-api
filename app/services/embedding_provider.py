@@ -51,10 +51,10 @@ class HttpEmbeddingProvider:
         headers = {"Content-Type": "application/json"}
         if runtime.embedding.auth_mode == "bearer" and runtime.embedding.api_key:
             headers["Authorization"] = f"Bearer {runtime.embedding.api_key}"
+        # GenOS bge-m3 rejects OpenAI matryoshka `dimensions=`; still validate length locally.
         payload = {
             "model": runtime.embedding.model,
             "input": texts,
-            "dimensions": runtime.embedding.dimensions,
         }
         try:
             async with httpx.AsyncClient(
