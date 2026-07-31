@@ -484,7 +484,13 @@ class QueryResponse(BaseModel):
 # /query/execute — v0.6에서 deprecated 표기 (계획서 §3 별도 트랙)
 # ---------------------------------------------------------------------------
 class QueryExecuteRequest(BaseModel):
-    sql: str = Field(..., description="SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용")
+    sql: str = Field(
+        ...,
+        description="SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용",
+        examples=[
+            "SELECT * FROM `kair_8bca2bcc_285d_43ab_acdb_0a886868b9c6`.`RDISAUP_TB` LIMIT 5",
+        ],
+    )
     execution_context: Optional[ExecutionContext] = Field(
         default=None,
         description="/data_decision이 반환한 단일 datasource 실행 허용범위",
@@ -497,11 +503,29 @@ class QueryExecuteRequest(BaseModel):
     timeout_s: Optional[int] = Field(
         default=None, ge=1, le=60,
         description="서버 statement_timeout (기본 10s, 최대 30s)",
+        examples=[10],
     )
     max_rows: Optional[int] = Field(
         default=None, ge=1, le=100000,
         description="반환 최대 행수 (기본 1000, 최대 10000)",
+        examples=[100],
     )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "sql": (
+                        "SELECT * FROM "
+                        "`kair_8bca2bcc_285d_43ab_acdb_0a886868b9c6`.`RDISAUP_TB` "
+                        "LIMIT 5"
+                    ),
+                    "timeout_s": 10,
+                    "max_rows": 100,
+                }
+            ]
+        }
+    }
 
 
 class QueryExecuteResponse(BaseModel):
