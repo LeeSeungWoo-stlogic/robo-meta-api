@@ -23,7 +23,7 @@ import uvicorn
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from .db import close_metadata_repository, init_metadata_repository
+from .db import close_metadata_repository, get_metadata_repository, init_metadata_repository
 from .routers import decision, decision_v2, meta, query_exec
 from .routers.decision_v2 import V2Deps
 from .runtime_config import get_runtime, init_runtime
@@ -56,21 +56,12 @@ def _build_v2_deps(pool) -> V2Deps:
             dimensions=int(os.environ.get("V2_EMBEDDING_DIMENSIONS", "16")))
     else:
         embedding_provider = HttpEmbeddingProvider()
-    execution = get_runtime().execution
-    # BundleExecutionContext 스키마(additionalProperties=false)와 동일한 6개 키만
-    execution_context = {
-        "backend": execution.backend,
-        "dialect": execution.dialect,
-        "catalog": execution.catalog,
-        "schema_name": execution.schema,
-        "identifier_quote": execution.identifier_quote,
-        "qualification_pattern": execution.qualification_pattern,
-    }
+    # V2 is non-executing for source bindings: no YAML/default single-source context.
     return V2Deps(
         auth_config=auth_config,
         store=PostgresV2Store(pool, os.environ.get("V2_PG_SCHEMA", "public")),
         embedding_provider=embedding_provider,
-        execution_context=execution_context,
+        execution_context=None,
         default_tenant_id=os.environ.get("V2_TENANT_ID", "kwater"),
     )
 
@@ -134,16 +125,31 @@ async def _attach_meta_version_header(request, call_next):
 async def health(response: Response) -> dict:
     """K-AIR v0.6 RC: meta_version 동봉 + X-Meta-Version 헤더 (미들웨어가 자동 부착)."""
     runtime = get_runtime()
+    try:
+        sources = await get_metadata_repository().list_execution_sources()
+    except Exception:
+        response.status_code = 503
+        return {
+            "meta_version": META_VERSION,
+            "status": "unavailable",
+            "metadata_backend": runtime.metadata_backend,
+            "execution_backend": runtime.execution.backend,
+            "source_binding_count": 0,
+            "source_instance_ids": [],
+            "detail": "Metadata Store list_execution_sources failed",
+        }
+    source_ids = [
+        str(item.get("source_instance_id") or "")
+        for item in sources
+        if str(item.get("source_instance_id") or "").strip()
+    ]
     return {
         "meta_version": META_VERSION,
         "status": "ok",
         "metadata_backend": runtime.metadata_backend,
         "execution_backend": runtime.execution.backend,
-        "mindsdb_integration": runtime.execution.integration,
-        "default_source_instance_id": (
-            runtime.execution.default_source_instance_id
-        ),
-        "source_binding_count": len(runtime.execution.source_bindings),
+        "source_binding_count": len(source_ids),
+        "source_instance_ids": source_ids,
     }
 
 

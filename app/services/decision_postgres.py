@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
 import re
 from typing import Any
 
@@ -46,6 +47,25 @@ from .query_analysis import (
 )
 
 
+def _same_source(row: dict[str, Any], source_instance_id: str) -> bool:
+    return str(row.get("source_instance_id") or "") == source_instance_id
+
+
+def _provisional_source_instance_id(
+    vector_tables: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+) -> str:
+    """Pick one source before any cross-source expand (plan order)."""
+
+    if vector_tables:
+        return str(vector_tables[0].get("source_instance_id") or "").strip()
+    for mapping in mappings:
+        source_id = str(mapping.get("source_instance_id") or "").strip()
+        if source_id:
+            return source_id
+    return ""
+
+
 async def _embed_question(question: str) -> list[float]:
     """v1 경로 — EmbeddingProvider 인터페이스로 위임 (기본은 기존과 동일한 HTTP)."""
     return await get_embedding_provider().embed(question)
@@ -73,6 +93,74 @@ def _resolve_subject_area(table: dict[str, Any]) -> str:
     )
 
 
+def _metadata_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _value_examples(metadata: dict[str, Any]) -> list[str]:
+    sample_values = metadata.get("sample_values")
+    if not isinstance(sample_values, list):
+        return []
+    examples: list[str] = []
+    for item in sample_values:
+        value = item.get("value") if isinstance(item, dict) else item
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        examples.append(str(value))
+        if len(examples) == 5:
+            break
+    return examples
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _merge_column_hits(
+    question_hits: dict[int, list[dict[str, Any]]],
+    metric_hits: dict[int, list[dict[str, Any]]],
+) -> dict[int, list[dict[str, Any]]]:
+    merged: dict[int, list[dict[str, Any]]] = {}
+    for table_id in question_hits.keys() | metric_hits.keys():
+        by_column_id: dict[int, dict[str, Any]] = {}
+        for column in [
+            *question_hits.get(table_id, []),
+            *metric_hits.get(table_id, []),
+        ]:
+            column_id = int(column["id"])
+            current = by_column_id.get(column_id)
+            if current is None or float(column.get("score") or 0.0) > float(
+                current.get("score") or 0.0
+            ):
+                by_column_id[column_id] = column
+        merged[table_id] = sorted(
+            by_column_id.values(),
+            key=lambda item: float(item.get("score") or 0.0),
+            reverse=True,
+        )
+    return merged
+
+
 def _candidate(
     table: dict[str, Any],
     columns: list[dict[str, Any]],
@@ -80,21 +168,36 @@ def _candidate(
     source: str,
 ) -> DecisionCandidate:
     subject_area = _resolve_subject_area(table)
-    matched = [
-        MatchedColumn(
-            column_name=str(column["name"]),
-            score=float(column.get("score") or 0.0),
-            constraints=["PK"] if column.get("is_primary_key") else [],
-            column_name_kr=(column.get("description") or None),
-            data_type=(column.get("dtype") or None),
-            description=(
-                column.get("analyzed_description")
-                or column.get("description")
-                or None
-            ),
+    matched: list[MatchedColumn] = []
+    for column in columns:
+        metadata = _metadata_dict(column.get("metadata"))
+        constraints = []
+        if column.get("is_primary_key"):
+            constraints.append("PK")
+        if column.get("is_foreign_key"):
+            constraints.append("FK")
+        matched.append(
+            MatchedColumn(
+                column_name=str(column["name"]),
+                score=float(column.get("score") or 0.0),
+                constraints=constraints,
+                column_name_kr=(column.get("description") or None),
+                data_type=(column.get("dtype") or None),
+                description=(
+                    column.get("analyzed_description")
+                    or column.get("description")
+                    or None
+                ),
+                value_examples=_value_examples(metadata),
+                format_pattern=_optional_string(metadata.get("format_pattern")),
+                unit=_optional_string(metadata.get("unit")),
+                facility_code=_optional_string(
+                    metadata.get("facility_code") or metadata.get("facility_scope")
+                ),
+                system_code=_optional_string(metadata.get("system_code")),
+                pk_ordinal=_optional_int(metadata.get("pk_ordinal")),
+            )
         )
-        for column in columns
-    ]
     return DecisionCandidate(
         db=str(table.get("db") or ""),
         schema_name=str(table.get("schema_name") or ""),
@@ -125,6 +228,9 @@ def _resolved_entities(mappings: list[dict[str, Any]]) -> list[ResolvedEntity]:
         grouped[key].append(mapping)
     entities: list[ResolvedEntity] = []
     for (mention, db, schema_name, table_name), rows in grouped.items():
+        column_name = str(rows[0].get("column_name") or "")
+        metadata = _metadata_dict(rows[0].get("metadata"))
+        label_column = _optional_string(metadata.get("label_column"))
         entities.append(
             ResolvedEntity(
                 mention=mention,
@@ -132,8 +238,8 @@ def _resolved_entities(mappings: list[dict[str, Any]]) -> list[ResolvedEntity]:
                 db=db or None,
                 schema_name=schema_name or None,
                 table=table_name,
-                name_column=str(rows[0].get("column_name") or ""),
-                code_column=str(rows[0].get("column_name") or "") or None,
+                name_column=label_column or column_name,
+                code_column=column_name,
                 values=[
                     ResolvedValue(
                         code=str(row.get("code_value") or ""),
@@ -165,11 +271,31 @@ async def _decide_single_vector_legacy(
         else runtime.decision.table_top_k
     )
     embedding = await _embed_question(query)
-    tables = await repository.search_tables(
+    vector_tables = await repository.search_tables(
         embedding,
         limit=effective_top_k,
     )
+    vector_tables = sorted(
+        vector_tables,
+        key=lambda item: float(item.get("score") or 0),
+        reverse=True,
+    )
     mappings = await repository.find_value_mappings(query)
+    selected_source_instance = _provisional_source_instance_id(
+        vector_tables, mappings
+    )
+    mappings = [
+        mapping
+        for mapping in mappings
+        if selected_source_instance
+        and _same_source(mapping, selected_source_instance)
+    ]
+    tables = [
+        table
+        for table in vector_tables
+        if selected_source_instance
+        and _same_source(table, selected_source_instance)
+    ]
     mapped_table_ids = {
         int(mapping["table_id"])
         for mapping in mappings
@@ -177,16 +303,21 @@ async def _decide_single_vector_legacy(
     }
     existing_ids = {int(table["id"]) for table in tables}
     for table in await repository.fetch_tables_by_ids(mapped_table_ids - existing_ids):
+        if not selected_source_instance or not _same_source(
+            table, selected_source_instance
+        ):
+            continue
         table["score"] = 1.0
         tables.insert(0, table)
-    # 승인된 FK/논리 JOIN의 직접 이웃은 vector 후보에서도 확장한다.
-    # entity mapping 후보만 확장하면 일반 질문에서 join bridge가 유실된다.
-    seed_table_ids = mapped_table_ids | {
-        int(table["id"]) for table in tables
-    }
+    # FK expand only after provisional source + same-source mapping seed.
+    seed_table_ids = mapped_table_ids | {int(table["id"]) for table in tables}
     neighbor_ids = await repository.fk_neighbor_table_ids(seed_table_ids)
     current_ids = {int(table["id"]) for table in tables}
     for table in await repository.fetch_tables_by_ids(neighbor_ids - current_ids):
+        if not selected_source_instance or not _same_source(
+            table, selected_source_instance
+        ):
+            continue
         table["score"] = 0.99 if mapped_table_ids else 0.0
         tables.append(table)
 
@@ -203,18 +334,6 @@ async def _decide_single_vector_legacy(
         key=lambda item: float(item.get("score") or 0),
         reverse=True,
     )[:effective_top_k]
-    # 한 요청은 하나의 활성 source_instance만 사용한다. 상위 후보의 source를
-    # 선택하고 다른 datasource 후보가 JOIN/실행 컨텍스트로 섞이지 않게 한다.
-    selected_source_instance = (
-        str(tables[0].get("source_instance_id") or "") if tables else ""
-    )
-    if selected_source_instance:
-        tables = [
-            table
-            for table in tables
-            if str(table.get("source_instance_id") or "")
-            == selected_source_instance
-        ]
 
     table_ids = [int(table["id"]) for table in tables]
     columns = (
@@ -908,6 +1027,16 @@ async def decide(
         else ""
     )
 
+    mappings = await repository.find_value_mappings(query)
+    if not selected_source_instance:
+        selected_source_instance = _provisional_source_instance_id([], mappings)
+    mappings = [
+        mapping
+        for mapping in mappings
+        if selected_source_instance
+        and _same_source(mapping, selected_source_instance)
+    ]
+
     role_candidates: dict[str, list[dict[str, Any]]] = {}
     if selected_source_instance and analysis.status == "complete":
         for role in analysis.schema_roles:
@@ -969,7 +1098,6 @@ async def decide(
         == selected_source_instance
     ]
 
-    mappings = await repository.find_value_mappings(query)
     mapped_table_ids = {
         int(mapping["table_id"])
         for mapping in mappings
@@ -1088,6 +1216,14 @@ async def decide(
         else {}
     )
     if include_matched_columns:
+        metric = str(analysis.measurement.metric or "").strip()
+        if metric:
+            metric_columns = await repository.search_columns(
+                await provider.embed(metric),
+                table_ids=column_ids,
+                per_table_limit=column_top_m or decision.column_top_m,
+            )
+            columns = _merge_column_hits(columns, metric_columns)
         for table in ordered_tables:
             table_id = int(table["id"])
             table_score = float(table.get("score") or 0.0)

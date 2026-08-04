@@ -25,7 +25,7 @@ from app.services.decision_planner import (
     merge_axis_candidates,
     select_minimal_tables,
 )
-from app.services.decision_postgres import decide
+from app.services.decision_postgres import _candidate, _resolved_entities, decide
 from app.services.embedding_provider import set_embedding_provider
 from app.services.query_analysis import _sanitize, set_query_analyzer
 
@@ -68,6 +68,83 @@ def edge_row(
 
 
 class DecisionPlannerTests(unittest.TestCase):
+    def test_resolved_entity_uses_mapping_label_column(self) -> None:
+        entities = _resolved_entities(
+            [
+                {
+                    "natural_value": "청주",
+                    "code_value": "CJJ",
+                    "db": "rwis",
+                    "schema_name": "RWIS",
+                    "table_name": "FACILITY_TB",
+                    "column_name": "FACILITY_CODE",
+                    "metadata": '{"label_column": "FACILITY_NAME"}',
+                }
+            ]
+        )
+        self.assertEqual(entities[0].name_column, "FACILITY_NAME")
+        self.assertEqual(entities[0].code_column, "FACILITY_CODE")
+
+    def test_candidate_maps_column_metadata_to_value_examples(self) -> None:
+        candidate = _candidate(
+            table(1, "MEASURE_TB", 0.9),
+            [
+                {
+                    "name": "VALUE",
+                    "score": 0.8,
+                    "is_primary_key": True,
+                    "is_foreign_key": True,
+                    "metadata": {
+                        "sample_values": [
+                            {"value": 1.2},
+                            "2.3",
+                            {"value": "3.4"},
+                            "4.5",
+                            "5.6",
+                            "ignored",
+                        ],
+                        "format_pattern": "0.0",
+                        "unit": "mg/L",
+                        "pk_ordinal": "2",
+                    },
+                }
+            ],
+            source="vector",
+        )
+        matched = candidate.matched_columns[0]
+        self.assertEqual(matched.constraints, ["PK", "FK"])
+        self.assertEqual(
+            matched.value_examples,
+            ["1.2", "2.3", "3.4", "4.5", "5.6"],
+        )
+        self.assertEqual(matched.format_pattern, "0.0")
+        self.assertEqual(matched.unit, "mg/L")
+        self.assertEqual(matched.pk_ordinal, 2)
+        self.assertIsNone(matched.facility_code)
+        self.assertIsNone(matched.system_code)
+
+    def test_candidate_maps_facility_and_system_codes(self) -> None:
+        candidate = _candidate(
+            table(1, "MEASURE_TB", 0.9),
+            [
+                {
+                    "name": "VALUE",
+                    "score": 0.8,
+                    "is_primary_key": False,
+                    "is_foreign_key": False,
+                    "metadata": {
+                        "facility_code": "FAC1",
+                        "system_code": "SYS9",
+                        "facility_scope": "ignored-when-facility_code-present",
+                    },
+                }
+            ],
+            source="vector",
+        )
+        matched = candidate.matched_columns[0]
+        self.assertEqual(matched.facility_code, "FAC1")
+        self.assertEqual(matched.system_code, "SYS9")
+
     def test_composite_edge_groups_multi_column_join(self) -> None:
         edges = build_composite_edges(
             [
@@ -273,7 +350,7 @@ class FakeRepository:
             return None
         return {
             "source_instance_id": source_instance_id,
-            "engine": "mysql",
+            "engine": "postgresql",
             "source_schema": "RWIS",
             "mindsdb_integration": "rwis",
             "mindsdb_catalog": "rwis",
@@ -299,6 +376,7 @@ class FakeRepository:
         return {
             table_id: [
                 {
+                    "id": table_id * 100,
                     "table_id": table_id,
                     "name": "LK_ERRMSG" if table_id == 2 else "SUJ_NAME",
                     "fqn": (
@@ -344,23 +422,14 @@ class DecisionOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                 score_top_radius=0.0,
             ),
             execution=ExecutionRuntime(
-                "mindsdb",
-                "http://mindsdb.test",
-                "rwis",
-                "rwis",
-                "RWIS",
-                "mysql",
-                "{catalog}.{table}",
-                "`",
-                False,
-                frozenset({"rwis"}),
-                frozenset({"rwis"}),
-                1,
-                2,
-                10,
-                20,
-                1000,
-                "audit.jsonl",
+                backend="mindsdb",
+                sql_api_url="http://mindsdb.test",
+                default_timeout_seconds=1,
+                maximum_timeout_seconds=2,
+                default_max_rows=10,
+                maximum_rows=20,
+                maximum_response_bytes=1000,
+                audit_log_path="audit.jsonl",
             ),
         )
         set_query_analyzer(FakeAnalyzer())

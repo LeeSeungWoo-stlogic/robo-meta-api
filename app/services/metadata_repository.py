@@ -16,6 +16,22 @@ class PostgresMetadataRepository:
         self._pool = pool
         self._runtime = runtime
 
+    async def list_execution_sources(self) -> list[dict[str, Any]]:
+        """Return all published datasources (health / boot inventory)."""
+
+        query = """
+        SELECT d.profile_id AS source_instance_id,
+               d.engine,
+               d.source_schema,
+               d.mindsdb_integration,
+               d.mindsdb_catalog
+        FROM t2s_datasources d
+        ORDER BY d.profile_id
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query)
+        return [dict(row) for row in rows]
+
     async def execution_source_scope(
         self,
         source_instance_id: str,
@@ -109,6 +125,11 @@ class PostgresMetadataRepository:
         WITH ranked AS (
           SELECT c.id, c.table_id, c.name, c.fqn, c.dtype, c.nullable,
                  c.description, c.analyzed_description, c.is_primary_key,
+                 c.metadata,
+                 EXISTS (
+                   SELECT 1 FROM t2s_fk_constraints fk
+                   WHERE fk.from_column_id=c.id
+                 ) AS is_foreign_key,
                  1 - (c.vector <=> $1::vector) AS score,
                  row_number() OVER (
                    PARTITION BY c.table_id
@@ -149,11 +170,14 @@ class PostgresMetadataRepository:
     async def find_value_mappings(self, question: str) -> list[dict[str, Any]]:
         query = """
         SELECT vm.natural_value, vm.code_value, vm.column_fqn,
-               vm.verified, vm.origin, c.name AS column_name,
-               t.id AS table_id, t.db, t.schema_name, t.name AS table_name
+               vm.verified, vm.origin, vm.metadata,
+               c.name AS column_name,
+               t.id AS table_id, t.db, t.schema_name, t.name AS table_name,
+               d.profile_id AS source_instance_id
         FROM t2s_value_mappings vm
         LEFT JOIN t2s_columns c ON c.id=vm.column_id
         LEFT JOIN t2s_tables t ON t.id=c.table_id
+        LEFT JOIN t2s_datasources d ON d.id=t.datasource_id
         WHERE vm.verified = true
           AND t.text_to_sql_is_valid=true
           AND t.review_status='approved'

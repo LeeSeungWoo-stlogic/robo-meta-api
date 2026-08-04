@@ -37,43 +37,19 @@ def _append_audit(entry: dict[str, Any]) -> None:
 
 def _validate_namespaces(
     sql: str,
-    execution_context: ResolvedExecutionContext | dict[str, Any] | None = None,
+    execution_context: ResolvedExecutionContext | None = None,
 ) -> None:
-    runtime = get_runtime()
-    if isinstance(execution_context, ResolvedExecutionContext):
-        parser_dialect = execution_context.parser_dialect
-        expected_catalogs = execution_context.allowed_catalogs
-        expected_schemas = execution_context.allowed_schemas
-        allowed_objects = {
-            value.lower() for value in execution_context.allowed_objects
-        }
-        require_quoted_uppercase = (
-            execution_context.require_quoted_uppercase_identifiers
-        )
-    else:
-        parser_dialect = runtime.execution.dialect
-        expected_catalogs = (
-            {str(execution_context["catalog"]).lower()}
-            if execution_context and execution_context.get("catalog")
-            else runtime.execution.allowed_catalogs
-        )
-        expected_schemas = (
-            {str(execution_context["schema_name"]).lower()}
-            if execution_context and execution_context.get("schema_name")
-            else runtime.execution.allowed_schemas
-        )
-        allowed_objects = {
-            str(value).lower()
-            for value in (
-                execution_context.get("allowed_objects", [])
-                if execution_context
-                else []
-            )
-        }
-        require_quoted_uppercase = bool(
-            execution_context
-            and execution_context.get("require_quoted_uppercase_identifiers")
-        )
+    if not isinstance(execution_context, ResolvedExecutionContext):
+        raise GuardError("ResolvedExecutionContext가 필요합니다")
+    parser_dialect = execution_context.parser_dialect
+    expected_catalogs = execution_context.allowed_catalogs
+    expected_schemas = execution_context.allowed_schemas
+    allowed_objects = {
+        value.lower() for value in execution_context.allowed_objects
+    }
+    require_quoted_uppercase = (
+        execution_context.require_quoted_uppercase_identifiers
+    )
     try:
         expression = parse_one(sql, read=parser_dialect)
     except Exception as exc:

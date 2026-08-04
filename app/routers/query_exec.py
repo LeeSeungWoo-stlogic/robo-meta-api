@@ -48,16 +48,21 @@ async def query_execute(req: QueryExecuteRequest, request: Request) -> QueryExec
     artifact_payload = None
     if req.artifact_id:
         artifact_payload = await _resolve_artifact_payload(request, req.artifact_id)
-    try:
-        claimed_context = (
-            req.execution_context.model_dump()
-            if req.execution_context is not None
-            else None
+    if req.execution_context is None:
+        raise HTTPException(
+            status_code=400,
+            detail="execution_context가 필요합니다",
         )
+    if not str(req.execution_context.source_instance_id or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="execution_context.source_instance_id가 필요합니다",
+        )
+    try:
+        claimed_context = req.execution_context.model_dump()
         resolved_context = await resolve_execution_context(
             get_metadata_repository(),
             claimed_context=claimed_context,
-            allow_default=claimed_context is None,
         )
         result = await query_runner.execute(
             sql=req.sql,

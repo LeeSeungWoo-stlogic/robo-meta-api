@@ -1,4 +1,4 @@
-"""Server-side source binding and execution allowlist resolution."""
+"""Server-side source binding from Metadata Store (no YAML source registry)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,30 @@ from .sql_guard import GuardError
 
 
 class ExecutionBindingError(GuardError):
-    """Raised when a client claim cannot be resolved to a server binding."""
+    """Raised when a client claim cannot be resolved to a Store binding."""
+
+
+# MindsDB SQL shaping by source engine — not a source registration map.
+_MINDSDB_SQL_POLICY: dict[str, dict[str, Any]] = {
+    "postgresql": {
+        "parser_dialect": "mysql",
+        "qualification_pattern": "{catalog}.{table}",
+        "identifier_quote": "`",
+        "require_quoted_uppercase_identifiers": False,
+    },
+    "tibero": {
+        "parser_dialect": "mysql",
+        "qualification_pattern": "{catalog}.{table}",
+        "identifier_quote": "`",
+        "require_quoted_uppercase_identifiers": True,
+    },
+    "oracle": {
+        "parser_dialect": "mysql",
+        "qualification_pattern": "{catalog}.{table}",
+        "identifier_quote": "`",
+        "require_quoted_uppercase_identifiers": True,
+    },
+}
 
 
 def _engine(value: Any) -> str:
@@ -71,6 +94,50 @@ class ResolvedExecutionContext:
         }
 
 
+def binding_from_store_row(state: Mapping[str, Any]) -> SourceBindingRuntime:
+    """Assemble a binding from one t2s_datasources scope row."""
+
+    source_instance_id = str(state.get("source_instance_id") or "").strip()
+    if not source_instance_id:
+        raise ExecutionBindingError("Metadata Store row에 source_instance_id가 없습니다")
+    integration = str(state.get("mindsdb_integration") or "").strip()
+    catalog = str(state.get("mindsdb_catalog") or "").strip()
+    if not integration or not catalog:
+        raise ExecutionBindingError(
+            f"Metadata Store mindsdb_integration/catalog가 비어 있습니다: "
+            f"{source_instance_id}"
+        )
+    if integration.lower() != catalog.lower():
+        raise ExecutionBindingError(
+            "mindsdb_integration과 mindsdb_catalog가 일치하지 않습니다"
+        )
+    schema = str(state.get("source_schema") or "").strip()
+    if not schema:
+        raise ExecutionBindingError(
+            f"Metadata Store source_schema가 비어 있습니다: {source_instance_id}"
+        )
+    source_engine = _engine(state.get("engine"))
+    policy = _MINDSDB_SQL_POLICY.get(source_engine)
+    if policy is None:
+        raise ExecutionBindingError(f"지원하지 않는 source engine: {source_engine}")
+    catalog_key = catalog.lower()
+    return SourceBindingRuntime(
+        source_instance_id=source_instance_id,
+        integration=integration,
+        catalog=catalog,
+        schema=schema,
+        source_engine=source_engine,
+        parser_dialect=str(policy["parser_dialect"]),
+        qualification_pattern=str(policy["qualification_pattern"]),
+        identifier_quote=str(policy["identifier_quote"]),
+        require_quoted_uppercase_identifiers=bool(
+            policy["require_quoted_uppercase_identifiers"]
+        ),
+        allowed_catalogs=frozenset({catalog_key}),
+        allowed_schemas=frozenset({schema.lower()}),
+    )
+
+
 def _validate_claim(
     claimed: Mapping[str, Any],
     *,
@@ -109,9 +176,8 @@ async def resolve_execution_context(
     claimed_context: Mapping[str, Any] | None = None,
     source_instance_id: str | None = None,
     requested_objects: Iterable[str] | None = None,
-    allow_default: bool = False,
 ) -> ResolvedExecutionContext:
-    """Resolve all execution fields from trusted runtime and active metadata."""
+    """Resolve execution fields from Store for an explicit source_instance_id."""
 
     runtime = get_runtime()
     claimed_source = (
@@ -121,37 +187,16 @@ async def resolve_execution_context(
     )
     if source_instance_id and claimed_source and source_instance_id != claimed_source:
         raise ExecutionBindingError("서로 다른 source_instance_id가 혼합되었습니다")
-    selected_source = source_instance_id or claimed_source
-    if not selected_source and allow_default:
-        selected_source = runtime.execution.default_source_instance_id
+    selected_source = (source_instance_id or claimed_source or "").strip()
     if not selected_source:
         raise ExecutionBindingError("source_instance_id를 결정할 수 없습니다")
-    try:
-        binding = runtime.execution.binding_for(selected_source)
-    except Exception as exc:
-        raise ExecutionBindingError(str(exc)) from exc
 
     state = await repository.execution_source_scope(selected_source)
     if state is None:
         raise ExecutionBindingError(
             f"Metadata Store에 datasource가 없습니다: {selected_source}"
         )
-    if _engine(state.get("engine")) != _engine(binding.source_engine):
-        raise ExecutionBindingError("Metadata Store engine과 server binding이 다릅니다")
-    source_schema = str(state.get("source_schema") or "")
-    if source_schema.lower() != binding.schema.lower():
-        raise ExecutionBindingError("Metadata Store schema와 server binding이 다릅니다")
-
-    legacy_integration = str(state.get("mindsdb_integration") or "")
-    legacy_catalog = str(state.get("mindsdb_catalog") or "")
-    if legacy_integration and legacy_integration != binding.integration:
-        raise ExecutionBindingError(
-            "legacy mindsdb_integration과 server binding이 다릅니다"
-        )
-    if legacy_catalog and legacy_catalog != binding.catalog:
-        raise ExecutionBindingError(
-            "legacy mindsdb_catalog과 server binding이 다릅니다"
-        )
+    binding = binding_from_store_row(state)
 
     active_by_key = {
         str(item).lower(): str(item)
@@ -216,20 +261,14 @@ async def resolve_execution_context(
 
 
 async def validate_runtime_bindings(repository: Any) -> list[dict[str, Any]]:
-    """Fail startup when configured bindings cannot resolve to active metadata."""
+    """Boot check: Store reachable. Empty/multi source both OK."""
 
-    runtime = get_runtime()
-    results: list[dict[str, Any]] = []
-    for source_instance_id in runtime.execution.source_bindings:
-        resolved = await resolve_execution_context(
-            repository,
-            source_instance_id=source_instance_id,
-        )
-        results.append(
-            {
-                "source_instance_id": source_instance_id,
-                "integration": resolved.integration,
-                "active_object_count": len(resolved.allowed_objects),
-            }
-        )
-    return results
+    sources = await repository.list_execution_sources()
+    return [
+        {
+            "source_instance_id": str(item.get("source_instance_id") or ""),
+            "integration": str(item.get("mindsdb_integration") or ""),
+            "engine": str(item.get("engine") or ""),
+        }
+        for item in sources
+    ]

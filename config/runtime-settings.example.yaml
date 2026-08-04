@@ -1,5 +1,5 @@
-# Commit-safe template. Copy to runtime-settings.docker.local.yaml and replace
-# SOURCE_INSTANCE_ID / MindsDB mapping with deployment-specific values.
+# Commit-safe template. Copy to a local runtime-settings file.
+# Source identity is NOT configured here — Metadata Store t2s_datasources is SoT.
 robo_meta_api:
   api_host: "0.0.0.0"
   api_port: 8100
@@ -49,21 +49,6 @@ robo_meta_api:
   execution:
     backend: mindsdb
     sql_api_url: http://host.docker.internal:47334/api/sql/query
-    default_source_instance_id: "SOURCE_INSTANCE_ID"
-    source_bindings:
-      SOURCE_INSTANCE_ID:
-        integration: "MINDSDB_INTEGRATION"
-        catalog: "MINDSDB_CATALOG"
-        schema: "SOURCE_SCHEMA"
-        source_engine: "postgresql"
-        parser_dialect: "mysql"
-        qualification_pattern: "{catalog}.{table}"
-        identifier_quote: "`"
-        require_quoted_uppercase_identifiers: false
-        allowed_catalogs:
-          - "MINDSDB_INTEGRATION"
-        allowed_schemas:
-          - "source_schema"
     default_timeout_seconds: 10
     maximum_timeout_seconds: 30
     default_max_rows: 1000

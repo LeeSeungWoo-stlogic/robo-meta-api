@@ -18,10 +18,12 @@ from app.runtime_config import (
     ExecutionRuntime,
     MetadataRuntime,
     RoboRuntime,
-    SourceBindingRuntime,
+    RuntimeConfigError,
+    load_runtime,
 )
 from app.services.execution_context_resolver import (
     ExecutionBindingError,
+    binding_from_store_row,
     resolve_execution_context,
     validate_runtime_bindings,
 )
@@ -31,8 +33,14 @@ from app.services.sql_guard import GuardError
 
 
 class FakeRepository:
-    def __init__(self, state):
+    def __init__(self, state, sources=None):
         self.state = state
+        self.sources = sources if sources is not None else (
+            [state] if state else []
+        )
+
+    async def list_execution_sources(self):
+        return [dict(item) for item in self.sources]
 
     async def execution_source_scope(self, source_instance_id):
         if self.state and self.state["source_instance_id"] == source_instance_id:
@@ -40,26 +48,7 @@ class FakeRepository:
         return None
 
 
-def _binding(
-    source_instance_id: str = "source-tibero",
-) -> SourceBindingRuntime:
-    return SourceBindingRuntime(
-        source_instance_id=source_instance_id,
-        integration="tibero_active",
-        catalog="GIOS_TEST",
-        schema="GIOS_TEST",
-        source_engine="tibero",
-        parser_dialect="mysql",
-        qualification_pattern="{catalog}.{table}",
-        identifier_quote="`",
-        require_quoted_uppercase_identifiers=True,
-        allowed_catalogs=frozenset({"tibero_active"}),
-        allowed_schemas=frozenset({"gios_test"}),
-    )
-
-
 def _runtime(audit_log_path: str = "test-audit.jsonl") -> RoboRuntime:
-    binding = _binding()
     return RoboRuntime(
         settings_path=Path("test.yaml"),
         api_host="127.0.0.1",
@@ -78,23 +67,12 @@ def _runtime(audit_log_path: str = "test-audit.jsonl") -> RoboRuntime:
         execution=ExecutionRuntime(
             backend="mindsdb",
             sql_api_url="http://mindsdb.invalid/api/sql/query",
-            integration=binding.integration,
-            catalog=binding.catalog,
-            schema=binding.schema,
-            dialect=binding.parser_dialect,
-            qualification_pattern=binding.qualification_pattern,
-            identifier_quote=binding.identifier_quote,
-            require_quoted_uppercase_identifiers=True,
-            allowed_catalogs=binding.allowed_catalogs,
-            allowed_schemas=binding.allowed_schemas,
             default_timeout_seconds=1,
             maximum_timeout_seconds=2,
             default_max_rows=10,
             maximum_rows=20,
             maximum_response_bytes=1000,
             audit_log_path=audit_log_path,
-            source_bindings={binding.source_instance_id: binding},
-            default_source_instance_id=binding.source_instance_id,
         ),
     )
 
@@ -104,8 +82,8 @@ def _state(**overrides):
         "source_instance_id": "source-tibero",
         "engine": "tibero",
         "source_schema": "GIOS_TEST",
-        "mindsdb_integration": None,
-        "mindsdb_catalog": None,
+        "mindsdb_integration": "tibero_active",
+        "mindsdb_catalog": "tibero_active",
         "allowed_objects": ["TABLE_A", "TABLE_B"],
     }
     value.update(overrides)
@@ -123,30 +101,49 @@ class SourceBindingResolverTests(unittest.IsolatedAsyncioTestCase):
         runtime_config._runtime = self.previous
         self.tempdir.cleanup()
 
-    async def test_default_binding_accepts_null_legacy_columns(self):
+    async def test_missing_source_id_fails_even_when_one_source_exists(self):
+        with self.assertRaisesRegex(ExecutionBindingError, "source_instance_id"):
+            await resolve_execution_context(FakeRepository(_state()))
+
+    async def test_store_row_builds_binding_and_resolves(self):
         resolved = await resolve_execution_context(
             FakeRepository(_state()),
-            allow_default=True,
+            source_instance_id="source-tibero",
         )
-
         self.assertEqual(resolved.source_engine, "tibero")
         self.assertEqual(resolved.parser_dialect, "mysql")
+        self.assertEqual(resolved.integration, "tibero_active")
         self.assertEqual(resolved.allowed_objects, frozenset({"TABLE_A", "TABLE_B"}))
+        self.assertTrue(resolved.require_quoted_uppercase_identifiers)
 
-    async def test_non_null_legacy_mismatch_fails_closed(self):
+    async def test_null_mindsdb_fields_fail_closed(self):
         with self.assertRaisesRegex(ExecutionBindingError, "mindsdb_integration"):
             await resolve_execution_context(
-                FakeRepository(_state(mindsdb_integration="wrong")),
-                allow_default=True,
+                FakeRepository(_state(mindsdb_integration="", mindsdb_catalog="")),
+                source_instance_id="source-tibero",
             )
 
-    async def test_startup_validation_requires_active_approved_objects(self):
-        results = await validate_runtime_bindings(FakeRepository(_state()))
-        self.assertEqual(results[0]["active_object_count"], 2)
+    async def test_integration_catalog_mismatch_fails(self):
+        with self.assertRaisesRegex(ExecutionBindingError, "일치하지 않습니다"):
+            binding_from_store_row(
+                _state(mindsdb_integration="a", mindsdb_catalog="b")
+            )
 
+    async def test_startup_validation_allows_empty_sources(self):
+        results = await validate_runtime_bindings(FakeRepository(None, sources=[]))
+        self.assertEqual(results, [])
+
+    async def test_startup_validation_lists_sources_without_active_object_check(self):
+        results = await validate_runtime_bindings(
+            FakeRepository(_state(allowed_objects=[]))
+        )
+        self.assertEqual(results[0]["source_instance_id"], "source-tibero")
+
+    async def test_empty_allowlist_fails_on_resolve(self):
         with self.assertRaisesRegex(ExecutionBindingError, "활성·승인"):
-            await validate_runtime_bindings(
-                FakeRepository(_state(allowed_objects=[]))
+            await resolve_execution_context(
+                FakeRepository(_state(allowed_objects=[])),
+                source_instance_id="source-tibero",
             )
 
     async def test_spoofed_context_and_object_are_rejected(self):
@@ -206,6 +203,56 @@ class SourceBindingResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry["integration"], "tibero_active")
         self.assertEqual(entry["resolved_integration"], "tibero_active")
         self.assertEqual(entry["execution_context"]["parser_dialect"], "mysql")
+
+
+class RuntimeYamlBanTests(unittest.TestCase):
+    def test_source_bindings_in_yaml_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.yaml"
+            path.write_text(
+                """
+robo_meta_api:
+  api_host: "0.0.0.0"
+  api_port: 8100
+  metadata_backend: postgres
+  metadata_store:
+    host: h
+    port: 5432
+    database: d
+    schema: public
+    user: u
+    password_ref: {provider: process_env, env_key: METADATA_PG_PASSWORD}
+  embedding:
+    base_url: http://x
+    model: m
+    dimensions: 8
+    auth_mode: none
+    timeout_seconds: 1
+  decision:
+    table_top_k: 1
+    column_top_m: 1
+    minimum_similarity: 0.0
+    verified_join_confidence: 1.0
+    convention_join_confidence: 0.7
+  execution:
+    backend: mindsdb
+    sql_api_url: http://mindsdb
+    default_source_instance_id: "abc"
+    source_bindings: {"abc": {"integration": "i"}}
+    default_timeout_seconds: 1
+    maximum_timeout_seconds: 2
+    default_max_rows: 1
+    maximum_rows: 2
+    maximum_response_bytes: 10
+    audit_log_path: ./a.jsonl
+""".strip(),
+                encoding="utf-8",
+            )
+            import os
+
+            os.environ["METADATA_PG_PASSWORD"] = "pw"
+            with self.assertRaisesRegex(RuntimeConfigError, "hardcode"):
+                load_runtime(path)
 
 
 if __name__ == "__main__":

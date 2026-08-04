@@ -1342,6 +1342,68 @@
               }
             ],
             "title": "Description"
+          },
+          "value_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Value Examples"
+          },
+          "format_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Format Pattern"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "facility_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Facility Code"
+          },
+          "system_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Code"
+          },
+          "pk_ordinal": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pk Ordinal"
           }
         },
         "type": "object",

@@ -330,6 +330,12 @@ class MatchedColumn(BaseModel):
     column_name_kr: Optional[str] = None
     data_type: Optional[str] = None
     description: Optional[str] = None
+    value_examples: List[str] = Field(default_factory=list)
+    format_pattern: Optional[str] = None
+    unit: Optional[str] = None
+    facility_code: Optional[str] = None
+    system_code: Optional[str] = None
+    pk_ordinal: Optional[int] = None
 
 
 class DecisionCandidate(TableKey):
@@ -491,9 +497,12 @@ class QueryExecuteRequest(BaseModel):
             "SELECT * FROM `kair_8bca2bcc_285d_43ab_acdb_0a886868b9c6`.`RDISAUP_TB` LIMIT 5",
         ],
     )
-    execution_context: Optional[ExecutionContext] = Field(
-        default=None,
-        description="/data_decision이 반환한 단일 datasource 실행 허용범위",
+    execution_context: ExecutionContext = Field(
+        ...,
+        description=(
+            "/data_decision이 반환한 단일 datasource 실행 허용범위. "
+            "source_instance_id 필수. YAML default 없음."
+        ),
     )
     artifact_id: Optional[str] = Field(
         default=None,
@@ -517,9 +526,21 @@ class QueryExecuteRequest(BaseModel):
                 {
                     "sql": (
                         "SELECT * FROM "
-                        "`kair_8bca2bcc_285d_43ab_acdb_0a886868b9c6`.`RDISAUP_TB` "
+                        "`kair_catalog`.`RDISAUP_TB` "
                         "LIMIT 5"
                     ),
+                    "execution_context": {
+                        "backend": "mindsdb",
+                        "dialect": "postgresql",
+                        "integration": "kair_catalog",
+                        "catalog": "kair_catalog",
+                        "schema_name": "RWIS",
+                        "qualification_pattern": "{catalog}.{table}",
+                        "identifier_quote": "`",
+                        "require_quoted_uppercase_identifiers": False,
+                        "source_instance_id": "SOURCE_INSTANCE_ID",
+                        "allowed_objects": ["RDISAUP_TB"],
+                    },
                     "timeout_s": 10,
                     "max_rows": 100,
                 }

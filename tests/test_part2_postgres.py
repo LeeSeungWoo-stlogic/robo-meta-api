@@ -17,8 +17,32 @@ from app.runtime_config import (
     MetadataRuntime,
     RoboRuntime,
 )
+from app.services.execution_context_resolver import ResolvedExecutionContext
 from app.services.query_runner_mindsdb import _validate_namespaces
 from app.services.sql_guard import GuardError
+
+
+def _ctx(
+    *,
+    require_quoted_uppercase: bool = False,
+    allowed_objects: frozenset[str] | None = None,
+) -> ResolvedExecutionContext:
+    objects = allowed_objects or frozenset({"SAMPLE_TABLE"})
+    return ResolvedExecutionContext(
+        source_instance_id="src",
+        backend="mindsdb",
+        integration="allowed_catalog",
+        catalog="allowed_catalog",
+        schema_name="allowed_schema",
+        source_engine="postgresql",
+        parser_dialect="mysql",
+        qualification_pattern="{catalog}.{table}",
+        identifier_quote="`",
+        require_quoted_uppercase_identifiers=require_quoted_uppercase,
+        allowed_catalogs=frozenset({"allowed_catalog"}),
+        allowed_schemas=frozenset({"allowed_schema"}),
+        allowed_objects=objects,
+    )
 
 
 def runtime() -> RoboRuntime:
@@ -53,15 +77,6 @@ def runtime() -> RoboRuntime:
         execution=ExecutionRuntime(
             backend="mindsdb",
             sql_api_url="http://mindsdb.invalid/api/sql/query",
-            integration="allowed_catalog",
-            catalog="allowed_catalog",
-            schema="allowed_schema",
-            dialect="mysql",
-            qualification_pattern="{catalog}.{schema}.{table}",
-            identifier_quote="`",
-            require_quoted_uppercase_identifiers=True,
-            allowed_catalogs=frozenset({"allowed_catalog"}),
-            allowed_schemas=frozenset({"allowed_schema"}),
             default_timeout_seconds=1,
             maximum_timeout_seconds=2,
             default_max_rows=10,
@@ -82,36 +97,35 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
 
     def test_fully_qualified_allowed_table_passes(self) -> None:
         _validate_namespaces(
-            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`"
+            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
+            _ctx(),
         )
         _validate_namespaces(
-            "SELECT * FROM `allowed_catalog`.`SAMPLE_TABLE`"
+            "SELECT * FROM `allowed_catalog`.`SAMPLE_TABLE`",
+            _ctx(),
         )
 
     def test_unqualified_table_is_rejected(self) -> None:
         with self.assertRaises(GuardError):
-            _validate_namespaces("SELECT * FROM SAMPLE_TABLE")
+            _validate_namespaces("SELECT * FROM SAMPLE_TABLE", _ctx())
 
     def test_other_catalog_is_rejected(self) -> None:
         with self.assertRaises(GuardError):
             _validate_namespaces(
-                "SELECT * FROM `other_catalog`.`allowed_schema`.`SAMPLE_TABLE`"
+                "SELECT * FROM `other_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
+                _ctx(),
             )
 
     def test_cte_alias_is_not_treated_as_external_table(self) -> None:
         _validate_namespaces(
             "WITH sample AS ("
             "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`"
-            ") SELECT * FROM sample"
+            ") SELECT * FROM sample",
+            _ctx(),
         )
 
     def test_execution_context_restricts_table_allowlist(self) -> None:
-        context = {
-            "catalog": "allowed_catalog",
-            "schema_name": "allowed_schema",
-            "allowed_objects": ["SAMPLE_TABLE"],
-            "require_quoted_uppercase_identifiers": False,
-        }
+        context = _ctx()
         _validate_namespaces(
             "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
             context,
@@ -123,12 +137,7 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
             )
 
     def test_tibero_execution_context_requires_quoted_uppercase(self) -> None:
-        context = {
-            "catalog": "allowed_catalog",
-            "schema_name": "allowed_schema",
-            "allowed_objects": ["SAMPLE_TABLE"],
-            "require_quoted_uppercase_identifiers": True,
-        }
+        context = _ctx(require_quoted_uppercase=True)
         _validate_namespaces(
             "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
             context,

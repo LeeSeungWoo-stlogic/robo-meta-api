@@ -52,13 +52,26 @@ LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector
 
 - SELECT 계열 읽기 전용 SQL만 허용
 - 허용 catalog/schema와 완전 수식 table 검증
-- client `execution_context`를 server-side source binding과 재검증
+- client `execution_context`를 server-side Metadata Store binding과 재검증
+  (`source_instance_id` 필수 — YAML default/`source_bindings` 없음)
 - 활성·승인 metadata에서 table allowlist 재계산
 - timeout, 최대 행 수, 최대 응답 크기 제한
 - resolved integration·parser dialect·실행 결과의 audit 기록
 
 `artifact_id`가 지정된 경우 Semantic View Artifact의 table·column·join edge·
 mandatory filter allowlist를 추가 적용합니다.
+
+### Store-sourced binding (2026-08)
+
+- Runtime YAML에 `source_bindings` / `default_source_instance_id` / integration·catalog
+  등 소스 등록 키가 있으면 **로드 실패**
+- 요청의 `source_instance_id`로 Store `t2s_datasources`에서 binding 조립
+- Store `mindsdb_integration`/`mindsdb_catalog` 비어 있거나 불일치 시 fail-closed
+- `/query/execute`의 `execution_context`는 **필수** (OpenAPI·스키마 동기화)
+- decision 후보 컬럼에 `value_examples`·`unit`·`facility_code`·`system_code` 등
+  projection metadata 노출 보강
+
+상세: [`docs/REPORT_260803_store_sourced_bindings.md`](docs/REPORT_260803_store_sourced_bindings.md)
 
 ## API
 
@@ -114,29 +127,21 @@ export OPENAI_API_KEY='<api-key>'
 - `metadata_store`: PostgreSQL Metadata Store
 - `embedding`: embedding endpoint, model, dimension
 - `decision`: query analysis, HyDE, 다축 검색, score pruning, join path 정책
-- `execution`: MindsDB endpoint, source별 binding 및 SQL 제한
+- `execution`: MindsDB endpoint 및 SQL 제한(timeout/rows). **소스 등록 금지**
+  (`source_bindings` / `default_source_instance_id` / integration·catalog 키 존재 시
+  로드 실패). 소스 정본은 Metadata Store `t2s_datasources.profile_id`.
 
-`execution.source_bindings`의 key는 활성 Metadata Store에 존재하는 정확한
-`source_instance_id`여야 합니다. 각 binding은 다음 값을 server-side에서
-소유합니다.
-
-- MindsDB integration과 catalog
-- source schema와 source DB dialect
-- MindsDB/sqlglot parser dialect
-- qualification/identifier quote 규칙
-- 허용 catalog/schema
-
-Direct ingest datasource의 legacy `mindsdb_integration`·`mindsdb_catalog`이
-NULL이면 runtime binding을 사용합니다. 값이 존재하면서 binding과 다르면
-startup 또는 요청 시 거부합니다. 클라이언트가 보낸 integration/catalog/schema와
-allowed object는 권한 정보로 신뢰하지 않습니다.
+요청의 `source_instance_id`로 Store에서 binding을 조립합니다. Store의
+`mindsdb_integration`/`mindsdb_catalog`가 비어 있거나 서로 다르면 해당 요청은
+fail-closed입니다. 클라이언트가 보낸 integration/catalog/schema와 allowed
+object는 권한 정보로 신뢰하지 않습니다.
 
 `decision.analysis_base_url`을 설정하면 query analysis/HyDE용 chat endpoint를
 embedding endpoint와 분리할 수 있습니다.
 
 로컬 Docker에서 K-AIR-metadata-platform Store와 같은 네트워크로 붙일 때는
-`config/runtime-settings.docker.local.yaml`의 `metadata_store`·`embedding.dimensions`·
-`execution.source_bindings`가 게시된 `source_instance_id`와 일치해야 합니다.
+`config/runtime-settings.docker.local.yaml`의 `metadata_store`만 Store에 맞추면
+됩니다. 소스 UUID를 YAML에 넣지 않습니다.
 
 ## 실행
 
@@ -171,8 +176,8 @@ curl -sS -X POST http://127.0.0.1:8100/data_decision \
 python -m pytest tests -q
 ```
 
-현재 suite는 source binding·위조 context·dialect 분리·audit 검증을 포함해
-`78/78`입니다.
+현재 suite는 Store-sourced binding·YAML 소스 등록 금지·위조 context·dialect
+분리·audit 검증을 포함해 `86` tests collected입니다.
 
 ## 코드 구조
 
