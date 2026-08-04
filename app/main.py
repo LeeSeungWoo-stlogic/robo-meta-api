@@ -18,10 +18,13 @@ if sys.platform == "win32":
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.staticfiles import StaticFiles
 
 from .db import close_metadata_repository, get_metadata_repository, init_metadata_repository
 from .routers import decision, decision_v2, meta, query_exec
@@ -90,6 +93,9 @@ async def lifespan(app: FastAPI):
     await close_metadata_repository()
 
 
+# OA path proxy (e.g. /robo). Empty locally.
+_ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
+
 app = FastAPI(
     title="robo-meta-api v4",
     description=(
@@ -104,7 +110,37 @@ app = FastAPI(
     ),
     version=f"meta-{META_VERSION}",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    root_path=_ROOT_PATH,
 )
+
+# Closed-network docs: same pattern as K-AIR-Portal — local static, no CDN.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+@app.get("/docs", include_in_schema=False)
+def swagger_ui():
+    prefix = _ROOT_PATH
+    return get_swagger_ui_html(
+        openapi_url=f"{prefix}/openapi.json",
+        title="robo-meta-api v4 - API docs",
+        swagger_js_url=f"{prefix}/static/swagger/swagger-ui-bundle.js",
+        swagger_css_url=f"{prefix}/static/swagger/swagger-ui.css",
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_ui():
+    prefix = _ROOT_PATH
+    return get_redoc_html(
+        openapi_url=f"{prefix}/openapi.json",
+        title="robo-meta-api v4 - ReDoc",
+        redoc_js_url=f"{prefix}/static/swagger/redoc.standalone.js",
+        with_google_fonts=False,
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
