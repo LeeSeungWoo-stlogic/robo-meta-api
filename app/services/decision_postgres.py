@@ -199,7 +199,7 @@ def _candidate(
             )
         )
     return DecisionCandidate(
-        db=str(table.get("db") or ""),
+        db=str(table.get("source_name") or table.get("db") or ""),
         schema_name=str(table.get("schema_name") or ""),
         table_name=str(table.get("original_name") or table.get("name") or ""),
         score=float(table.get("score") or 0.0),
@@ -454,7 +454,10 @@ async def _decide_single_vector_legacy(
                 source_instance_id=selected_source_instance,
                 requested_objects=allowed_objects,
             )
-            execution_context = ExecutionContext(**resolved.public_dict())
+            if resolved.source_name:
+                execution_context = ExecutionContext(**resolved.public_dict())
+            else:
+                execution_context = None
         except ExecutionBindingError:
             execution_context = None
     return DecisionResponse(
@@ -478,7 +481,7 @@ async def _decide_single_vector_legacy(
 
 def _table_key(table: dict[str, Any]) -> TableKey:
     return TableKey(
-        db=str(table.get("db") or "") or None,
+        db=str(table.get("source_name") or table.get("db") or "") or None,
         schema_name=str(table.get("schema_name") or ""),
         table_name=str(table.get("original_name") or table.get("name") or ""),
     )
@@ -1389,7 +1392,10 @@ async def decide(
                 source_instance_id=selected_source_instance,
                 requested_objects=allowed_objects,
             )
-            execution_context = ExecutionContext(**resolved.public_dict())
+            if resolved.source_name:
+                execution_context = ExecutionContext(**resolved.public_dict())
+            else:
+                execution_context = None
         except ExecutionBindingError:
             execution_context = None
 

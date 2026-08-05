@@ -450,6 +450,7 @@ class ExecutionContext(BaseModel):
     identifier_quote: str
     require_quoted_uppercase_identifiers: bool
     source_instance_id: Optional[str] = None
+    source_name: Optional[str] = None
     allowed_objects: List[str] = Field(default_factory=list)
 
 
@@ -492,16 +493,20 @@ class QueryResponse(BaseModel):
 class QueryExecuteRequest(BaseModel):
     sql: str = Field(
         ...,
-        description="SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용",
+        description=(
+            "SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용. "
+            "SourceName.Schema.Table 수식 권장 (플랫폼 소스 표시명)."
+        ),
         examples=[
-            "SELECT * FROM `kair_8bca2bcc_285d_43ab_acdb_0a886868b9c6`.`RDISAUP_TB` LIMIT 5",
+            "SELECT * FROM `RWIS`.`SCHEMA1`.`RDISAUP_TB` LIMIT 5",
         ],
     )
-    execution_context: ExecutionContext = Field(
-        ...,
+    execution_context: Optional[ExecutionContext] = Field(
+        default=None,
         description=(
-            "/data_decision이 반환한 단일 datasource 실행 허용범위. "
-            "source_instance_id 필수. YAML default 없음."
+            "/data_decision이 반환한 단일 datasource 실행 허용범위(Optional). "
+            "없으면 SQL 수식의 SourceName/mindsdb catalog로 resolve. "
+            "YAML default 없음."
         ),
     )
     artifact_id: Optional[str] = Field(
@@ -526,24 +531,34 @@ class QueryExecuteRequest(BaseModel):
                 {
                     "sql": (
                         "SELECT * FROM "
-                        "`kair_catalog`.`RDISAUP_TB` "
+                        "`RWIS`.`SCHEMA1`.`RDISAUP_TB` "
+                        "LIMIT 5"
+                    ),
+                    "timeout_s": 10,
+                    "max_rows": 100,
+                },
+                {
+                    "sql": (
+                        "SELECT * FROM "
+                        "`RWIS`.`SCHEMA1`.`RDISAUP_TB` "
                         "LIMIT 5"
                     ),
                     "execution_context": {
                         "backend": "mindsdb",
-                        "dialect": "postgresql",
-                        "integration": "kair_catalog",
-                        "catalog": "kair_catalog",
-                        "schema_name": "RWIS",
+                        "dialect": "tibero",
+                        "integration": "RWIS",
+                        "catalog": "RWIS",
+                        "schema_name": "SCHEMA1",
                         "qualification_pattern": "{catalog}.{table}",
                         "identifier_quote": "`",
-                        "require_quoted_uppercase_identifiers": False,
+                        "require_quoted_uppercase_identifiers": True,
                         "source_instance_id": "SOURCE_INSTANCE_ID",
+                        "source_name": "RWIS",
                         "allowed_objects": ["RDISAUP_TB"],
                     },
                     "timeout_s": 10,
                     "max_rows": 100,
-                }
+                },
             ]
         }
     }

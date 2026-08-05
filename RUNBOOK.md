@@ -81,3 +81,11 @@ python tests/smoke_v07.py
 - `/meta/fk` alias 추가
 - `/query` stub 노출
 - smoke 차단 게이트를 `/data_decision` 단일로 조정
+
+## 9) `/query/execute` SourceName 운영 (260805)
+- 클라이언트 SQL: `` `SourceName`.`Schema`.`Table` `` (`kair_platform_sources.name`)
+- 표시명은 DB UNIQUE — **대소문자만 다른 중복 등록 금지** (lower resolve 모호성)
+- `/data_decision` public `catalog`/`integration`/`candidates.db` = 동일 SourceName
+- `execution_context`는 Optional; sql-only 가능
+- YAML `source_bindings` / `default_source_instance_id` 재도입 금지
+- 복수 스키마 소스는 반드시 3단 수식; 2단 `Source.Table`은 DISTINCT schema=1일 때만

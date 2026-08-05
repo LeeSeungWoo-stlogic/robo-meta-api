@@ -13,6 +13,7 @@ from ..schemas import (
 from ..services.execution_context_resolver import resolve_execution_context
 from ..services import query_runner_mindsdb as query_runner
 from ..services.sql_guard import GuardError
+from ..services.sql_source_qualify import assert_single_sql_source
 
 
 router = APIRouter(tags=["query"])
@@ -48,21 +49,28 @@ async def query_execute(req: QueryExecuteRequest, request: Request) -> QueryExec
     artifact_payload = None
     if req.artifact_id:
         artifact_payload = await _resolve_artifact_payload(request, req.artifact_id)
-    if req.execution_context is None:
-        raise HTTPException(
-            status_code=400,
-            detail="execution_context가 필요합니다",
-        )
-    if not str(req.execution_context.source_instance_id or "").strip():
-        raise HTTPException(
-            status_code=400,
-            detail="execution_context.source_instance_id가 필요합니다",
-        )
     try:
-        claimed_context = req.execution_context.model_dump()
+        # Pipeline: claim dual-accept → SQL 단일 소스 → resolve → execute(qualify)
+        sql_source_key = assert_single_sql_source(req.sql, parser_dialect="mysql")
+        claimed_context = (
+            req.execution_context.model_dump()
+            if req.execution_context is not None
+            else None
+        )
+        source_instance_id = None
+        source_name = None
+        if claimed_context is not None:
+            source_instance_id = str(
+                claimed_context.get("source_instance_id") or ""
+            ).strip() or None
+            source_name = str(claimed_context.get("source_name") or "").strip() or None
         resolved_context = await resolve_execution_context(
             get_metadata_repository(),
             claimed_context=claimed_context,
+            source_instance_id=source_instance_id,
+            source_name=source_name,
+            sql_source_key=sql_source_key,
+            allow_sql_source_resolve=True,
         )
         result = await query_runner.execute(
             sql=req.sql,

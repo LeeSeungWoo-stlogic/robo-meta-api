@@ -34,6 +34,7 @@ def table(table_id: int, name: str, score: float) -> dict:
     return {
         "id": table_id,
         "db": "rwis",
+        "source_name": "RWIS",
         "schema_name": "RWIS",
         "name": name,
         "original_name": name,
@@ -354,7 +355,13 @@ class FakeRepository:
             "source_schema": "RWIS",
             "mindsdb_integration": "rwis",
             "mindsdb_catalog": "rwis",
+            "source_name": "RWIS",
             "allowed_objects": ["RDISAUP_TB", "RDISAMU_TB"],
+            "allowed_schemas": ["RWIS"],
+            "allowed_object_refs": [
+                {"schema_name": "RWIS", "original_name": "RDISAUP_TB"},
+                {"schema_name": "RWIS", "original_name": "RDISAMU_TB"},
+            ],
         }
 
     async def find_value_mappings(self, question):

@@ -20,6 +20,7 @@ from app.runtime_config import (
 from app.services.execution_context_resolver import ResolvedExecutionContext
 from app.services.query_runner_mindsdb import _validate_namespaces
 from app.services.sql_guard import GuardError
+from app.services.sql_source_qualify import qualify_and_rewrite
 
 
 def _ctx(
@@ -42,6 +43,8 @@ def _ctx(
         allowed_catalogs=frozenset({"allowed_catalog"}),
         allowed_schemas=frozenset({"allowed_schema"}),
         allowed_objects=objects,
+        source_name="MySource",
+        allowed_object_refs=frozenset({("allowed_schema", "SAMPLE_TABLE")}),
     )
 
 
@@ -96,10 +99,11 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
         runtime_config._runtime = self.previous
 
     def test_fully_qualified_allowed_table_passes(self) -> None:
-        _validate_namespaces(
-            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
-            _ctx(),
+        rewritten = qualify_and_rewrite(
+            "SELECT * FROM `MySource`.`allowed_schema`.`SAMPLE_TABLE`",
+            execution_context=_ctx(),
         )
+        _validate_namespaces(rewritten, _ctx())
         _validate_namespaces(
             "SELECT * FROM `allowed_catalog`.`SAMPLE_TABLE`",
             _ctx(),
@@ -112,40 +116,43 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
     def test_other_catalog_is_rejected(self) -> None:
         with self.assertRaises(GuardError):
             _validate_namespaces(
-                "SELECT * FROM `other_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
+                "SELECT * FROM `other_catalog`.`SAMPLE_TABLE`",
                 _ctx(),
             )
 
     def test_cte_alias_is_not_treated_as_external_table(self) -> None:
-        _validate_namespaces(
+        rewritten = qualify_and_rewrite(
             "WITH sample AS ("
-            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`"
+            "SELECT * FROM `MySource`.`allowed_schema`.`SAMPLE_TABLE`"
             ") SELECT * FROM sample",
-            _ctx(),
+            execution_context=_ctx(),
         )
+        _validate_namespaces(rewritten, _ctx())
 
     def test_execution_context_restricts_table_allowlist(self) -> None:
         context = _ctx()
-        _validate_namespaces(
-            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
-            context,
+        rewritten = qualify_and_rewrite(
+            "SELECT * FROM `MySource`.`allowed_schema`.`SAMPLE_TABLE`",
+            execution_context=context,
         )
+        _validate_namespaces(rewritten, context)
         with self.assertRaises(GuardError):
-            _validate_namespaces(
-                "SELECT * FROM `allowed_catalog`.`allowed_schema`.`OTHER_TABLE`",
-                context,
+            qualify_and_rewrite(
+                "SELECT * FROM `MySource`.`allowed_schema`.`OTHER_TABLE`",
+                execution_context=context,
             )
 
     def test_tibero_execution_context_requires_quoted_uppercase(self) -> None:
         context = _ctx(require_quoted_uppercase=True)
-        _validate_namespaces(
-            "SELECT * FROM `allowed_catalog`.`allowed_schema`.`SAMPLE_TABLE`",
-            context,
+        rewritten = qualify_and_rewrite(
+            "SELECT * FROM `MySource`.`allowed_schema`.`SAMPLE_TABLE`",
+            execution_context=context,
         )
+        _validate_namespaces(rewritten, context)
         with self.assertRaises(GuardError):
-            _validate_namespaces(
-                "SELECT * FROM allowed_catalog.allowed_schema.SAMPLE_TABLE",
-                context,
+            qualify_and_rewrite(
+                "SELECT * FROM MySource.allowed_schema.SAMPLE_TABLE",
+                execution_context=context,
             )
 
 

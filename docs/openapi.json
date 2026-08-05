@@ -1057,11 +1057,13 @@
           },
           "integration": {
             "type": "string",
-            "title": "Integration"
+            "title": "Integration",
+            "description": "Public: platform source display name (e.g. RWIS, GIOS)"
           },
           "catalog": {
             "type": "string",
-            "title": "Catalog"
+            "title": "Catalog",
+            "description": "Public: same as source_name (platform display name)"
           },
           "schema_name": {
             "type": "string",
@@ -1078,6 +1080,27 @@
           "require_quoted_uppercase_identifiers": {
             "type": "boolean",
             "title": "Require Quoted Uppercase Identifiers"
+          },
+          "source_instance_id": {
+            "anyOf": [
+              {"type": "string"},
+              {"type": "null"}
+            ],
+            "title": "Source Instance Id"
+          },
+          "source_name": {
+            "anyOf": [
+              {"type": "string"},
+              {"type": "null"}
+            ],
+            "title": "Source Name",
+            "description": "Platform source display name from kair_platform_sources.name"
+          },
+          "allowed_objects": {
+            "items": {"type": "string"},
+            "type": "array",
+            "title": "Allowed Objects",
+            "default": []
           }
         },
         "type": "object",
@@ -1522,7 +1545,15 @@
           "sql": {
             "type": "string",
             "title": "Sql",
-            "description": "SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용"
+            "description": "SELECT/WITH/EXPLAIN(ANALYZE 제외)/SHOW 등 조회만 허용. SourceName.Schema.Table 수식 권장 (플랫폼 소스 표시명)."
+          },
+          "execution_context": {
+            "anyOf": [
+              {"$ref": "#/components/schemas/ExecutionContext"},
+              {"type": "null"}
+            ],
+            "title": "Execution Context",
+            "description": "Optional. 없으면 SQL 수식의 SourceName/mindsdb catalog로 resolve."
           },
           "artifact_id": {
             "anyOf": [

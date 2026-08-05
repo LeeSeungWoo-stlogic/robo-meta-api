@@ -14,6 +14,7 @@ from ..runtime_config import get_runtime
 from .artifact_sql_guard import ArtifactGuardError, enforce as enforce_artifact
 from .execution_context_resolver import ResolvedExecutionContext
 from .sql_guard import GuardError, check
+from .sql_source_qualify import qualify_and_rewrite
 
 
 def _serialize(value: Any) -> Any:
@@ -39,11 +40,12 @@ def _validate_namespaces(
     sql: str,
     execution_context: ResolvedExecutionContext | None = None,
 ) -> None:
+    """Post-rewrite guard: mindsdb catalog + bare table allowlist only."""
+
     if not isinstance(execution_context, ResolvedExecutionContext):
         raise GuardError("ResolvedExecutionContext가 필요합니다")
     parser_dialect = execution_context.parser_dialect
     expected_catalogs = execution_context.allowed_catalogs
-    expected_schemas = execution_context.allowed_schemas
     allowed_objects = {
         value.lower() for value in execution_context.allowed_objects
     }
@@ -75,8 +77,10 @@ def _validate_namespaces(
             )
         if catalog.lower() not in expected_catalogs:
             raise GuardError(f"허용되지 않은 catalog: {catalog}")
-        if schema and schema.lower() not in expected_schemas:
-            raise GuardError(f"허용되지 않은 schema: {schema}")
+        if schema:
+            raise GuardError(
+                "rewrite 후 SQL은 mindsdb_catalog.table 2단이어야 합니다"
+            )
         if allowed_objects and name.lower() not in allowed_objects:
             raise GuardError(f"허용되지 않은 table: {name}")
         if require_quoted_uppercase:
@@ -102,17 +106,23 @@ async def execute(
 ) -> dict[str, Any]:
     runtime = get_runtime()
     audit_id = str(uuid4())
+    sql_client = sql
+    executable_sql = sql
     try:
         if not isinstance(execution_context, ResolvedExecutionContext):
             raise GuardError("server-side resolved execution context가 필요합니다")
-        report = check(sql)
-        _validate_namespaces(report.normalized_sql, execution_context)
+        report = check(sql_client)
+        executable_sql = qualify_and_rewrite(
+            report.normalized_sql,
+            execution_context=execution_context,
+        )
+        _validate_namespaces(executable_sql, execution_context)
         if artifact_payload is not None:
             # Semantic View 경로: Artifact allowlist(object/column/join/
             # mandatory filter)를 read-only guard와 결합해 추가 검증
             try:
                 enforce_artifact(
-                    report.normalized_sql,
+                    executable_sql,
                     artifact_payload,
                     dialect=execution_context.parser_dialect,
                 )
@@ -127,7 +137,9 @@ async def execute(
                 "status": "rejected",
                 "reason": str(exc),
                 "caller": caller,
-                "sql": sql,
+                "sql": sql_client,
+                "sql_client": sql_client,
+                "sql_executed": executable_sql,
                 "integration": execution_context.integration,
                 "resolved_integration": execution_context.integration,
                 "execution_context": execution_context.audit_dict(),
@@ -162,7 +174,7 @@ async def execute(
         async with httpx.AsyncClient(timeout=applied_timeout) as client:
             response = await client.post(
                 runtime.execution.sql_api_url,
-                json={"query": report.normalized_sql},
+                json={"query": executable_sql},
             )
             response.raise_for_status()
             body = response.json()
@@ -202,7 +214,9 @@ async def execute(
         "audit_id": audit_id,
         "status": status,
         "caller": caller,
-        "sql": report.normalized_sql,
+        "sql": executable_sql,
+        "sql_client": sql_client,
+        "sql_executed": executable_sql,
         "backend": runtime.execution.backend,
         "integration": execution_context.integration,
         "resolved_integration": execution_context.integration,
@@ -220,7 +234,7 @@ async def execute(
         "audit_id": audit_id,
         "status": status,
         "error": error,
-        "sql_executed": report.normalized_sql,
+        "sql_executed": executable_sql,
         "columns": columns,
         "rows": rows,
         "row_count": len(rows),

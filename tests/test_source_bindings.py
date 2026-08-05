@@ -30,6 +30,7 @@ from app.services.execution_context_resolver import (
 from app.services.query_runner_mindsdb import _validate_namespaces
 from app.services.query_runner_mindsdb import execute
 from app.services.sql_guard import GuardError
+from app.services.sql_source_qualify import qualify_and_rewrite
 
 
 class FakeRepository:
@@ -45,7 +46,40 @@ class FakeRepository:
     async def execution_source_scope(self, source_instance_id):
         if self.state and self.state["source_instance_id"] == source_instance_id:
             return dict(self.state)
+        for item in self.sources:
+            if item.get("source_instance_id") == source_instance_id:
+                return dict(item)
         return None
+
+    async def find_profile_ids_by_source_name(self, name):
+        matches = []
+        for item in self.sources or ([self.state] if self.state else []):
+            source_name = str(item.get("source_name") or "")
+            if source_name == name:
+                matches.append(str(item["source_instance_id"]))
+        if matches:
+            return matches
+        lowered = name.lower()
+        for item in self.sources or ([self.state] if self.state else []):
+            source_name = str(item.get("source_name") or "")
+            if source_name.lower() == lowered:
+                matches.append(str(item["source_instance_id"]))
+        return matches
+
+    async def find_profile_ids_by_mindsdb_catalog(self, catalog):
+        matches = []
+        for item in self.sources or ([self.state] if self.state else []):
+            value = str(item.get("mindsdb_catalog") or "")
+            if value == catalog:
+                matches.append(str(item["source_instance_id"]))
+        if matches:
+            return matches
+        lowered = catalog.lower()
+        for item in self.sources or ([self.state] if self.state else []):
+            value = str(item.get("mindsdb_catalog") or "")
+            if value.lower() == lowered:
+                matches.append(str(item["source_instance_id"]))
+        return matches
 
 
 def _runtime(audit_log_path: str = "test-audit.jsonl") -> RoboRuntime:
@@ -84,7 +118,13 @@ def _state(**overrides):
         "source_schema": "GIOS_TEST",
         "mindsdb_integration": "tibero_active",
         "mindsdb_catalog": "tibero_active",
+        "source_name": "GIOS",
         "allowed_objects": ["TABLE_A", "TABLE_B"],
+        "allowed_schemas": ["GIOS_TEST"],
+        "allowed_object_refs": [
+            {"schema_name": "GIOS_TEST", "original_name": "TABLE_A"},
+            {"schema_name": "GIOS_TEST", "original_name": "TABLE_B"},
+        ],
     }
     value.update(overrides)
     return value
@@ -113,7 +153,9 @@ class SourceBindingResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.source_engine, "tibero")
         self.assertEqual(resolved.parser_dialect, "mysql")
         self.assertEqual(resolved.integration, "tibero_active")
+        self.assertEqual(resolved.source_name, "GIOS")
         self.assertEqual(resolved.allowed_objects, frozenset({"TABLE_A", "TABLE_B"}))
+        self.assertEqual(resolved.allowed_schemas, frozenset({"gios_test"}))
         self.assertTrue(resolved.require_quoted_uppercase_identifiers)
 
     async def test_null_mindsdb_fields_fail_closed(self):
@@ -138,6 +180,7 @@ class SourceBindingResolverTests(unittest.IsolatedAsyncioTestCase):
             FakeRepository(_state(allowed_objects=[]))
         )
         self.assertEqual(results[0]["source_instance_id"], "source-tibero")
+        self.assertEqual(results[0]["source_name"], "GIOS")
 
     async def test_empty_allowlist_fails_on_resolve(self):
         with self.assertRaisesRegex(ExecutionBindingError, "활성·승인"):
@@ -145,6 +188,41 @@ class SourceBindingResolverTests(unittest.IsolatedAsyncioTestCase):
                 FakeRepository(_state(allowed_objects=[])),
                 source_instance_id="source-tibero",
             )
+
+    async def test_public_catalog_is_source_name_audit_keeps_mindsdb(self):
+        resolved = await resolve_execution_context(
+            FakeRepository(_state()),
+            source_instance_id="source-tibero",
+        )
+        public = resolved.public_dict()
+        audit = resolved.audit_dict()
+        self.assertEqual(public["catalog"], "GIOS")
+        self.assertEqual(public["integration"], "GIOS")
+        self.assertEqual(public["source_name"], "GIOS")
+        self.assertEqual(audit["catalog"], "tibero_active")
+        self.assertEqual(audit["integration"], "tibero_active")
+
+    async def test_dual_accept_claim_source_name_and_mindsdb(self):
+        resolved = await resolve_execution_context(
+            FakeRepository(_state()),
+            source_instance_id="source-tibero",
+            requested_objects=["TABLE_A"],
+        )
+        claim = resolved.public_dict()
+        again = await resolve_execution_context(
+            FakeRepository(_state()),
+            claimed_context=claim,
+        )
+        self.assertEqual(again.catalog, "tibero_active")
+
+        claim_mindsdb = dict(claim)
+        claim_mindsdb["catalog"] = "tibero_active"
+        claim_mindsdb["integration"] = "tibero_active"
+        again2 = await resolve_execution_context(
+            FakeRepository(_state()),
+            claimed_context=claim_mindsdb,
+        )
+        self.assertEqual(again2.source_name, "GIOS")
 
     async def test_spoofed_context_and_object_are_rejected(self):
         resolved = await resolve_execution_context(
@@ -168,21 +246,40 @@ class SourceBindingResolverTests(unittest.IsolatedAsyncioTestCase):
                 claimed_context=claim,
             )
 
-    async def test_tibero_source_uses_mindsdb_mysql_parser(self):
+    async def test_resolve_by_source_name_from_sql_key(self):
+        resolved = await resolve_execution_context(
+            FakeRepository(_state()),
+            sql_source_key="GIOS",
+            allow_sql_source_resolve=True,
+        )
+        self.assertEqual(resolved.source_instance_id, "source-tibero")
+
+    async def test_no_source_name_blocks_public_dict(self):
+        resolved = await resolve_execution_context(
+            FakeRepository(_state(source_name=None)),
+            source_instance_id="source-tibero",
+        )
+        self.assertIsNone(resolved.source_name)
+        with self.assertRaisesRegex(ExecutionBindingError, "source_name"):
+            resolved.public_dict()
+
+    async def test_tibero_rewrite_then_namespace_validate(self):
         resolved = await resolve_execution_context(
             FakeRepository(_state()),
             source_instance_id="source-tibero",
             requested_objects=["TABLE_A"],
         )
-
-        _validate_namespaces(
-            "SELECT * FROM `tibero_active`.`GIOS_TEST`.`TABLE_A`",
-            resolved,
+        rewritten = qualify_and_rewrite(
+            "SELECT * FROM `GIOS`.`GIOS_TEST`.`TABLE_A`",
+            execution_context=resolved,
         )
+        self.assertIn("`tibero_active`", rewritten)
+        self.assertNotIn("`GIOS_TEST`", rewritten)
+        _validate_namespaces(rewritten, resolved)
         with self.assertRaises(GuardError):
-            _validate_namespaces(
+            qualify_and_rewrite(
                 "SELECT * FROM `other`.`GIOS_TEST`.`TABLE_A`",
-                resolved,
+                execution_context=resolved,
             )
 
     async def test_rejected_query_audit_uses_resolved_integration(self):
@@ -203,6 +300,7 @@ class SourceBindingResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry["integration"], "tibero_active")
         self.assertEqual(entry["resolved_integration"], "tibero_active")
         self.assertEqual(entry["execution_context"]["parser_dialect"], "mysql")
+        self.assertEqual(entry["execution_context"]["catalog"], "tibero_active")
 
 
 class RuntimeYamlBanTests(unittest.TestCase):
