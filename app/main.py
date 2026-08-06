@@ -21,52 +21,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.staticfiles import StaticFiles
 
 from .db import close_metadata_repository, get_metadata_repository, init_metadata_repository
 from .routers import decision, decision_v2, meta, query_exec
-from .routers.decision_v2 import V2Deps
 from .runtime_config import get_runtime, init_runtime
 from .schemas import META_VERSION
-from .security.auth_context import AuthConfig
-from .services.embedding_provider import (
-    FixtureEmbeddingProvider,
-    HttpEmbeddingProvider,
-)
 from .services.execution_context_resolver import validate_runtime_bindings
-from .services.v2_store import PostgresV2Store
-
-
-def _build_v2_deps(pool) -> V2Deps:
-    """env 기반 `/semantic_decision` 배선. 호출 전 runtime init·env 존재 확인 필수."""
-    # 인증은 V2_JWKS_FILE·V2_ISSUER·V2_AUDIENCE가 모두 있을 때만 활성화.
-    # 폐쇄망(소비처=내부 T2SQL 한정, 2026-07-13 결정)에서는 미설정 → 인증 없음.
-    auth_config = None
-    if all(os.environ.get(key) for key in ("V2_JWKS_FILE", "V2_ISSUER", "V2_AUDIENCE")):
-        auth_config = AuthConfig.from_jwks_file(
-            os.environ["V2_JWKS_FILE"],
-            issuer=os.environ["V2_ISSUER"],
-            audience=os.environ["V2_AUDIENCE"],
-        )
-    provider_kind = os.environ.get("V2_EMBEDDING_PROVIDER", "http").strip().lower()
-    if provider_kind == "fixture":
-        # 폐쇄 E2E: semantic-hub FixtureSha256EmbeddingProvider와 동일 알고리즘
-        # (fixture-sha256-v1). 네트워크 호출 0건.
-        embedding_provider = FixtureEmbeddingProvider(
-            dimensions=int(os.environ.get("V2_EMBEDDING_DIMENSIONS", "16")))
-    else:
-        embedding_provider = HttpEmbeddingProvider()
-    # V2 is non-executing for source bindings: no YAML/default single-source context.
-    return V2Deps(
-        auth_config=auth_config,
-        store=PostgresV2Store(pool, os.environ.get("V2_PG_SCHEMA", "public")),
-        embedding_provider=embedding_provider,
-        execution_context=None,
-        default_tenant_id=os.environ.get("V2_TENANT_ID", "kwater"),
-    )
 
 
 @asynccontextmanager
@@ -74,22 +37,8 @@ async def lifespan(app: FastAPI):
     init_runtime()
     metadata_repository = await init_metadata_repository()
     await validate_runtime_bindings(metadata_repository)
-
-    # /semantic_decision 배선 — V2_PG_DSN이 있을 때 활성화.
-    # 미설정 시 app.state.v2_deps 부재로 503 유지 (v1 무영향, fail-closed).
-    # 인증(JWT)은 V2_JWKS_FILE 등이 추가로 설정된 경우에만 켜진다.
-    v2_pool = None
-    if os.environ.get("V2_PG_DSN"):
-        import asyncpg
-
-        v2_pool = await asyncpg.create_pool(
-            dsn=os.environ["V2_PG_DSN"], min_size=1, max_size=4)
-        app.state.v2_deps = _build_v2_deps(v2_pool)
-
+    # ADR-002 Wave 2: /semantic_decision은 410 stub. V2_PG_DSN 배선 제거.
     yield
-
-    if v2_pool is not None:
-        await v2_pool.close()
     await close_metadata_repository()
 
 
@@ -99,13 +48,9 @@ _ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
 app = FastAPI(
     title="robo-meta-api v4",
     description=(
-        "v0.7 meta-api — A안 entity resolution (resolved_entities), "
-        "v0.6 8 endpoint path 유지. "
-        "Semantic View 공급 경로: `POST /semantic_decision`은 "
-        "published Semantic View Artifact 기반 Metadata Context Bundle(`meta_version:\"2\"`)을 "
-        "반환한다 (폐쇄망 기본 무인증, V2_JWKS_FILE 설정 시에만 Bearer JWT 요구). "
-        "`POST /query/execute`는 `artifact_id` 지정 시 해당 Artifact allowlist"
-        "(테이블·컬럼·join edge·mandatory filter)로 SQL 실행을 제약한다. "
+        "v0.7 meta-api — Serving MVP 소비면은 "
+        "`POST /data_decision`과 `POST /query_execute`다. "
+        "`/semantic_decision`·`/query`·구경로 `/query/execute`는 폐기(410 또는 미노출). "
         "`/data_decision` 0.7 계약은 무변경."
     ),
     version=f"meta-{META_VERSION}",
@@ -113,11 +58,36 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
     root_path=_ROOT_PATH,
+    openapi_tags=[
+        {"name": "decision", "description": "자연어 → Metadata Context (`/data_decision`)"},
+        {"name": "query", "description": "읽기 전용 SQL 실행 (`/query_execute`)"},
+        {"name": "meta", "description": "테이블·컬럼·FK 메타 조회"},
+    ],
 )
 
-# Closed-network docs: same pattern as K-AIR-Portal — local static, no CDN.
+# Closed-network docs: local static (no CDN).
+# Avoid StaticFiles mount with root_path (double strip → bare /static 404).
+# Avoid FileResponse through @app.middleware(BaseHTTPMiddleware) — can 500 under
+# some ASGI stacks; return buffered Response instead.
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+_SWAGGER_STATIC = _STATIC_DIR / "swagger"
+_SWAGGER_MEDIA = {
+    "swagger-ui.css": "text/css; charset=utf-8",
+    "swagger-ui-bundle.js": "application/javascript; charset=utf-8",
+    "swagger-ui-standalone-preset.js": "application/javascript; charset=utf-8",
+    "redoc.standalone.js": "application/javascript; charset=utf-8",
+}
+
+
+@app.get("/static/swagger/{name}", include_in_schema=False)
+def swagger_static(name: str):
+    media = _SWAGGER_MEDIA.get(name)
+    if media is None:
+        raise HTTPException(status_code=404)
+    path = _SWAGGER_STATIC / name
+    if not path.is_file():
+        raise HTTPException(status_code=404)
+    return Response(content=path.read_bytes(), media_type=media)
 
 
 @app.get("/docs", include_in_schema=False)
@@ -190,9 +160,9 @@ async def health(response: Response) -> dict:
 
 
 app.include_router(decision.router)
-app.include_router(meta.router)
 app.include_router(query_exec.router)
-# /semantic_decision — app.state.v2_deps 배선 시 활성화 (미구성 시 503, /data_decision 무영향)
+app.include_router(meta.router)
+# /semantic_decision — OpenAPI 미노출, 런타임 410 (ADR-002 Wave 2)
 app.include_router(decision_v2.router)
 
 

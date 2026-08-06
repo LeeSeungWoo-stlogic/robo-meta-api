@@ -40,8 +40,8 @@ python -m app.main
 - `POST /meta/column`
 - `POST /meta/ref` (기본 FK 경로)
 - `POST /meta/fk` (`/meta/ref` alias)
-- `POST /query` (stub)
-- `POST /query/execute` (deprecated 유지)
+- `POST /query_execute`
+- 폐기: `POST /semantic_decision`(410), `POST /query/execute`(410), `POST /query`(제거)
 
 ## 5) smoke (차단 게이트)
 
@@ -79,10 +79,15 @@ python tests/smoke_v07.py
 ## 8) 변경 기록(260623 계획 반영)
 - KAIR 단일 SoT 읽기 전략 고정
 - `/meta/fk` alias 추가
-- `/query` stub 노출
 - smoke 차단 게이트를 `/data_decision` 단일로 조정
 
-## 9) `/query/execute` SourceName 운영 (260805)
+## 8b) ADR-002 Serving MVP (2026-08-06)
+- `/semantic_decision` 410 stub; V2_PG_DSN 배선 제거
+- `/query` stub 제거; `/query/execute` → `/query_execute` (구경로 410)
+- `artifact_id` 지정 시 410 (`SEMANTIC_ARTIFACT_GONE`)
+- OpenAPI tag: decision → query → meta
+
+## 9) `/query_execute` SourceName 운영 (260805)
 - 클라이언트 SQL: `` `SourceName`.`Schema`.`Table` `` (`kair_platform_sources.name`)
 - 표시명은 DB UNIQUE — **대소문자만 다른 중복 등록 금지** (lower resolve 모호성)
 - `/data_decision` public `catalog`/`integration`/`candidates.db` = 동일 SourceName

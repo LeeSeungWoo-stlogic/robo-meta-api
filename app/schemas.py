@@ -471,24 +471,7 @@ class DecisionResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# /query (스텁)
-# ---------------------------------------------------------------------------
-class QueryRequest(BaseModel):
-    query: str
-
-
-class QueryResponse(BaseModel):
-    meta_version: str = META_VERSION
-    status: Literal["not_implemented"] = "not_implemented"
-    message: str = (
-        "v0.5 문서에 /query 요청/응답 스펙이 정의되어 있지 않습니다 (R9). "
-        "v0.6 스펙 확정 후 /data_decision + /meta/table을 오케스트레이션하여 구현 예정."
-    )
-    decision_hint: Optional[DecisionResponse] = None
-
-
-# ---------------------------------------------------------------------------
-# /query/execute — v0.6에서 deprecated 표기 (계획서 §3 별도 트랙)
+# /query_execute
 # ---------------------------------------------------------------------------
 class QueryExecuteRequest(BaseModel):
     sql: str = Field(
@@ -511,8 +494,10 @@ class QueryExecuteRequest(BaseModel):
     )
     artifact_id: Optional[str] = Field(
         default=None,
-        description="Semantic View 경로: published Artifact allowlist로 SQL을 "
-        "추가 검증. None이면 기존 v1 동작 그대로 (forward-compatible)",
+        description=(
+            "폐기됨(ADR-002 Wave 2). 지정 시 410 SEMANTIC_ARTIFACT_GONE. "
+            "Serving MVP는 artifact_id 없이 /query_execute를 사용."
+        ),
     )
     timeout_s: Optional[int] = Field(
         default=None, ge=1, le=60,

@@ -7,8 +7,8 @@
   - POST /meta/table         → 200, table_info + columns + fk 슬롯 모두 존재
   - POST /meta/column        → 200, column.column_name 채워짐
   - POST /meta/ref           → 200, fk 배열 (길이 0 허용)
-  - POST /query/execute      → 200, status=ok, row_count>=1
-  - POST /query/execute      → 400 (DROP 차단, sql_guard)
+  - POST /query_execute      → 200, status=ok, row_count>=1
+  - POST /query_execute      → 400 (DROP 차단, sql_guard)
 """
 from __future__ import annotations
 
@@ -132,24 +132,24 @@ def main() -> int:
         failures.append(f"meta/ref: status={r.status_code} body={str(obj)[:200]}")
     print(f"[6/8] /meta/ref {SMOKE_SCHEMA}.{SMOKE_TABLE} -> {r.status_code} fk={len(fk)}")
 
-    # 7) /query/execute ok
-    r = _post("/query/execute", {"sql": f'SELECT * FROM "{SMOKE_SCHEMA}"."{SMOKE_TABLE}" LIMIT 3', "timeout_s": 5, "max_rows": 10})
+    # 7) /query_execute ok
+    r = _post("/query_execute", {"sql": f'SELECT * FROM "{SMOKE_SCHEMA}"."{SMOKE_TABLE}" LIMIT 3', "timeout_s": 5, "max_rows": 10})
     obj = r.json()
     _save("07_query_execute_ok.json", obj)
     if r.status_code != 200 or obj.get("status") != "ok" or (obj.get("row_count") or 0) < 1:
-        failures.append(f"query/execute ok: status={r.status_code} body={str(obj)[:200]}")
-    print(f"[7/8] /query/execute SELECT -> {r.status_code} api_status={obj.get('status')} rows={obj.get('row_count')}")
+        failures.append(f"query_execute ok: status={r.status_code} body={str(obj)[:200]}")
+    print(f"[7/8] /query_execute SELECT -> {r.status_code} api_status={obj.get('status')} rows={obj.get('row_count')}")
 
-    # 8) /query/execute guard blocked
-    r = _post("/query/execute", {"sql": "DROP TABLE foo"})
+    # 8) /query_execute guard blocked
+    r = _post("/query_execute", {"sql": "DROP TABLE foo"})
     try:
         obj = r.json()
     except Exception:
         obj = {"raw": r.text}
     _save("08_query_execute_blocked.json", {"status_code": r.status_code, "body": obj})
     if r.status_code != 400:
-        failures.append(f"query/execute blocked: status={r.status_code} body={str(obj)[:200]}")
-    print(f"[8/8] /query/execute DROP -> {r.status_code} (expect 400)")
+        failures.append(f"query_execute blocked: status={r.status_code} body={str(obj)[:200]}")
+    print(f"[8/8] /query_execute DROP -> {r.status_code} (expect 400)")
 
     print()
     if failures:

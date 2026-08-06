@@ -1,4 +1,4 @@
-"""/query/execute 라우터 — 외부 AI가 보낸 SQL을 원천 DB에 실행 대행."""
+"""`/query_execute` 라우터 — 외부 AI가 보낸 SQL을 원천 DB에 실행 대행."""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
@@ -7,8 +7,6 @@ from ..db import get_metadata_repository
 from ..schemas import (
     QueryExecuteRequest,
     QueryExecuteResponse,
-    QueryRequest,
-    QueryResponse,
 )
 from ..services.execution_context_resolver import resolve_execution_context
 from ..services import query_runner_mindsdb as query_runner
@@ -18,32 +16,48 @@ from ..services.sql_source_qualify import assert_single_sql_source
 
 router = APIRouter(tags=["query"])
 
-
-@router.post("/query", response_model=QueryResponse)
-async def query_stub(req: QueryRequest) -> QueryResponse:
-    """v0.7 정책: /query는 스텁 노출(미구현 상태 명시)."""
-    _ = req
-    return QueryResponse()
+QUERY_EXECUTE_PATH_GONE = {
+    "code": "QUERY_EXECUTE_PATH_GONE",
+    "message": (
+        "POST /query/execute 경로는 /query_execute 로 이전되었습니다. "
+        "새 경로를 사용하세요."
+    ),
+}
 
 
 async def _resolve_artifact_payload(request: Request, artifact_id: str) -> dict:
-    """Semantic View 경로: published Artifact payload를 조회한다 (fail-closed)."""
-    deps = getattr(request.app.state, "v2_deps", None)
-    if deps is None:
-        raise HTTPException(
-            status_code=503,
-            detail="artifact_id 검증에 필요한 v2 배선이 구성되지 않았습니다.")
-    # tenant는 이 경로에서도 검증된 token에서만 온다
-    from .decision_v2 import _get_auth
-    auth = _get_auth(request, deps)
-    for record in await deps.store.list_published_artifacts(auth.tenant_id):
-        if record.get("artifact_id") == artifact_id:
-            return record["payload"]
-    raise HTTPException(status_code=404,
-                        detail=f"published Artifact 없음: {artifact_id}")
+    """Semantic View artifact_id 검증면 — ADR-002 Wave 2 / §2.1 fail-closed."""
+    _ = request, artifact_id
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "SEMANTIC_ARTIFACT_GONE",
+            "message": (
+                "artifact_id 검증면은 Serving MVP에서 폐기되었습니다 "
+                "(ADR-002 Wave 2 / §2.1). artifact_id 없이 /query_execute를 호출하세요."
+            ),
+        },
+    )
 
 
-@router.post("/query/execute", response_model=QueryExecuteResponse)
+@router.post(
+    "/query_execute",
+    response_model=QueryExecuteResponse,
+    summary="Query Execute",
+    description=(
+        "검증된 읽기 전용 SQL을 원천 DB에 실행한다. "
+        "`artifact_id`는 ADR-002 Wave 2에서 폐기 — 지정 시 **410** "
+        "(`SEMANTIC_ARTIFACT_GONE`)."
+    ),
+    responses={
+        410: {
+            "description": (
+                "artifact_id 검증면 폐기 (ADR-002 Wave 2 / §2.1). "
+                "code=SEMANTIC_ARTIFACT_GONE"
+            ),
+        },
+    },
+)
 async def query_execute(req: QueryExecuteRequest, request: Request) -> QueryExecuteResponse:
     caller = request.client.host if request.client else None
     artifact_payload = None
@@ -85,3 +99,9 @@ async def query_execute(req: QueryExecuteRequest, request: Request) -> QueryExec
         raise HTTPException(status_code=400, detail=str(exc))
 
     return QueryExecuteResponse(**result)
+
+
+@router.post("/query/execute", include_in_schema=False)
+async def query_execute_legacy_path() -> None:
+    """구 경로 호환: OpenAPI에 노출하지 않고 410으로 안내."""
+    raise HTTPException(status_code=410, detail=QUERY_EXECUTE_PATH_GONE)

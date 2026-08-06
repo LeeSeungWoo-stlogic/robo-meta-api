@@ -39,7 +39,7 @@ async def run(api_url: str) -> dict[str, Any]:
                 f"rwis_postgres_active.{table} LIMIT 1"
             )
             response = await client.post(
-                api_url.rstrip("/") + "/query/execute",
+                api_url.rstrip("/") + "/query_execute",
                 json={
                     "sql": sql,
                     "execution_context": context,
@@ -92,7 +92,7 @@ async def run(api_url: str) -> dict[str, Any]:
         ]
         for case_id, sql in blocked_cases:
             response = await client.post(
-                api_url.rstrip("/") + "/query/execute",
+                api_url.rstrip("/") + "/query_execute",
                 json={"sql": sql, "execution_context": context},
             )
             rejected.append(
@@ -105,7 +105,7 @@ async def run(api_url: str) -> dict[str, Any]:
             )
     results = accepted + rejected
     return {
-        "endpoint": "/query/execute",
+        "endpoint": "/query_execute",
         "accepted": accepted,
         "rejected": rejected,
         "counts": {
