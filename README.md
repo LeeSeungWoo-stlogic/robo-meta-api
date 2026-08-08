@@ -10,7 +10,15 @@ FK 및 논리 join hint를 조회하며 API가 SQL을 직접 생성하지는 않
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
 (Wave 0–3 적용 완료 기준, 2026-08-06)
 
-## 최근 작업 요약 (2026-08-06)
+## 최근 작업 요약 (2026-08-08)
+
+| 항목 | 내용 |
+| --- | --- |
+| **모듈 분리** | `decision_postgres` · `metadata_repository` · legacy `decision_service`를 패키지/디렉터리로 분할(임포트 경로 정리, 동작 계약 동일) |
+| **KT 피드백 라이브 검증** | Store PUBLISH 후 `/health`·`/data_decision`(충청정수장 탁도…)·`/query_execute`·410 폐기 경로 점검. 응답 슬롯은 존재하나 unit/facility/format·`'탁도'` exact alias·권역 fact 정렬은 **Metadata Store 적재 품질**에 의존 |
+| **범위** | 본 사이클에서 KT 필드를 robo에 하드코딩하지 않음. Alias·측정 메타 전파는 플랫폼 VALUE_MAPPING/PROJECT 후속 |
+
+## 이전 작업 요약 (2026-08-06)
 
 | 항목 | 내용 |
 | --- | --- |

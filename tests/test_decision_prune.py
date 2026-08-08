@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.decision_service import (
+from app.services.legacy.decision_service import (
     _prune_by_score_gap,
     _select_final_candidates,
     _table_description_text,

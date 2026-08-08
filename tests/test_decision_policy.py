@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.decision_service import _resolve_decision_policy
+from app.services.legacy.decision_service import _resolve_decision_policy
 
 
 class DecisionPolicyTest(unittest.TestCase):

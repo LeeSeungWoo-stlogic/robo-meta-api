@@ -1,15 +1,7 @@
-"""/data_decision 핵심 — 자산 ① 검색 파이프라인 호출 + v0.6 RC DecisionResponse 변환.
+"""LEGACY Neo4j /data_decision path — not wired to HTTP routes.
 
-흐름 (자산 ① 그대로 재사용, K-AIR-meta-api 가 pgvector 로 했던 일을 Neo4j 벡터 인덱스로 수행):
-  1) HyDE (자산 ① hyde.get_hyde_generator) — 질문 → 구조화 힌트.
-  2) Embedding (자산 ① embedding.get_embedding_client) — HyDE 텍스트 + 원본 질문 → 1536-dim 벡터.
-  3) Vector Search (자산 ① vector_search.search_tables_by_vector) — Neo4j text_to_sql_table_vec_index.
-  4) 두 축(HyDE / 원본 질문) 가중 합산 병합.
-  5) 컬럼 매칭(옵션) — 자산 ①의 fetch_anchor_columns 로 후보 컬럼 추출.
-  6) subject_area / target_class 분류 → DecisionResponse 조립.
-
-R-3 db 폴백 체인: Schema.db || DataSource.engine || settings.meta_db_label.
-v0.6 RC 풍부 필드(join_groups 등)는 빈 값 폴백.
+Production `/data_decision` uses `app.services.decision_postgres`.
+Kept for unit tests that exercise Neo4j candidate prune/policy helpers.
 """
 from __future__ import annotations
 
@@ -17,9 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from neo4j import AsyncDriver
 
-from ..config import settings
-from .kair_graph_adapter import REL_SCHEMA_DATASOURCE, REL_TABLE_SCHEMA, table_lookup_key
-from ..schemas import (
+from ...config import settings
+from ..kair_graph_adapter import REL_SCHEMA_DATASOURCE, REL_TABLE_SCHEMA, table_lookup_key
+from ...schemas import (
     ColumnConstraint,
     DecisionCandidate,
     DecisionResponse,
@@ -27,12 +19,12 @@ from ..schemas import (
     META_VERSION,
     TargetClass,
 )
-from . import subject_area as sa
-from .entity_resolution import resolve_entities
-from .neo4j_client.embedding import get_embedding_client
-from .neo4j_client.hyde import build_hyde_embedding_text, get_hyde_generator
-from .neo4j_client.models import TableCandidate
-from .neo4j_client.vector_search import (
+from .. import subject_area as sa
+from ..entity_resolution import resolve_entities
+from ..neo4j_client.embedding import get_embedding_client
+from ..neo4j_client.hyde import build_hyde_embedding_text, get_hyde_generator
+from ..neo4j_client.models import TableCandidate
+from ..neo4j_client.vector_search import (
     build_convention_bridge_path,
     fetch_anchor_columns,
     fetch_convention_joins,
@@ -548,7 +540,7 @@ async def decide(
     join_groups_mode = "empty"
     final_merged = merged
 
-    from ..schemas import JoinBridge, TableKey, JoinGroup
+    from ...schemas import JoinBridge, TableKey, JoinGroup
     from collections import defaultdict
 
     cand_map = {}
