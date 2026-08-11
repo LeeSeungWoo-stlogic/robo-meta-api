@@ -47,6 +47,10 @@ def _enrich_analysis_roles(query: str, analysis: QueryAnalysis) -> QueryAnalysis
 
     plant = any(term in q for term in ("정수장", "사업장"))
     measure = any(term in q for term in ("계측", "측정", "값", "현황", "데이터"))
+    if str(analysis.measurement.metric or "").strip():
+        # Metric slot from analyzer implies a measurable quantity without
+        # requiring surface words like "계측".
+        measure = True
     region = any(term in q for term in ("충청", "금강", "한강", "낙동", "영섬", "본부", "권역", "지역"))
     inventory = any(term in q for term in ("어떤", "무엇", "항목", "데이터들"))
     timeseries = any(
@@ -58,7 +62,9 @@ def _enrich_analysis_roles(query: str, analysis: QueryAnalysis) -> QueryAnalysis
         _add("사업장 마스터", ["사업장", "정수장", "SUJ", "사업장코드", "사업장이름", "RDISAUP"])
     if region and not _covered("본부", "권역", "유역", "지역본부", exclude=measure_exclude):
         _add("지역본부 마스터", ["본부", "지역본부", "BNB", "유역본부", "권역", "RDIBONBU"])
-    if measure and plant and not _covered("태그", "측정항목", "태그마스터", exclude=("계측값", "시계열")):
+    if measure and (plant or timeseries) and not _covered(
+        "태그", "측정항목", "태그마스터", exclude=("계측값", "시계열")
+    ):
         _add("태그 마스터", ["태그", "측정항목", "TAG", "TAGSN", "태그명", "RDITAG"])
     if timeseries and not _covered("일별", "월별", "시간별", "01dd", "01mm", "01hh", "팩트"):
         _add("일별 계측 팩트", ["일별", "일 단위", "계측값", "01DD", "LOG_TIME", "VAL", "RDD01DD"])

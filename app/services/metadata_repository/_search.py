@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ._base import _vector_literal
@@ -120,8 +121,12 @@ class SearchMixin:
         WHERE vm.verified = true
           AND t.text_to_sql_is_valid=true
           AND t.review_status='approved'
-          AND position(lower(vm.natural_value) in lower($1)) > 0
-        ORDER BY length(vm.natural_value) DESC, vm.code_value
+          AND position(
+                lower(regexp_replace(vm.natural_value, '\\s+', '', 'g'))
+                in lower(regexp_replace($1, '\\s+', '', 'g'))
+              ) > 0
+        ORDER BY length(regexp_replace(vm.natural_value, '\\s+', '', 'g')) DESC,
+                 vm.code_value
         """
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, question)
@@ -134,15 +139,30 @@ class SearchMixin:
         ]
 
     @staticmethod
+    def _compact_natural_text(value: str) -> str:
+        """Drop whitespace so Store labels like '탁 도' match query '탁도'."""
+        return re.sub(r"\s+", "", value or "").casefold()
+
+    @staticmethod
     def _natural_value_is_standalone_mention(question: str, natural_value: str) -> bool:
         """Reject Hangul mid-word hits (e.g. natural_value '정수' inside '정수장').
 
         Allow verified geo/admin compounds: '충청' inside '충청지역'.
+        Matching is whitespace-insensitive ('탁 도' ↔ '탁도') via flexible
+        whitespace between label characters on the original question.
         """
         if not natural_value:
             return False
-        q = question.casefold()
-        n = natural_value.casefold()
+        chars = list(SearchMixin._compact_natural_text(natural_value))
+        if not chars:
+            return False
+        # Keep original spacing in the question; allow optional spaces between
+        # label characters, but not after the final character (that would eat
+        # the following token separator and falsely look mid-word).
+        pattern = "".join(
+            re.escape(ch) + (r"\s*" if index < len(chars) - 1 else "")
+            for index, ch in enumerate(chars)
+        )
         compound_suffixes = (
             "지역",
             "권역",
@@ -159,18 +179,21 @@ class SearchMixin:
         def _is_hangul(ch: str) -> bool:
             return bool(ch) and "\uac00" <= ch <= "\ud7a3"
 
-        start = 0
-        while True:
-            idx = q.find(n, start)
-            if idx < 0:
-                return False
-            before = q[idx - 1] if idx > 0 else ""
-            after = q[idx + len(n)] if idx + len(n) < len(q) else ""
-            if not _is_hangul(before) and not _is_hangul(after):
+        for match in re.finditer(pattern, question, flags=re.IGNORECASE):
+            before = question[match.start() - 1] if match.start() > 0 else ""
+            immediate_after = (
+                question[match.end()] if match.end() < len(question) else ""
+            )
+            # Whitespace or EOS is a token boundary (do not look past spaces into
+            # the next Hangul word — that rejected '화성정수장 평균 …').
+            if not _is_hangul(before) and (
+                not immediate_after
+                or immediate_after.isspace()
+                or not _is_hangul(immediate_after)
+            ):
                 return True
-            if not _is_hangul(before) and _is_hangul(after):
-                rest = q[idx + len(n) :]
+            if not _is_hangul(before) and _is_hangul(immediate_after):
+                rest = question[match.end() :]
                 if any(rest.startswith(suffix) for suffix in compound_suffixes):
                     return True
-            start = idx + 1
         return False

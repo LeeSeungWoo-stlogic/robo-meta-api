@@ -27,7 +27,11 @@ from ..query_analysis import (
     get_query_analyzer,
     role_embedding_text,
 )
-from .filters import _resolve_filters
+from .filters import (
+    _propagate_filters_along_fk,
+    _resolve_filters,
+    _with_metric_filter_requirements,
+)
 from .helpers import (
     _candidate,
     _merge_column_hits,
@@ -338,14 +342,23 @@ async def decide(
         )
 
     plan_table_ids = sorted(selection.selected_table_ids)
+    filter_requirements = _with_metric_filter_requirements(analysis, mappings)
+    # Embeddings were built from analysis.filter_requirements only; appended
+    # metric filters resolve via Store value mappings and do not need vectors.
     planned_filters, filter_unresolved = await _resolve_filters(
         repository,
-        requirements=analysis.filter_requirements,
+        requirements=filter_requirements,
         embeddings=embeddings,
         table_ids=plan_table_ids,
         tables_by_id=tables_by_id,
         mappings=mappings,
         minimum_similarity=decision.minimum_similarity,
+    )
+    planned_filters = _propagate_filters_along_fk(
+        planned_filters,
+        edge_rows,
+        anchor_table_ids=selection.selected_table_ids | selection.bridge_table_ids,
+        tables_by_id=tables_by_id,
     )
     unresolved = [*selection.unresolved, *filter_unresolved]
     if analysis.status == "degraded":

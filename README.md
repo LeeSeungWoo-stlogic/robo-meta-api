@@ -10,12 +10,25 @@ FK 및 논리 join hint를 조회하며 API가 SQL을 직접 생성하지는 않
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
 (Wave 0–3 적용 완료 기준, 2026-08-06)
 
-## 최근 작업 요약 (2026-08-08)
+## 최근 작업 요약 (2026-08-11)
+
+| 항목 | 내용 |
+| --- | --- |
+| **VM 매칭** | `t2s_value_mappings` 공백 무시(`탁 도`↔`탁도`) + Hangul 단독 멘션 경계 보정 |
+| **metric→필터** | `measurement.metric`이 Store VM에 매칭될 때만 필수 필터로 승격(표명 하드코딩 없음) |
+| **FK 필터 전파** | 해소된 EQ 필터를 승인 `t2s_fk_constraints` **1 hop**으로 plan/bridge 테이블에 복사(코드표→키 표) |
+| **역할 보강** | metric이 있으면 태그 마스터 역할 보강 조건 완화 |
+| **검증** | `화성정수장 평균 탁도` → `SUJ_CODE=617`·`BR_CODE=TB`·`RDITAG` 전파 후 `/query_execute` AVG 성공 |
+| **범위** | RWIS 전용 강바인드 금지. SoT=Store VM·승인 FK. 포맷/unit/facility·산출식은 비범위(플랫폼 값 전파·후속) |
+
+관련 테스트: `tests/test_filter_propagation.py`
+
+## 이전 작업 요약 (2026-08-08)
 
 | 항목 | 내용 |
 | --- | --- |
 | **모듈 분리** | `decision_postgres` · `metadata_repository` · legacy `decision_service`를 패키지/디렉터리로 분할(임포트 경로 정리, 동작 계약 동일) |
-| **KT 피드백 라이브 검증** | Store PUBLISH 후 `/health`·`/data_decision`(충청정수장 탁도…)·`/query_execute`·410 폐기 경로 점검. 응답 슬롯은 존재하나 unit/facility/format·`'탁도'` exact alias·권역 fact 정렬은 **Metadata Store 적재 품질**에 의존 |
+| **KT 피드백 라이브 검증** | Store PUBLISH 후 `/health`·`/data_decision`(충청정수장 탁도…)·`/query_execute`·410 폐기 경로 점검. 응답 슬롯·`resolved_entities`는 **Metadata Store 승인 값매핑·FK 품질**에 의존 (시드/짧은 말 단독 SoT 아님) |
 | **범위** | 본 사이클에서 KT 필드를 robo에 하드코딩하지 않음. Alias·측정 메타 전파는 플랫폼 VALUE_MAPPING/PROJECT 후속 |
 
 ## 이전 작업 요약 (2026-08-06)
@@ -33,17 +46,24 @@ FK 및 논리 join hint를 조회하며 API가 SQL을 직접 생성하지는 않
 
 자연어 질문을 다음 순서로 처리합니다.
 
+**AS-IS (현재 구현):**
+
 ```text
 question
-  → intent·measurement·entity·schema role 분석
+  → intent·measurement·entity·schema role 분석 (LLM)
   → JOIN·filter 요구사항 분해
   → question·HyDE·role 다축 embedding 검색
-  → score-gap pruning
-  → 역할별 테이블 후보 선택
-  → 승인 join graph 탐색
-  → 최소 테이블 집합과 multi-hop join path 계획
+  → t2s_value_mappings로 용어→코드 (규칙; 코드 환각 금지)
+  → score-gap pruning · 역할별 테이블 후보
+  → 승인 t2s_fk_constraints 최단 path
+  → join_groups · filters · resolved_entities
   → execution context 반환
 ```
+
+**목표 제품 순서 (플랫폼 지도 + 본 서비스 조립; ADR-002 §5a-1):**  
+resolve(코드) → anchor(키 표) → Fact 선택 → **승인 FK** path → `join_groups`.  
+경로 템플릿이 있어도 FK에 없는 JOIN은 채택하지 않는다. LLM은 분해만 하고
+코드값·JOIN edge를 확정하지 않는다. 값매핑만으로 전체 해석이 끝난 것이 아니다.
 
 주요 응답:
 
@@ -61,11 +81,11 @@ LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector
 
 `/data_decision` 경로·응답 키는 유지하고, 내부 선별·매칭만 보강합니다.
 
-- **Hangul mention**: value mapping에서 `정수`⊂`정수장` 같은 중간 글자 오탐을 차단하되, `충청`⊂`충청지역` 등 지명 접미사 복합어는 허용
+- **Hangul mention**: value mapping에서 `정수`⊂`정수장` 같은 중간 글자 오탐을 차단하되, `충청`⊂`충청지역` 등 지명 접미사 복합어는 허용. 라벨 내부 공백(`탁 도`)은 질의 `탁도`와 매칭
 - **value mapping 승격**: 매핑된 테이블이 약한 vector score로 gap-prune 되지 않도록 score를 유지·승격
 - **차원 질의 랭킹**: 시설/개수·목록 질의에서 `hist`/`link` demote, `master` 우선
-- **역할 보강**: HyDE가 사업장+계측을 한 역할로 붕괴할 때 사업장·본부·태그·일별 팩트 역할을 분리(목록형 inventory vs 시계열 구분)
-- **filter**: verified value mapping의 컬럼·코드값을 semantic 컬럼 후보보다 우선
+- **역할 보강**: HyDE가 사업장+계측을 한 역할로 붕괴할 때 사업장·본부·태그·일별 팩트 역할을 분리(목록형 inventory vs 시계열 구분). `measurement.metric`이 있으면 태그 역할 보강
+- **filter**: verified value mapping의 컬럼·코드값을 semantic 컬럼 후보보다 우선. metric은 VM 매칭 시에만 필터 승격. 승인 FK 1 hop으로 plan/bridge에 EQ 필터 전파
 - **embedding**: OpenAI `text-embedding-3-*`는 Store와 맞추기 위해 `dimensions`(예: 1024)를 요청하고, GenOS bge-m3 등 matryoshka 미지원 모델에는 해당 필드를 넣지 않음
 
 ## `/query_execute`
