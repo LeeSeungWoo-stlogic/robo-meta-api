@@ -51,7 +51,7 @@ app = FastAPI(
         "robo-meta-api 1.0 — Serving MVP 소비면은 "
         "`POST /data_decision`과 `POST /query_execute`다. "
         "`POST /t2sql`은 확정 SQL+used 메타 추가 소비면이다. "
-        "`/data_decision` 0.7 계약은 무변경. "
+        "`/data_decision` meta_version은 1.0. "
         "`/semantic_decision`·`/query`·구경로 `/query/execute`는 폐기(410 또는 미노출)."
     ),
     version=APP_VERSION,

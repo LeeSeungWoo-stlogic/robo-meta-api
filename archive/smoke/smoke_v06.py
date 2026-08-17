@@ -54,9 +54,9 @@ def main() -> int:
     _save("01_health.json", {"status_code": r.status_code, "headers": dict(r.headers), "body": obj})
     if r.status_code != 200:
         failures.append(f"health: status={r.status_code}")
-    elif obj.get("meta_version") != "0.7":
+    elif obj.get("meta_version") != "1.0":
         failures.append(f"health: meta_version={obj.get('meta_version')}")
-    elif r.headers.get("X-Meta-Version") != "0.7":
+    elif r.headers.get("X-Meta-Version") != "1.0":
         failures.append(f"health: X-Meta-Version={r.headers.get('X-Meta-Version')}")
     print(f"[1/8] /health -> {r.status_code} meta={obj.get('meta_version')} hdr={r.headers.get('X-Meta-Version')}")
 
@@ -67,7 +67,7 @@ def main() -> int:
     cands = obj.get("candidates") or []
     if r.status_code != 200:
         failures.append(f"data_decision: status={r.status_code} body={str(obj)[:200]}")
-    elif obj.get("meta_version") != "0.7":
+    elif obj.get("meta_version") != "1.0":
         failures.append(f"data_decision: meta_version={obj.get('meta_version')}")
     elif len(cands) < 1:
         failures.append("data_decision: candidates empty")

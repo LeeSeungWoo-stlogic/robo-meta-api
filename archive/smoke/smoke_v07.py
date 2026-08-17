@@ -31,8 +31,8 @@ def main() -> int:
         print(f"v0.7 data_decision failed: {r.status_code} {r.text[:200]}")
         return 1
     body = r.json()
-    if body.get("meta_version") != "0.7":
-        print(f"expected meta_version 0.7 got {body.get('meta_version')}")
+    if body.get("meta_version") != "1.0":
+        print(f"expected meta_version 1.0 got {body.get('meta_version')}")
         return 1
     for key in ("resolved_entities", "suggested_probes", "resolution_status"):
         if key not in body:

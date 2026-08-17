@@ -5,10 +5,10 @@
 
 서비스 버전 **1.0.0**. Metadata Store(K-AIR-metadata-platform)의 승인·활성화된 테이블, 컬럼, embedding,
 FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생성하지 않고,
-`POST /t2sql`이 확정 SQL과 used 메타를 반환합니다. `/data_decision` 0.7 계약은 무변경입니다.
+`POST /t2sql`이 확정 SQL과 used 메타를 반환합니다. `/data_decision` meta_version은 **1.0**입니다.
 
 **Serving MVP 소비면:** `POST /data_decision` · `POST /t2sql` · `POST /query_execute`  
-(`/data_decision` 0.7 동결. `/t2sql`은 동일 Serving 6표 추가 READ)  
+(`/data_decision` 1.0. `/t2sql`은 동일 Serving 6표 추가 READ)  
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
 (Wave 0–3 적용 완료 기준, 2026-08-06)
 
@@ -29,7 +29,7 @@ Store 승인 메타만으로 decide/T2SQL을 조립한다. 질문 ID·물리 표
 | **측정점 교집합** | 별량 코드매핑 AND 태그 설명에 측정어 |
 | **태그 마스터** | 시계열이면 SELECT 대상. 식별은 PK+명칭/설명/별칭. 주소·경로·산출·사이트·상위 코드는 식별에서 제외. JOIN 키는 ON만 |
 | **기간 바인딩** | `YYYYMM` LIKE, `YYYYMMDD`/`YYYYMMDDHH` BETWEEN |
-| **범위** | `/data_decision` 0.7 응답 키 동결. Metadata Store 스키마·값매핑 미변경 |
+| **범위** | `/data_decision` meta_version 1.0. Metadata Store 스키마·값매핑 미변경 |
 
 관련 테스트: `tests/test_engine_contracts.py` · `tests/test_store_first.py` · `tests/test_time_grain.py`
 

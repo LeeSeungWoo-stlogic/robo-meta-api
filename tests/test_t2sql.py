@@ -848,7 +848,7 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.sql_status, "failed")
         self.assertEqual(result.sql_reason_code, "UPSTREAM_UNAVAILABLE")
         self.assertIsNone(result.sql)
-        self.assertEqual(result.meta_version, "0.7")
+        self.assertEqual(result.meta_version, "1.0")
 
 
 class T2SqlHttpTests(unittest.TestCase):
@@ -905,7 +905,7 @@ class T2SqlHttpTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["meta_version"], "0.7")
+        self.assertEqual(body["meta_version"], "1.0")
         self.assertEqual(body["sql_status"], "generated")
         self.assertEqual(_norm_sql(body["sql"]), FACT_SQL_PUBLIC)
         self.assertIsNone(body["sql_reason_code"])
@@ -917,7 +917,7 @@ class MainAppRouteTests(unittest.TestCase):
 
         paths = {getattr(route, "path", None) for route in app.routes}
         self.assertIn("/t2sql", paths)
-        self.assertEqual(META_VERSION, "0.7")
+        self.assertEqual(META_VERSION, "1.0")
 
 
 class LoadRuntimeT2SqlTests(unittest.TestCase):

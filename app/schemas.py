@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-META_VERSION = "0.7"
+META_VERSION = "1.0"
 APP_VERSION = "1.0.0"
 
 

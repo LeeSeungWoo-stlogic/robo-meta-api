@@ -4,7 +4,7 @@
 - 서비스: `robo-meta-api 1.0`
 - 기본 포트: `8100`
 - 서비스 버전: `1.0.0`
-- 메타 버전: `0.7` (`/data_decision` 계약 동결)
+- 메타 버전: `1.0` (`/data_decision`)
 - 차단 게이트(smoke): `/data_decision` 단일 endpoint
 
 ## 2) 선행 의존성
@@ -36,7 +36,7 @@ cp .env.rwis-test.example .env
 python -m app.main
 ```
 
-## 4) API 경로 (v0.7)
+## 4) API 경로 (1.0)
 - `GET /health` (`t2sql_configured` boolean 포함. LLM/probe는 health에서 호출하지 않음)
 - `POST /data_decision`
 - `POST /t2sql` (파이프라인 `timeout_s` 미지정 시 60초. statement timeout과 다름)
@@ -59,13 +59,9 @@ python tests/smoke_data_decision_only.py
 - `/data_decision` 응답 `200`
 - `meta_version`, `resolved_entities`, `suggested_probes`, `resolution_status` 필드 존재
 
-### 5-2. 참고(비차단) 점검
-- `/meta/*`, `/query/*`는 회귀 참고 용도로만 사용
-- 필요 시 기존 스모크:
-```bash
-python tests/smoke_v06.py
-python tests/smoke_v07.py
-```
+### 5-2. 참고(비차단)
+- `/meta/*` 회귀는 운영 차단 게이트가 아니다.
+- 0.6/0.7 라이브 스모크는 `archive/smoke/`에 보관했다. 기동에 필요 없다.
 
 ## 6) 트러블슈팅
 
