@@ -1,1 +1,1 @@
-"""robo-meta-api — Neo4j 베이스 v0.6 RC body 정합 meta-api."""
+"""robo-meta-api 1.0 — Store-first decide/T2SQL. Serving meta_version 0.7 동결."""

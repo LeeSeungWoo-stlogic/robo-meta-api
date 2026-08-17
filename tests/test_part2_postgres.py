@@ -142,18 +142,48 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
                 execution_context=context,
             )
 
-    def test_tibero_execution_context_requires_quoted_uppercase(self) -> None:
+    def test_tibero_execution_context_requires_quoted_identifiers(self) -> None:
         context = _ctx(require_quoted_uppercase=True)
         rewritten = qualify_and_rewrite(
-            "SELECT * FROM `MySource`.`allowed_schema`.`SAMPLE_TABLE`",
+            "SELECT * FROM `MySource`.`allowed_schema`.`sample_table`",
             execution_context=context,
         )
+        self.assertIn("`allowed_catalog`.`SAMPLE_TABLE`", rewritten)
         _validate_namespaces(rewritten, context)
         with self.assertRaises(GuardError):
             qualify_and_rewrite(
                 "SELECT * FROM MySource.allowed_schema.SAMPLE_TABLE",
                 execution_context=context,
             )
+
+    def test_postgres_lowercase_input_rewrites_to_store_case(self) -> None:
+        context = _ctx(
+            require_quoted_uppercase=False,
+            allowed_objects=frozenset({"RDITAG_TB"}),
+        )
+        context = ResolvedExecutionContext(
+            source_instance_id=context.source_instance_id,
+            backend=context.backend,
+            integration=context.integration,
+            catalog=context.catalog,
+            schema_name="RWIS",
+            source_engine=context.source_engine,
+            parser_dialect=context.parser_dialect,
+            qualification_pattern=context.qualification_pattern,
+            identifier_quote=context.identifier_quote,
+            require_quoted_uppercase_identifiers=False,
+            allowed_catalogs=context.allowed_catalogs,
+            allowed_schemas=frozenset({"rwis"}),
+            allowed_objects=frozenset({"RDITAG_TB"}),
+            source_name="RWIS",
+            allowed_object_refs=frozenset({("RWIS", "RDITAG_TB")}),
+        )
+        rewritten = qualify_and_rewrite(
+            "SELECT * FROM RWIS.rditag_tb LIMIT 5",
+            execution_context=context,
+        )
+        self.assertIn("`allowed_catalog`.`RDITAG_TB`", rewritten)
+        _validate_namespaces(rewritten, context)
 
 
 if __name__ == "__main__":

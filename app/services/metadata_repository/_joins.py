@@ -12,6 +12,7 @@ class JoinGraphMixin:
                t.description, t.analyzed_description,
                NULLIF(t.metadata->>'subject_area_override', '') AS subject_area_override,
                NULLIF(t.metadata->>'subject_area', '') AS subject_area,
+               NULLIF(t.metadata->>'logical_name', '') AS logical_name,
                d.profile_id AS source_instance_id, d.engine,
                d.mindsdb_integration, d.mindsdb_catalog,
                s.name AS source_name

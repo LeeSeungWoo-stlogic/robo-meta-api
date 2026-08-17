@@ -22,6 +22,7 @@ from app.schemas import (
 )
 from app.services.decision_planner import (
     build_composite_edges,
+    include_mapped_tables,
     merge_axis_candidates,
     select_minimal_tables,
 )
@@ -39,6 +40,7 @@ def table(table_id: int, name: str, score: float) -> dict:
         "name": name,
         "original_name": name,
         "source_instance_id": "rwis-pg",
+        "subject_area": "master",
         "score": score,
     }
 
@@ -124,6 +126,17 @@ class DecisionPlannerTests(unittest.TestCase):
         self.assertIsNone(matched.facility_code)
         self.assertIsNone(matched.system_code)
 
+    def test_candidate_maps_logical_name_as_hint_not_identifier(self) -> None:
+        row = table(1, "RDITAG_TB", 0.9)
+        row["logical_name"] = "태그 마스터"
+        candidate = _candidate(row, [], source="vector")
+        self.assertEqual(candidate.table_name, "RDITAG_TB")
+        self.assertEqual(candidate.logical_name, "태그 마스터")
+
+        blank = table(2, "OTHER_TB", 0.5)
+        blank["logical_name"] = "「미정」"
+        self.assertIsNone(_candidate(blank, [], source="vector").logical_name)
+
     def test_candidate_maps_facility_and_system_codes(self) -> None:
         candidate = _candidate(
             table(1, "MEASURE_TB", 0.9),
@@ -198,6 +211,49 @@ class DecisionPlannerTests(unittest.TestCase):
         )
         self.assertIn("승인 JOIN 경로 없음: 시설 master", selection.unresolved)
 
+    def test_include_mapped_tables_keeps_hub_and_join_path(self) -> None:
+        left = table(1, "FACT_TB", 0.95)
+        edges = build_composite_edges(
+            [
+                edge_row(1, "FACT_TB", "SUJ_CODE", 3, "FACILITY_TB", "SUJ_CODE", 0.9),
+            ]
+        )
+        selection = select_minimal_tables(
+            required_roles=["측정 fact"],
+            optional_roles=[],
+            role_candidates={"측정 fact": [left]},
+            edges=edges,
+            max_hops=3,
+            table_limit=10,
+        )
+        self.assertEqual(selection.selected_table_ids, {1})
+        include_mapped_tables(
+            selection,
+            mapped_table_ids={3},
+            edges=edges,
+            max_hops=3,
+        )
+        self.assertIn(3, selection.selected_table_ids)
+        self.assertEqual(len(selection.paths), 1)
+
+    def test_include_mapped_tables_keeps_hub_without_join(self) -> None:
+        selection = select_minimal_tables(
+            required_roles=["측정 fact"],
+            optional_roles=[],
+            role_candidates={"측정 fact": [table(1, "FACT_TB", 0.95)]},
+            edges=[],
+            max_hops=3,
+            table_limit=10,
+        )
+        include_mapped_tables(
+            selection,
+            mapped_table_ids={9},
+            edges=[],
+            max_hops=3,
+        )
+        self.assertEqual(selection.selected_table_ids, {1, 9})
+        self.assertIn(9, selection.bridge_table_ids)
+
     def test_multi_axis_merge_preserves_role_signal(self) -> None:
         first = table(1, "FACT_TB", 0.8)
         second = table(2, "MASTER_TB", 0.7)
@@ -260,8 +316,8 @@ class DecisionPlannerTests(unittest.TestCase):
 
 
 class FakeAnalyzer:
-    async def analyze(self, question: str) -> QueryAnalysis:
-        del question
+    async def analyze(self, question: str, store_hits=None) -> QueryAnalysis:
+        del question, store_hits
         return QueryAnalysis(
             status="complete",
             intent="사업장별 연결 오류 조회",
@@ -313,8 +369,8 @@ class FakeEmbeddingProvider:
 
 
 class FakeDegradedAnalyzer:
-    async def analyze(self, question: str) -> QueryAnalysis:
-        del question
+    async def analyze(self, question: str, store_hits=None) -> QueryAnalysis:
+        del question, store_hits
         return QueryAnalysis(
             status="degraded",
             reason="provider unavailable",
@@ -364,7 +420,13 @@ class FakeRepository:
             ],
         }
 
-    async def find_value_mappings(self, question):
+    async def find_value_mappings(
+        self, question, source_instance_id=None, extra_mentions=None
+    ):
+        del question, source_instance_id, extra_mentions
+        return []
+
+    async def find_glossary_routes(self, question):
         del question
         return []
 
@@ -398,6 +460,21 @@ class FakeRepository:
             ]
             for table_id in table_ids
         }
+
+    async def find_catalog_by_mentions(self, mentions, source_instance_id=None):
+        del mentions, source_instance_id
+        return [dict(self.tables[1]), dict(self.tables[2])]
+
+    async def fk_neighbor_table_ids(self, table_ids):
+        neighbors: set[int] = set()
+        if 1 in table_ids:
+            neighbors.add(2)
+        if 2 in table_ids:
+            neighbors.add(1)
+        return neighbors
+
+    async def fetch_approved_columns(self, table_ids):
+        return await self.search_columns(None, table_ids=table_ids, per_table_limit=5)
 
 
 class DecisionOrchestrationTests(unittest.IsolatedAsyncioTestCase):
@@ -480,9 +557,8 @@ class DecisionOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             auto_resolve_entities=True,
         )
         self.assertEqual(response.query_analysis.status, "degraded")
-        self.assertEqual(response.query_plan.completeness, "degraded")
+        self.assertEqual(response.query_plan.completeness, "partial")
         self.assertTrue(response.candidates)
-        self.assertIsNone(response.execution_context)
 
 
 if __name__ == "__main__":

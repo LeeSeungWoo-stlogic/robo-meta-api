@@ -26,9 +26,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 
 from .db import close_metadata_repository, get_metadata_repository, init_metadata_repository
-from .routers import decision, decision_v2, meta, query_exec
+from .routers import decision, decision_v2, meta, query_exec, t2sql
 from .runtime_config import get_runtime, init_runtime
-from .schemas import META_VERSION
+from .schemas import APP_VERSION, META_VERSION
 from .services.execution_context_resolver import validate_runtime_bindings
 
 
@@ -46,20 +46,22 @@ async def lifespan(app: FastAPI):
 _ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
 
 app = FastAPI(
-    title="robo-meta-api v4",
+    title="robo-meta-api 1.0",
     description=(
-        "v0.7 meta-api — Serving MVP 소비면은 "
+        "robo-meta-api 1.0 — Serving MVP 소비면은 "
         "`POST /data_decision`과 `POST /query_execute`다. "
-        "`/semantic_decision`·`/query`·구경로 `/query/execute`는 폐기(410 또는 미노출). "
-        "`/data_decision` 0.7 계약은 무변경."
+        "`POST /t2sql`은 확정 SQL+used 메타 추가 소비면이다. "
+        "`/data_decision` 0.7 계약은 무변경. "
+        "`/semantic_decision`·`/query`·구경로 `/query/execute`는 폐기(410 또는 미노출)."
     ),
-    version=f"meta-{META_VERSION}",
+    version=APP_VERSION,
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
     root_path=_ROOT_PATH,
     openapi_tags=[
         {"name": "decision", "description": "자연어 → Metadata Context (`/data_decision`)"},
+        {"name": "t2sql", "description": "자연어 → 확정 SQL + used 메타 (`/t2sql`)"},
         {"name": "query", "description": "읽기 전용 SQL 실행 (`/query_execute`)"},
         {"name": "meta", "description": "테이블·컬럼·FK 메타 조회"},
     ],
@@ -95,7 +97,7 @@ def swagger_ui():
     prefix = _ROOT_PATH
     return get_swagger_ui_html(
         openapi_url=f"{prefix}/openapi.json",
-        title="robo-meta-api v4 - API docs",
+        title="robo-meta-api 1.0 - API docs",
         swagger_js_url=f"{prefix}/static/swagger/swagger-ui-bundle.js",
         swagger_css_url=f"{prefix}/static/swagger/swagger-ui.css",
     )
@@ -106,7 +108,7 @@ def redoc_ui():
     prefix = _ROOT_PATH
     return get_redoc_html(
         openapi_url=f"{prefix}/openapi.json",
-        title="robo-meta-api v4 - ReDoc",
+        title="robo-meta-api 1.0 - ReDoc",
         redoc_js_url=f"{prefix}/static/swagger/redoc.standalone.js",
         with_google_fonts=False,
     )
@@ -136,10 +138,14 @@ async def health(response: Response) -> dict:
     except Exception:
         response.status_code = 503
         return {
+            "version": APP_VERSION,
             "meta_version": META_VERSION,
             "status": "unavailable",
             "metadata_backend": runtime.metadata_backend,
             "execution_backend": runtime.execution.backend,
+            "t2sql_configured": bool(
+                runtime.t2sql is not None and runtime.t2sql.configured()
+            ),
             "source_binding_count": 0,
             "source_instance_ids": [],
             "detail": "Metadata Store list_execution_sources failed",
@@ -150,16 +156,21 @@ async def health(response: Response) -> dict:
         if str(item.get("source_instance_id") or "").strip()
     ]
     return {
+        "version": APP_VERSION,
         "meta_version": META_VERSION,
         "status": "ok",
         "metadata_backend": runtime.metadata_backend,
         "execution_backend": runtime.execution.backend,
+        "t2sql_configured": bool(
+            runtime.t2sql is not None and runtime.t2sql.configured()
+        ),
         "source_binding_count": len(source_ids),
         "source_instance_ids": source_ids,
     }
 
 
 app.include_router(decision.router)
+app.include_router(t2sql.router)
 app.include_router(query_exec.router)
 app.include_router(meta.router)
 # /semantic_decision — OpenAPI 미노출, 런타임 410 (ADR-002 Wave 2)

@@ -381,3 +381,39 @@ def select_minimal_tables(
         paths=paths,
         unresolved=unresolved,
     )
+
+
+def include_mapped_tables(
+    selection: PlannerSelection,
+    *,
+    mapped_table_ids: set[int],
+    edges: list[CompositeJoinEdge],
+    max_hops: int,
+) -> PlannerSelection:
+    """Keep Store-mapped hubs in the plan so verified codes can bind.
+
+    Role minimization may drop a mapping table. If Store already returned a
+    verified mapping, that table stays selected. Approved JOIN hops are attached
+    when they exist; a missing path does not drop the mapped table.
+    """
+
+    role_ids = {int(table["id"]) for table in selection.role_tables.values()}
+    for table_id in sorted(mapped_table_ids - selection.selected_table_ids):
+        if selection.selected_table_ids:
+            path = shortest_path(
+                edges,
+                source_ids=selection.selected_table_ids,
+                target_id=table_id,
+                max_hops=max_hops,
+            )
+            if path:
+                selection.paths.append(path)
+                for edge in path:
+                    for hop_id in (edge.left_table_id, edge.right_table_id):
+                        selection.selected_table_ids.add(hop_id)
+                        if hop_id not in role_ids:
+                            selection.bridge_table_ids.add(hop_id)
+        selection.selected_table_ids.add(table_id)
+        if table_id not in role_ids:
+            selection.bridge_table_ids.add(table_id)
+    return selection

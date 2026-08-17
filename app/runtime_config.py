@@ -157,6 +157,22 @@ class ExecutionRuntime:
 
 
 @dataclass(frozen=True)
+class T2SqlRuntime:
+    model: str | None
+    base_url: str | None
+    max_probe_steps: int = 4
+    probe_timeout_seconds: int = 8
+    probe_row_limit: int = 20
+    generate_timeout_seconds: int = 30
+    max_generate_retries: int = 1
+    validate_max_rows: int = 5
+    total_timeout_seconds: int = 60
+
+    def configured(self) -> bool:
+        return bool(self.model) and bool(self.base_url)
+
+
+@dataclass(frozen=True)
 class RoboRuntime:
     settings_path: Path
     api_host: str
@@ -166,9 +182,50 @@ class RoboRuntime:
     embedding: EmbeddingRuntime
     decision: DecisionRuntime
     execution: ExecutionRuntime
+    t2sql: T2SqlRuntime | None = None
 
 
 _runtime: RoboRuntime | None = None
+
+
+def _load_t2sql(
+    robo: dict[str, Any],
+    *,
+    embedding_base_url: str,
+    analysis_base_url: str | None,
+    maximum_timeout_seconds: int,
+    maximum_rows: int,
+) -> T2SqlRuntime:
+    raw = robo.get("t2sql")
+    mapping = raw if isinstance(raw, dict) else {}
+    env_model = str(os.environ.get("T2SQL_LLM_MODEL") or "").strip() or None
+    yaml_model = str(mapping.get("model") or "").strip() or None
+    yaml_base = str(mapping.get("base_url") or "").strip() or None
+    base_url = yaml_base or analysis_base_url or embedding_base_url or None
+    probe_timeout = int(_optional(mapping, "probe_timeout_seconds", 8))
+    if probe_timeout > maximum_timeout_seconds:
+        raise RuntimeConfigError(
+            "t2sql.probe_timeout_seconds must be <= execution.maximum_timeout_seconds"
+        )
+    validate_max_rows = int(_optional(mapping, "validate_max_rows", 5))
+    if validate_max_rows > maximum_rows:
+        raise RuntimeConfigError(
+            "t2sql.validate_max_rows must be <= execution.maximum_rows"
+        )
+    total_timeout = int(_optional(mapping, "total_timeout_seconds", 60))
+    if total_timeout < 1 or total_timeout > 120:
+        raise RuntimeConfigError("t2sql.total_timeout_seconds must be 1..120")
+    return T2SqlRuntime(
+        model=env_model or yaml_model,
+        base_url=base_url,
+        max_probe_steps=int(_optional(mapping, "max_probe_steps", 4)),
+        probe_timeout_seconds=probe_timeout,
+        probe_row_limit=int(_optional(mapping, "probe_row_limit", 20)),
+        generate_timeout_seconds=int(_optional(mapping, "generate_timeout_seconds", 30)),
+        max_generate_retries=int(_optional(mapping, "max_generate_retries", 1)),
+        validate_max_rows=validate_max_rows,
+        total_timeout_seconds=total_timeout,
+    )
 
 
 def load_runtime(path: str | Path) -> RoboRuntime:
@@ -189,6 +246,19 @@ def load_runtime(path: str | Path) -> RoboRuntime:
         _secret(_required(embedding, "api_key_ref"))
         if auth_mode == "bearer"
         else None
+    )
+    analysis_base_url = (
+        str(_optional(decision, "analysis_base_url", "")).strip() or None
+    )
+    embedding_base_url = str(_required(embedding, "base_url"))
+    maximum_timeout_seconds = int(_required(execution, "maximum_timeout_seconds"))
+    maximum_rows = int(_required(execution, "maximum_rows"))
+    t2sql = _load_t2sql(
+        robo,
+        embedding_base_url=embedding_base_url,
+        analysis_base_url=analysis_base_url,
+        maximum_timeout_seconds=maximum_timeout_seconds,
+        maximum_rows=maximum_rows,
     )
     runtime = RoboRuntime(
         settings_path=settings_path,
@@ -239,9 +309,7 @@ def load_runtime(path: str | Path) -> RoboRuntime:
             score_top_radius=float(_optional(decision, "score_top_radius", 0.01)),
             fk_max_hops=int(_optional(decision, "fk_max_hops", 3)),
             fk_path_limit=int(_optional(decision, "fk_path_limit", 50)),
-            analysis_base_url=(
-                str(_optional(decision, "analysis_base_url", "")).strip() or None
-            ),
+            analysis_base_url=analysis_base_url,
         ),
         execution=ExecutionRuntime(
             backend=str(_required(execution, "backend")),
@@ -249,16 +317,15 @@ def load_runtime(path: str | Path) -> RoboRuntime:
             default_timeout_seconds=int(
                 _required(execution, "default_timeout_seconds")
             ),
-            maximum_timeout_seconds=int(
-                _required(execution, "maximum_timeout_seconds")
-            ),
+            maximum_timeout_seconds=maximum_timeout_seconds,
             default_max_rows=int(_required(execution, "default_max_rows")),
-            maximum_rows=int(_required(execution, "maximum_rows")),
+            maximum_rows=maximum_rows,
             maximum_response_bytes=int(
                 _required(execution, "maximum_response_bytes")
             ),
             audit_log_path=str(_required(execution, "audit_log_path")),
         ),
+        t2sql=t2sql,
     )
     if runtime.metadata_backend != "postgres":
         raise RuntimeConfigError("Part 2 requires metadata_backend=postgres")
@@ -283,6 +350,14 @@ def load_runtime(path: str | Path) -> RoboRuntime:
 def init_runtime(path: str | Path | None = None) -> RoboRuntime:
     global _runtime
     if _runtime is None:
+        try:
+            from dotenv import load_dotenv
+
+            env_path = Path(__file__).resolve().parents[1] / ".env"
+            if env_path.exists():
+                load_dotenv(env_path, override=False)
+        except ImportError:
+            pass
         selected = path or os.environ.get("ROBO_RUNTIME_SETTINGS_FILE")
         if not selected:
             raise RuntimeConfigError("ROBO_RUNTIME_SETTINGS_FILE is required")

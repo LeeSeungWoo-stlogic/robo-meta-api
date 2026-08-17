@@ -14,10 +14,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 META_VERSION = "0.7"
+APP_VERSION = "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,7 @@ FilterOperator = Literal[
     "LTE",
     "LIKE",
     "ILIKE",
+    "NOT_LIKE",
     "IS_NULL",
     "IS_NOT_NULL",
 ]
@@ -313,6 +315,7 @@ class QueryPlan(BaseModel):
     join_paths: List[PlannedJoinPath] = Field(default_factory=list)
     filters: List[PlannedFilter] = Field(default_factory=list)
     unresolved_requirements: List[str] = Field(default_factory=list)
+    time_role: Literal["latest", "extremum", "none"] = "latest"
 
 class MatchedColumn(BaseModel):
     """자연어 질의-컬럼 매칭 결과. 컬럼 RAG(`embedding_columns`) 활성화 후 채워짐.
@@ -355,6 +358,24 @@ class DecisionCandidate(TableKey):
         default=None,
         description="LLM 증강 설명 우선, 없으면 table_comment (Neo4j analyzed_description → description)",
         examples=["시간별 탁도·유량 등 계측 fact 테이블. tagsn으로 태그 마스터와 조인."],
+    )
+    logical_name: Optional[str] = Field(
+        default=None,
+        description="승인 한글 논리명. SQL 식별자가 아님. 자연어↔물리 객체 매핑 힌트.",
+    )
+    table_type: Optional[Literal["Raw", "Fact", "Code", "Dimension"]] = Field(
+        default=None,
+        description=(
+            "목록 테이블 유형. subject_area 운반체의 대응값. "
+            "link/hist는 None. SQL 식별자가 아님."
+        ),
+    )
+    default_date_column: Optional[str] = Field(
+        default=None,
+        description=(
+            "모호한 질의의 기본 날짜 컬럼 후보. "
+            "날짜 format_pattern 또는 날짜 dtype. 검수 지정 아님."
+        ),
     )
 
     model_config = {
@@ -454,6 +475,12 @@ class ExecutionContext(BaseModel):
     allowed_objects: List[str] = Field(default_factory=list)
 
 
+class GlossaryRoute(BaseModel):
+    mention: str
+    standard_term: str
+    definition: Optional[str] = None
+
+
 class DecisionResponse(BaseModel):
     meta_version: str = META_VERSION
     target: TargetTop
@@ -468,6 +495,87 @@ class DecisionResponse(BaseModel):
     execution_context: Optional[ExecutionContext] = None
     query_analysis: Optional[QueryAnalysis] = None
     query_plan: Optional[QueryPlan] = None
+    glossary_routes: List[GlossaryRoute] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# /t2sql
+# ---------------------------------------------------------------------------
+SqlStatus = Literal["generated", "failed", "validation_failed"]
+SqlReasonCode = Literal[
+    "NO_CANDIDATES",
+    "NO_METADATA",
+    "ENTITY_UNRESOLVED",
+    "CROSS_DB",
+    "PLAN_INCOMPLETE",
+    "GUARD_REJECTED",
+    "GENERATION_FAILED",
+    "TIMEOUT",
+    "UPSTREAM_UNAVAILABLE",
+]
+
+
+class T2SqlRequest(BaseModel):
+    query: str = Field(..., min_length=1, examples=["화성정수장 평균 탁도"])
+    include_matched_columns: bool = Field(
+        default=True,
+        description="False면 used_metadata.candidates[].matched_columns 를 비운다. 생성기 내부 매칭은 유지.",
+    )
+    column_top_m: Optional[int] = Field(default=None, ge=1, le=50)
+    table_limit: Optional[int] = Field(default=None, ge=1, le=50)
+    auto_resolve_entities: bool = Field(
+        default=True,
+        description="True면 Store value mapping을 confirm 입력에 시드. false여도 probe+confirm은 실행.",
+    )
+    timeout_s: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=120,
+        description=(
+            "파이프라인 벽시계(초). 미지정 시 runtime total_timeout_seconds. "
+            "/query_execute.timeout_s(statement timeout)와 다름."
+        ),
+        examples=[60],
+    )
+
+    @field_validator("query")
+    @classmethod
+    def _strip_query(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("query must not be blank")
+        return stripped
+
+
+class T2SqlUsedMetadata(BaseModel):
+    candidates: List[DecisionCandidate] = Field(default_factory=list)
+    join_groups: List[JoinGroup] = Field(default_factory=list)
+    resolved_entities: List[ResolvedEntity] = Field(default_factory=list)
+    execution_context: Optional[ExecutionContext] = None
+    query_analysis: Optional[QueryAnalysis] = None
+    query_plan: Optional[QueryPlan] = None
+
+
+class ProbeSummary(BaseModel):
+    resolution_status: ResolutionStatus = "skipped"
+    probes_run: int = 0
+    probes_ok: int = 0
+    probes_failed: int = 0
+    elapsed_ms: float = 0.0
+    probe_sqls: List[str] = Field(default_factory=list)
+    last_error: Optional[str] = None
+
+
+class T2SqlResponse(BaseModel):
+    meta_version: str = META_VERSION
+    generation_id: str
+    sql: Optional[str] = None
+    sql_status: SqlStatus
+    sql_reason: Optional[str] = None
+    sql_reason_code: Optional[SqlReasonCode] = None
+    elapsed_ms: float = 0.0
+    used_metadata: T2SqlUsedMetadata = Field(default_factory=T2SqlUsedMetadata)
+    probe_summary: ProbeSummary = Field(default_factory=ProbeSummary)
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +608,8 @@ class QueryExecuteRequest(BaseModel):
         ),
     )
     timeout_s: Optional[int] = Field(
-        default=None, ge=1, le=60,
-        description="서버 statement_timeout (기본 10s, 최대 30s)",
+        default=None, ge=1, le=120,
+        description="서버 statement_timeout (기본 10s, 최대 120s)",
         examples=[10],
     )
     max_rows: Optional[int] = Field(
@@ -554,7 +662,12 @@ class QueryExecuteResponse(BaseModel):
     audit_id: str
     status: Literal["ok", "timeout", "db_error", "error", "rejected"]
     error: Optional[str] = None
-    sql_executed: str
+    sql_executed: str = Field(
+        description=(
+            "클라이언트에 보이는 실행 SQL. SourceName.Schema.Table "
+            "(플랫폼 연결 표시명). MindsDB catalog UUID는 노출하지 않는다."
+        ),
+    )
     columns: List[str] = Field(default_factory=list)
     rows: List[List[Any]] = Field(default_factory=list)
     row_count: int = 0

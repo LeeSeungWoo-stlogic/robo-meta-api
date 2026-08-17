@@ -4,7 +4,16 @@ import re
 from typing import Any
 
 from ...schemas import JoinRequirement, QueryAnalysis, SchemaRoleRequirement
+from .grain import (
+    fact_role_for_grain,
+    grain_from_fact_role,
+    is_measurement_role,
+    is_period_fact_role,
+    period_fact_candidate_allowed,
+    resolve_time_grain,
+)
 from .helpers import _resolve_subject_area
+from .table_type import table_type_allows_role
 
 
 def _role_blob(analysis: QueryAnalysis) -> str:
@@ -22,96 +31,7 @@ def _role_covers(role: SchemaRoleRequirement, *terms: str, exclude: tuple[str, .
 
 
 def _enrich_analysis_roles(query: str, analysis: QueryAnalysis) -> QueryAnalysis:
-    """Fill missing facility/tag/fact roles HyDE often collapses into one blob."""
-    if analysis.status != "complete":
-        return analysis
-    q = query or ""
-    roles = list(analysis.schema_roles)
-    joins = list(analysis.join_requirements)
-    measure_exclude = ("계측", "측정", "시계열", "팩트", "값", "현황", "데이터")
-
-    def _covered(*terms: str, exclude: tuple[str, ...] = ()) -> bool:
-        return any(_role_covers(role, *terms, exclude=exclude) for role in roles)
-
-    def _add(role: str, terms: list[str], *, necessity: str = "required") -> None:
-        if any(role == existing.role for existing in roles):
-            return
-        roles.append(
-            SchemaRoleRequirement(
-                role=role,
-                necessity=necessity,  # type: ignore[arg-type]
-                cardinality="many",
-                search_terms=terms,
-            )
-        )
-
-    plant = any(term in q for term in ("정수장", "사업장"))
-    measure = any(term in q for term in ("계측", "측정", "값", "현황", "데이터"))
-    if str(analysis.measurement.metric or "").strip():
-        # Metric slot from analyzer implies a measurable quantity without
-        # requiring surface words like "계측".
-        measure = True
-    region = any(term in q for term in ("충청", "금강", "한강", "낙동", "영섬", "본부", "권역", "지역"))
-    inventory = any(term in q for term in ("어떤", "무엇", "항목", "데이터들"))
-    timeseries = any(
-        term in q for term in ("계측값", "현황", "평균", "합계", "년", "월", "일", "시간")
-    ) and not inventory
-
-    # "사업장 계측 데이터" 같은 붕괴 역할은 사업장 마스터 커버로 치지 않는다.
-    if plant and not _covered("사업장", "정수장", "시설", exclude=measure_exclude):
-        _add("사업장 마스터", ["사업장", "정수장", "SUJ", "사업장코드", "사업장이름", "RDISAUP"])
-    if region and not _covered("본부", "권역", "유역", "지역본부", exclude=measure_exclude):
-        _add("지역본부 마스터", ["본부", "지역본부", "BNB", "유역본부", "권역", "RDIBONBU"])
-    if measure and (plant or timeseries) and not _covered(
-        "태그", "측정항목", "태그마스터", exclude=("계측값", "시계열")
-    ):
-        _add("태그 마스터", ["태그", "측정항목", "TAG", "TAGSN", "태그명", "RDITAG"])
-    if timeseries and not _covered("일별", "월별", "시간별", "01dd", "01mm", "01hh", "팩트"):
-        _add("일별 계측 팩트", ["일별", "일 단위", "계측값", "01DD", "LOG_TIME", "VAL", "RDD01DD"])
-
-    role_names = {role.role for role in roles}
-    def _link(a: str, b: str, keys: list[str]) -> None:
-        if a in role_names and b in role_names:
-            if any({j.from_role, j.to_role} == {a, b} for j in joins):
-                return
-            joins.append(
-                JoinRequirement(
-                    from_role=a,
-                    to_role=b,
-                    required=True,
-                    key_meanings=keys,
-                )
-            )
-
-    if "사업장 마스터" in role_names and "지역본부 마스터" in role_names:
-        _link("사업장 마스터", "지역본부 마스터", ["본부코드", "BNB_CODE"])
-    if "사업장 마스터" in role_names and "태그 마스터" in role_names:
-        _link("사업장 마스터", "태그 마스터", ["사업장코드", "SUJ_CODE"])
-    if "태그 마스터" in role_names and "일별 계측 팩트" in role_names:
-        _link("태그 마스터", "일별 계측 팩트", ["태그일련번호", "TAGSN"])
-    if "사업장 마스터" in role_names and "일별 계측 팩트" in role_names:
-        _link("사업장 마스터", "일별 계측 팩트", ["사업장코드", "SUJ_CODE"])
-
-    # Remove HyDE hybrid roles that collapse facility+measure into one seed.
-    concrete = {"사업장 마스터", "지역본부 마스터", "태그 마스터", "일별 계측 팩트"}
-    if concrete & {role.role for role in roles}:
-        roles = [
-            role
-            for role in roles
-            if role.role in concrete
-            or not (
-                _role_covers(role, "사업장", "정수장", "시설")
-                and _role_covers(role, "계측", "측정", "데이터", "값", "현황")
-            )
-        ]
-
-    analysis.schema_roles = roles[:10]
-    kept = {role.role for role in analysis.schema_roles}
-    analysis.join_requirements = [
-        join
-        for join in joins
-        if join.from_role in kept and join.to_role in kept
-    ][:10]
+    """No domain-list role injection. Store hits drive tables, not this hook."""
     return analysis
 
 
@@ -188,19 +108,11 @@ def _role_candidate_score(
     }
     matched = sum(1 for token in tokens if token in table_text)
     lexical = min(0.3, matched * 0.08)
-    # Prefer exact physical hub tokens injected by role enrichment.
-    for hub_token, hub_names in (
-        ("rdisaup", ("rdisaup_tb",)),
-        ("rdibonbu", ("rdibonbu_tb",)),
-        ("rditag", ("rditag_tb",)),
-        ("rdd01dd", ("rdd01dd_tb",)),
-    ):
-        if hub_token in role_text and any(name in table_name for name in hub_names):
-            lexical = max(lexical, 0.55)
     temporal_signals = (
         (("15분", "십오분"), ("15분", "15mi")),
-        (("시간별", "시간 단위", "매시간"), ("시간별", "시간 단위", "01hh")),
-        (("일 단위", "일별", "하루"), ("일 단위", "일별", "01dd")),
+        (("시간별", "시간 단위", "매시간", "01hh"), ("시간별", "시간 단위", "01hh")),
+        (("일 단위", "일별", "하루", "일자", "01dd"), ("일 단위", "일별", "하루", "일자", "01dd")),
+        (("월별", "월 단위", "한달", "01mm"), ("월별", "월 단위", "01mm")),
     )
     for role_terms, table_terms in temporal_signals:
         if any(term in role_text for term in role_terms) and any(
@@ -216,7 +128,13 @@ def _role_candidate_score(
         return max(0.0, min(1.0, base + lexical) * 0.35)
     if hub_role and area == "master":
         lexical = max(lexical, 0.2)
-    return min(1.0, base + lexical)
+    score = min(1.0, base + lexical)
+    if is_period_fact_role(role) and grain_from_fact_role(role) != "instant":
+        if area == "agg":
+            score = min(1.0, score + 0.12)
+        elif area in {"raw", "hist", "link"}:
+            score *= 0.25
+    return score
 
 
 def _role_candidate_has_evidence(
@@ -240,8 +158,9 @@ def _role_candidate_has_evidence(
         return True
     temporal_signals = (
         (("15분", "십오분"), ("15분", "15mi")),
-        (("시간별", "시간 단위", "매시간"), ("시간별", "시간 단위", "01hh")),
-        (("일 단위", "일별", "하루"), ("일 단위", "일별", "01dd")),
+        (("시간별", "시간 단위", "매시간", "01hh"), ("시간별", "시간 단위", "01hh")),
+        (("일 단위", "일별", "하루", "일자", "01dd"), ("일 단위", "일별", "하루", "일자", "01dd")),
+        (("월별", "월 단위", "한달", "01mm"), ("월별", "월 단위", "01mm")),
     )
     if any(
         any(term in role_text for term in role_terms)
@@ -260,3 +179,71 @@ def _role_candidate_has_evidence(
     ):
         return True
     return False
+
+
+def prepare_role_candidate_rows(
+    role: SchemaRoleRequirement,
+    rows: list[dict[str, Any]],
+    *,
+    semantic_floor: float,
+    min_score_ratio: float,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        item = {
+            **row,
+            "vector_score": float(row.get("score") or 0.0),
+            "score": _role_candidate_score(role, row),
+            "role_evidence": _role_candidate_has_evidence(role, row),
+        }
+        area = _resolve_subject_area(item)
+        role_text = " ".join([role.role, *role.search_terms])
+        if not table_type_allows_role(role_text, area):
+            continue
+        if not period_fact_candidate_allowed(role, item, subject_area=area):
+            continue
+        if item["role_evidence"] or float(item["vector_score"]) >= semantic_floor:
+            prepared.append(item)
+    prepared.sort(
+        key=lambda row: (
+            -float(row.get("score") or 0.0),
+            str(row.get("original_name") or row.get("name") or ""),
+        )
+    )
+    if not prepared:
+        return prepared
+    cutoff = float(prepared[0].get("score") or 0.0) * min_score_ratio
+    return [
+        row
+        for row in prepared
+        if float(row.get("score") or 0.0) >= cutoff
+    ]
+
+
+def backfill_empty_role_candidates(
+    role_candidates: dict[str, list[dict[str, Any]]],
+    roles: list[SchemaRoleRequirement],
+    pool: list[dict[str, Any]],
+    *,
+    semantic_floor: float,
+    min_score_ratio: float,
+) -> dict[str, list[dict[str, Any]]]:
+    """If a role search returned only wrong types, reuse allowed tables already in pool.
+
+    Does not invent a table. Physical names are not used.
+    """
+    filled = {key: list(value) for key, value in role_candidates.items()}
+    if not pool:
+        return filled
+    for role in roles:
+        if filled.get(role.role):
+            continue
+        rows = prepare_role_candidate_rows(
+            role,
+            pool,
+            semantic_floor=semantic_floor,
+            min_score_ratio=min_score_ratio,
+        )
+        if rows:
+            filled[role.role] = rows
+    return filled

@@ -55,3 +55,14 @@ robo_meta_api:
     maximum_rows: 10000
     maximum_response_bytes: 10485760
     audit_log_path: /app/logs/query_audit.jsonl
+
+  t2sql:
+    model: null
+    base_url: null
+    max_probe_steps: 4
+    probe_timeout_seconds: 8
+    probe_row_limit: 20
+    generate_timeout_seconds: 30
+    max_generate_retries: 1
+    validate_max_rows: 5
+    total_timeout_seconds: 60

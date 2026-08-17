@@ -230,8 +230,7 @@ class HydeSchemaGenerator:
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": q},
                 ],
-                temperature=0.0,
-                max_tokens=600,
+                max_completion_tokens=600,
                 response_format={"type": "json_object"},
             )
             elapsed_ms = (time.perf_counter() - started) * 1000.0

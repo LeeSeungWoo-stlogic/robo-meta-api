@@ -11,6 +11,8 @@ from ...schemas import (
     ResolvedValue,
 )
 from .. import subject_area as subject_area_service
+from .default_date import default_date_column
+from .table_type import list_table_type
 
 
 def _same_source(row: dict[str, Any], source_instance_id: str) -> bool:
@@ -18,15 +20,17 @@ def _same_source(row: dict[str, Any], source_instance_id: str) -> bool:
 
 
 def _provisional_source_instance_id(
-    vector_tables: list[dict[str, Any]],
+    store_rows: list[dict[str, Any]],
     mappings: list[dict[str, Any]],
 ) -> str:
-    """Pick one source before any cross-source expand (plan order)."""
+    """Prefer Store mapping/catalog hits. Never prefer a vector winner."""
 
-    if vector_tables:
-        return str(vector_tables[0].get("source_instance_id") or "").strip()
     for mapping in mappings:
         source_id = str(mapping.get("source_instance_id") or "").strip()
+        if source_id:
+            return source_id
+    for row in store_rows:
+        source_id = str(row.get("source_instance_id") or "").strip()
         if source_id:
             return source_id
     return ""
@@ -40,6 +44,13 @@ def _target_class(subject_area: str) -> str:
     if subject_area in {"hist", "link"}:
         return "collect"
     return "unknown"
+
+
+def _serving_logical_name(table: dict[str, Any]) -> str | None:
+    value = str(table.get("logical_name") or "").strip()
+    if not value or value == "「미정」":
+        return None
+    return value
 
 
 def _resolve_subject_area(table: dict[str, Any]) -> str:
@@ -174,6 +185,9 @@ def _candidate(
             or table.get("description")
             or None
         ),
+        logical_name=_serving_logical_name(table),
+        table_type=list_table_type(subject_area),
+        default_date_column=default_date_column(columns),
     )
 
 

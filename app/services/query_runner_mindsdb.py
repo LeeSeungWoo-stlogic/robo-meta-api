@@ -14,7 +14,7 @@ from ..runtime_config import get_runtime
 from .artifact_sql_guard import ArtifactGuardError, enforce as enforce_artifact
 from .execution_context_resolver import ResolvedExecutionContext
 from .sql_guard import GuardError, check
-from .sql_source_qualify import qualify_and_rewrite
+from .sql_source_qualify import qualify_and_rewrite, to_source_name_sql
 
 
 def _serialize(value: Any) -> Any:
@@ -234,7 +234,9 @@ async def execute(
         "audit_id": audit_id,
         "status": status,
         "error": error,
-        "sql_executed": executable_sql,
+        "sql_executed": to_source_name_sql(
+            sql_client, execution_context=execution_context
+        ),
         "columns": columns,
         "rows": rows,
         "row_count": len(rows),

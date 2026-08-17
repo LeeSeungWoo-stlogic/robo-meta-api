@@ -1,9 +1,10 @@
-# robo-meta-api RUNBOOK (v0.7)
+# robo-meta-api RUNBOOK (1.0)
 
 ## 1) 개요
-- 서비스: `robo-meta-api v4`
+- 서비스: `robo-meta-api 1.0`
 - 기본 포트: `8100`
-- 메타 버전: `0.7`
+- 서비스 버전: `1.0.0`
+- 메타 버전: `0.7` (`/data_decision` 계약 동결)
 - 차단 게이트(smoke): `/data_decision` 단일 endpoint
 
 ## 2) 선행 의존성
@@ -20,10 +21,13 @@
 ```bash
 cd c:\Users\LSW\Documents\GitHub\robo-meta-api
 cp .env.rwis-test.example .env
+cp config/runtime-settings.example.yaml config/runtime-settings.docker.local.yaml
 docker start robo-postgres robo-neo4j
 docker compose up -d --build
 curl http://127.0.0.1:8100/health
 ```
+`runtime-settings.docker.local.yaml`은 gitignore. 정본은 `config/runtime-settings.example.yaml`.
+`/t2sql` 모델은 로컬 YAML `t2sql.model` 또는 `.env`의 `T2SQL_LLM_MODEL`.
 
 ### 3-2. 로컬 실행
 ```bash
@@ -33,8 +37,9 @@ python -m app.main
 ```
 
 ## 4) API 경로 (v0.7)
-- `GET /health`
+- `GET /health` (`t2sql_configured` boolean 포함. LLM/probe는 health에서 호출하지 않음)
 - `POST /data_decision`
+- `POST /t2sql` (파이프라인 `timeout_s` 미지정 시 60초. statement timeout과 다름)
 - `POST /meta/batch`
 - `POST /meta/table`
 - `POST /meta/column`
@@ -85,7 +90,7 @@ python tests/smoke_v07.py
 - `/semantic_decision` 410 stub; V2_PG_DSN 배선 제거
 - `/query` stub 제거; `/query/execute` → `/query_execute` (구경로 410)
 - `artifact_id` 지정 시 410 (`SEMANTIC_ARTIFACT_GONE`)
-- OpenAPI tag: decision → query → meta
+- OpenAPI tag: decision → t2sql → query → meta
 
 ## 9) `/query_execute` SourceName 운영 (260805)
 - 클라이언트 SQL: `` `SourceName`.`Schema`.`Table` `` (`kair_platform_sources.name`)

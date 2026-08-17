@@ -1,14 +1,311 @@
 from __future__ import annotations
 
+import json
 import re
+from datetime import timedelta
 from typing import Any
 
 from ...schemas import FilterRequirement, PlannedFilter, QueryAnalysis
 from ..metadata_repository import PostgresMetadataRepository
+from ..metadata_repository._search import SearchMixin
+from .default_date import _dtype_looks_like_date, _format_looks_like_date
+from .period import extract_year, parse_korean_period
+
+
+_HANGUL = re.compile(r"[가-힣]")
+_CODE_LITERAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$")
+_NAME_MARKERS = ("NAME", "NM", "DESC", "TITLE", "LABEL", "ALIAS", "COMMENT")
+_CODE_MARKERS = ("CODE", "CD", "TAGSN", "_ID", "ID_")
+_DATE_NAME_MARKERS = ("TIME", "DATE", "DT", "TM")
+_AUDIT_DATE_MARKERS = (
+    "CRDT",
+    "CRT_DT",
+    "CREATED",
+    "CREATE_DT",
+    "CRE_DT",
+    "UPDT",
+    "UPD_DT",
+    "UPDATED",
+    "UPDATE_DT",
+    "REG_DT",
+    "REGDT",
+    "MOD_DT",
+    "MODDT",
+    "INST_DT",
+    "INSTDT",
+)
+_MEASURE_MEANING_TOKENS = (
+    "평균",
+    "농도",
+    "측정값",
+    "미만",
+    "이상",
+    "최고",
+    "최저",
+    "ph",
+)
+_PERIOD_MEANING_TOKENS = (
+    "기간",
+    "날짜",
+    "일자",
+    "연도",
+    "연월",
+    "year",
+    "month",
+    "월",
+    "시각",
+    "시점",
+)
+_NUMERIC_DTYPES = (
+    "int",
+    "numeric",
+    "decimal",
+    "float",
+    "double",
+    "real",
+    "number",
+    "serial",
+)
 
 
 def _compact_text(value: str | None) -> str:
     return re.sub(r"\s+", "", value or "").casefold()
+
+
+def _has_natural_script(value: str | None) -> bool:
+    return bool(_HANGUL.search(value or ""))
+
+
+def _is_code_literal(value: str | None) -> bool:
+    text = str(value or "").strip()
+    if not text or _has_natural_script(text):
+        return False
+    return bool(_CODE_LITERAL.fullmatch(text))
+
+
+def _column_dtype(column: dict[str, Any] | None) -> str:
+    if not column:
+        return ""
+    return str(column.get("dtype") or column.get("data_type") or "").lower()
+
+
+def _dtype_is_numeric(column: dict[str, Any] | None) -> bool:
+    dtype = _column_dtype(column)
+    return any(token in dtype for token in _NUMERIC_DTYPES)
+
+
+def _column_accepts_natural_value(column: dict[str, Any] | None) -> bool:
+    """Name/text columns may keep a surface mention. Code/numeric columns may not."""
+
+    if not column:
+        return False
+    name = str(column.get("name") or "").upper()
+    if _dtype_is_numeric(column):
+        return False
+    if any(marker in name for marker in _CODE_MARKERS):
+        return False
+    return any(marker in name for marker in _NAME_MARKERS)
+
+
+def _column_is_date_like(column: dict[str, Any] | None) -> bool:
+    if not column:
+        return False
+    metadata = column.get("metadata")
+    pattern = metadata.get("format_pattern") if isinstance(metadata, dict) else None
+    return _format_looks_like_date(pattern) or _dtype_looks_like_date(
+        _column_dtype(column)
+    )
+
+
+def _column_looks_like_audit_date(column: dict[str, Any] | None) -> bool:
+    """Create/update stamp columns. Period bind prefers measure time over these."""
+
+    if not column:
+        return False
+    name = str(column.get("name") or "").upper().replace("-", "_")
+    return any(marker in name for marker in _AUDIT_DATE_MARKERS)
+
+
+def _meaning_looks_like_measure(meaning: str | None) -> bool:
+    text = _compact_text(meaning)
+    return any(token in text for token in _MEASURE_MEANING_TOKENS)
+
+
+def _column_format_pattern(column: dict[str, Any]) -> str:
+    metadata = column.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+            metadata = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            metadata = {}
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("format_pattern") or "").casefold().replace("-", "").replace(" ", "")
+
+
+def _varchar_period_between(
+    column: dict[str, Any],
+    period,
+) -> tuple[str, str] | None:
+    """Finer compact clocks than the period window use a closed range, not LIKE."""
+
+    pattern = _column_format_pattern(column)
+    if not pattern:
+        return None
+    start = period.start_date()
+    last = period.end_date_exclusive() - timedelta(days=1)
+    day_start = start.strftime("%Y%m%d")
+    day_last = last.strftime("%Y%m%d")
+    if any(token in pattern for token in ("hh", "hour")):
+        return "BETWEEN", f"{day_start}00,{day_last}23"
+    if "dd" in pattern:
+        return "BETWEEN", f"{day_start},{day_last}"
+    return None
+
+
+def _period_bind_value(column: dict[str, Any], period) -> tuple[str, str]:
+    """Return (operator, value) for a parsed period on a date-like column."""
+
+    if getattr(period, "week_start", None) is not None:
+        return _week_bind_value(column, period)
+    if _dtype_looks_like_date(_column_dtype(column)):
+        start = period.start_date().isoformat()
+        end = period.end_date_exclusive().isoformat()
+        return "BETWEEN", f"{start},{end}"
+    compact = _varchar_period_between(column, period)
+    if compact is not None:
+        return compact
+    return "LIKE", f"{period.like_prefix}%"
+
+
+def _week_bind_value(column: dict[str, Any], period) -> tuple[str, str]:
+    start = period.week_start
+    end = period.week_end
+    if start is None or end is None:
+        return "LIKE", f"{period.like_prefix}%"
+    if _dtype_looks_like_date(_column_dtype(column)):
+        return "BETWEEN", f"{start.isoformat()},{end.isoformat()}"
+    metadata = column.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+            metadata = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    pattern = str(metadata.get("format_pattern") or "").casefold().replace("-", "")
+    compact_start = start.strftime("%Y%m%d")
+    compact_end = end.strftime("%Y%m%d")
+    if any(token in pattern for token in ("hh", "hour", "yyyy mmddhh", "yyyymmddhh")):
+        return "BETWEEN", f"{compact_start}00,{compact_end}23"
+    if "yyyy" in pattern or "yy" in pattern or not pattern:
+        return "BETWEEN", f"{compact_start},{compact_end}"
+    return "BETWEEN", f"{compact_start},{compact_end}"
+
+
+def _meaning_looks_like_period(meaning: str | None) -> bool:
+    text = str(meaning or "").casefold()
+    return any(token in text for token in _PERIOD_MEANING_TOKENS)
+
+
+def _period_from_requirement(
+    requirement: FilterRequirement,
+    requirements: list[FilterRequirement],
+):
+    """Bind a calendar phrase only. Do not inherit a sibling year onto 유역/사업장."""
+
+    parsed = parse_korean_period(requirement.value_text)
+    if parsed is not None:
+        return parsed
+    if not _meaning_looks_like_period(requirement.meaning):
+        return None
+    fallback_year = None
+    for other in requirements:
+        if other is requirement:
+            continue
+        year = extract_year(other.value_text) or extract_year(other.meaning)
+        if year is not None:
+            fallback_year = year
+            break
+    return parse_korean_period(requirement.value_text, fallback_year=fallback_year)
+
+
+def _is_numeric_literal(value: str | None) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _column_looks_like_code(column: dict[str, Any] | None) -> bool:
+    if not column:
+        return False
+    name = str(column.get("name") or "").upper()
+    return any(marker in name for marker in _CODE_MARKERS)
+
+
+def _column_looks_like_measure_value(column: dict[str, Any] | None) -> bool:
+    if not column:
+        return False
+    tokens = set(re.findall(r"[A-Z]+", str(column.get("name") or "").upper()))
+    return bool(tokens & {"VAL", "VALUE", "AMT", "QTY"})
+
+
+def _surface_value_may_resolve(
+    value: str | None,
+    column: dict[str, Any] | None,
+    meaning: str | None = None,
+) -> bool:
+    """Bind a non-mapping value only when the literal type matches the column kind.
+
+    Hangul and alphabetic codes need a Store mapping. A name-column hit is not
+    a resolved code. Numeric literals may bind to numeric/value columns. A
+    numeric threshold does not bind to a code column.
+    """
+
+    text = str(value or "").strip()
+    if not text or column is None:
+        return False
+    if _has_natural_script(text):
+        return False
+    if _is_numeric_literal(text):
+        if _column_looks_like_code(column) and _meaning_looks_like_measure(meaning):
+            return False
+        return (
+            _column_looks_like_code(column)
+            or _dtype_is_numeric(column)
+            or _column_looks_like_measure_value(column)
+        )
+    if _is_code_literal(text):
+        return False
+    return False
+
+
+def _forward_label_in_value(natural: str, target: str) -> bool:
+    """Store label ⊂ slot text, but not a Hangul prefix of a longer name.
+
+    '탁도' ⊂ '탁도', '충청지역' ⊂ '충청지역'. Reject '청주' ⊂ '청주정수장'.
+    """
+    if not natural or not target:
+        return False
+    if natural == target:
+        return True
+    index = target.find(natural)
+    if index < 0:
+        return False
+    before = target[index - 1] if index else ""
+    after = target[index + len(natural) :]
+    if before and SearchMixin._is_hangul_char(before):
+        return False
+    if after and SearchMixin._is_hangul_char(after[0]):
+        return False
+    return True
 
 
 def _mapping_matches_value_text(mapping: dict[str, Any], value_text: str | None) -> bool:
@@ -16,7 +313,53 @@ def _mapping_matches_value_text(mapping: dict[str, Any], value_text: str | None)
         return False
     natural = _compact_text(str(mapping.get("natural_value") or ""))
     target = _compact_text(value_text)
-    return bool(natural) and natural in target
+    if natural and _forward_label_in_value(natural, target):
+        return True
+    if natural and target and SearchMixin._token_is_label_mention(target, natural):
+        return True
+    for surface in mapping.get("matched_surfaces") or []:
+        if _compact_text(str(surface)) == target:
+            return True
+    mention = _compact_text(str(mapping.get("matched_mention") or ""))
+    if mention and mention == target:
+        return True
+    code = _compact_text(str(mapping.get("code_value") or ""))
+    return bool(code) and code == target
+
+
+def _mapping_cluster(
+    mappings: list[dict[str, Any]],
+    requirement: FilterRequirement,
+) -> list[dict[str, Any]]:
+    """All verified mappings that share the same mention and column as the slot."""
+
+    primary = next(
+        (
+            mapping
+            for mapping in mappings
+            if _mapping_matches_value_text(mapping, requirement.value_text)
+        ),
+        None,
+    )
+    if primary is None:
+        return []
+    mention = str(primary.get("matched_mention") or "").strip()
+    column_fqn = str(primary.get("column_fqn") or "")
+    clustered: list[dict[str, Any]] = []
+    seen_codes: set[str] = set()
+    for mapping in mappings:
+        if str(mapping.get("column_fqn") or "") != column_fqn:
+            continue
+        same_slot = _mapping_matches_value_text(mapping, requirement.value_text)
+        same_mention = bool(mention) and str(mapping.get("matched_mention") or "") == mention
+        if not same_slot and not same_mention:
+            continue
+        code = str(mapping.get("code_value") or "").strip()
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        clustered.append(mapping)
+    return clustered
 
 
 def _plan_column_from_fqn(column_fqn: str) -> str:
@@ -25,6 +368,37 @@ def _plan_column_from_fqn(column_fqn: str) -> str:
     if len(parts) >= 3:
         return ".".join(parts[-3:])
     return column_fqn
+
+
+def _plan_column_table_in_scope(
+    column_fqn: str,
+    *,
+    table_ids: list[int],
+    tables_by_id: dict[int, dict[str, Any]],
+) -> bool:
+    """Mapping FQN is resolved only when that table is already in the plan set."""
+
+    parts = [part for part in column_fqn.split(".") if part]
+    if len(parts) < 2:
+        return False
+    table = parts[-2].casefold()
+    schema = parts[-3].casefold() if len(parts) >= 3 else ""
+    allowed: set[tuple[str, str]] = set()
+    for table_id in table_ids:
+        row = tables_by_id.get(int(table_id))
+        if not row:
+            continue
+        allowed.add(
+            (
+                str(row.get("schema_name") or "").casefold(),
+                str(row.get("original_name") or row.get("name") or "").casefold(),
+            )
+        )
+    if (schema, table) in allowed:
+        return True
+    if schema:
+        return False
+    return any(name == table for _, name in allowed)
 
 
 def _with_metric_filter_requirements(
@@ -57,6 +431,46 @@ def _with_metric_filter_requirements(
             value_text=metric,
         )
     )
+    return requirements
+
+
+def _with_mapping_filter_requirements(
+    analysis: QueryAnalysis,
+    mappings: list[dict[str, Any]] | None = None,
+) -> list[FilterRequirement]:
+    """Promote verified Store mappings mentioned in the question into filter slots.
+
+    Generic: no table/column names. Analyzer slots are not required.
+    """
+    requirements = list(analysis.filter_requirements)
+    promoted_fqns: set[str] = set()
+    for mapping in mappings or []:
+        natural = str(mapping.get("natural_value") or "").strip()
+        code = str(mapping.get("code_value") or "").strip()
+        column_fqn = str(mapping.get("column_fqn") or "").strip()
+        if not natural or not code or not column_fqn:
+            continue
+        if any(
+            _mapping_matches_value_text(mapping, requirement.value_text)
+            or (
+                requirement.value_text
+                and _compact_text(requirement.value_text) == _compact_text(natural)
+            )
+            for requirement in requirements
+        ):
+            continue
+        fqn_key = column_fqn.casefold()
+        if fqn_key in promoted_fqns:
+            continue
+        promoted_fqns.add(fqn_key)
+        requirements.append(
+            FilterRequirement(
+                meaning=f"코드매핑:{natural}",
+                required=True,
+                operator_hint="EQ",
+                value_text=natural,
+            )
+        )
     return requirements
 
 
@@ -110,6 +524,7 @@ async def _resolve_filters(
     for index, requirement in enumerate(requirements):
         embedding = embeddings.get(f"filter:{index}")
         best: dict[str, Any] | None = None
+        options: list[dict[str, Any]] = []
         if embedding is not None and table_ids:
             grouped = await repository.search_columns(
                 embedding,
@@ -130,24 +545,75 @@ async def _resolve_filters(
                     ),
                 )
 
-        mapped = next(
-            (
-                mapping
-                for mapping in mappings
-                if _mapping_matches_value_text(mapping, requirement.value_text)
-            ),
-            None,
-        )
+        period = _period_from_requirement(requirement, requirements)
+        if period is not None:
+            date_options = [item for item in options if _column_is_date_like(item)]
+            measure_dates = [
+                item
+                for item in date_options
+                if not _column_looks_like_audit_date(item)
+            ]
+            date_pool = measure_dates or date_options
+            date_column = None
+            if date_pool:
+                date_column = max(
+                    date_pool,
+                    key=lambda item: _filter_column_score(requirement, item),
+                )
+            elif _column_is_date_like(best) and not _column_looks_like_audit_date(best):
+                date_column = best
+            elif _column_is_date_like(best) and not date_options:
+                date_column = best
+            if date_column is not None:
+                table = (
+                    tables_by_id.get(int(date_column["table_id"]))
+                    if date_column.get("table_id") is not None
+                    else None
+                )
+                if table is not None:
+                    operator, value = _period_bind_value(date_column, period)
+                    column = (
+                        f"{table.get('schema_name')}."
+                        f"{table.get('original_name') or table.get('name')}."
+                        f"{date_column.get('name')}"
+                    )
+                    planned.append(
+                        PlannedFilter(
+                            meaning=requirement.meaning,
+                            column=column,
+                            operator=operator,
+                            value=value,
+                            resolution_status="resolved",
+                            confidence=1.0,
+                        )
+                    )
+                    continue
+
+        mapped_hits = [
+            mapping
+            for mapping in _mapping_cluster(mappings, requirement)
+            if mapping.get("column_fqn")
+            and _plan_column_table_in_scope(
+                str(mapping["column_fqn"]),
+                table_ids=table_ids,
+                tables_by_id=tables_by_id,
+            )
+        ]
         # Prefer verified code mapping column over weak semantic column hits.
-        if mapped is not None and mapped.get("column_fqn"):
-            column = _plan_column_from_fqn(str(mapped["column_fqn"]))
-            value = str(mapped.get("code_value") or requirement.value_text)
+        if mapped_hits:
+            mapped_fqn = str(mapped_hits[0]["column_fqn"])
+            column = _plan_column_from_fqn(mapped_fqn)
+            codes = [
+                str(mapping.get("code_value") or "").strip()
+                for mapping in mapped_hits
+                if str(mapping.get("code_value") or "").strip()
+            ]
             planned.append(
                 PlannedFilter(
                     meaning=requirement.meaning,
                     column=column,
-                    operator="EQ",
-                    value=value,
+                    operator="IN" if len(codes) > 1 else "EQ",
+                    value=",".join(codes) if len(codes) > 1 else codes[0],
                     resolution_status="resolved",
                     confidence=1.0,
                 )
@@ -160,9 +626,19 @@ async def _resolve_filters(
             else 0.0
         ))
         is_resolved = bool(best and score >= minimum_similarity)
+        if (
+            is_resolved
+            and requirement.value_text
+            and not _surface_value_may_resolve(
+                requirement.value_text,
+                best,
+                requirement.meaning,
+            )
+        ):
+            is_resolved = False
         table = (
             tables_by_id.get(int(best["table_id"]))
-            if best and best.get("table_id") is not None
+            if best and best.get("table_id") is not None and is_resolved
             else None
         )
         column = (
@@ -211,7 +687,7 @@ def _propagate_filters_along_fk(
     anchor_table_ids: set[int],
     tables_by_id: dict[int, dict[str, Any]],
 ) -> list[PlannedFilter]:
-    """Copy resolved EQ filters across one approved FK hop onto plan/bridge tables.
+    """Copy resolved EQ/IN filters across one approved FK hop onto plan/bridge tables.
 
     Uses only Store `t2s_fk_constraints` edges. Does not invent table/column names.
     """
@@ -257,7 +733,7 @@ def _propagate_filters_along_fk(
     for filter_ in planned:
         if filter_.resolution_status != "resolved":
             continue
-        if filter_.operator != "EQ" or filter_.value is None or not filter_.column:
+        if filter_.operator not in {"EQ", "IN"} or filter_.value is None or not filter_.column:
             continue
         endpoint = _parse_plan_column(filter_.column)
         if endpoint is None:
@@ -273,7 +749,7 @@ def _propagate_filters_along_fk(
                     table_row.get("original_name") or table_row.get("name") or table
                 )
             target_column = f"{schema}.{table}.{column}"
-            key = (target_column, "EQ", filter_.value)
+            key = (target_column, filter_.operator, filter_.value)
             if key in existing:
                 continue
             existing.add(key)
@@ -281,7 +757,7 @@ def _propagate_filters_along_fk(
                 PlannedFilter(
                     meaning=f"{filter_.meaning}→FK",
                     column=target_column,
-                    operator="EQ",
+                    operator=filter_.operator,
                     value=filter_.value,
                     resolution_status="resolved",
                     confidence=min(1.0, float(filter_.confidence or 0.0) * 0.95),

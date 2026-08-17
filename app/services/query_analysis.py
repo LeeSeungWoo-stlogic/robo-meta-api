@@ -35,6 +35,14 @@ QUERY_ANALYSIS_PROMPT = """\
 - 필터 연산자는 EQ, NE, IN, BETWEEN, GT, GTE, LT, LTE, LIKE, ILIKE,
   IS_NULL, IS_NOT_NULL 중 하나만 사용하세요.
 - 값이 원문에 있으면 value_text에 원문 표현을 보존하세요.
+- 사용자 메시지에 스토어 후보(용어·약어·값매핑·논리명)가 있으면 그 후보만
+  해석 재료로 쓰세요. 후보에 있는 column_fqn만 인용하고 없는 물리표를 만들지 마세요.
+- 접두로 여러 라벨이 있으면 entities_include와 filter value_text에
+  질문과 가장 맞는 스토어 라벨 하나를 쓰세요.
+- storage_type_hint는 물리 테이블명이 아니라 입도만 쓰세요: month|day|hour|instant|null.
+- "4월"·"어제"는 필터 기간입니다. 사용자가 월별/일별/시간별을 말하지 않으면
+  기간 길이에 맞는 입도를 힌트로 두세요 (한 달→month, 어제→day).
+- 기간 팩트 역할은 "월별 계측 팩트"처럼 입도를 넣고, 실제 테이블명을 search_terms에 넣지 마세요.
 - 출력은 아래 구조의 단일 JSON 객체만 반환하세요.
 
 {
@@ -76,6 +84,14 @@ QUERY_ANALYSIS_PROMPT = """\
   }
 }
 """
+
+
+def _user_payload(question: str, store_hits: dict[str, Any] | None) -> str:
+    text = question.strip()
+    if not store_hits:
+        return text
+    blob = json.dumps(store_hits, ensure_ascii=False, default=str)
+    return f"{text}\n\n스토어 후보:\n{blob}"
 
 
 def _unique(values: list[str], *, limit: int) -> list[str]:
@@ -227,7 +243,11 @@ def degraded_analysis(reason: str) -> QueryAnalysis:
 
 
 class QueryAnalyzer:
-    async def analyze(self, question: str) -> QueryAnalysis:
+    async def analyze(
+        self,
+        question: str,
+        store_hits: dict[str, Any] | None = None,
+    ) -> QueryAnalysis:
         runtime = get_runtime()
         if not runtime.decision.hyde_enabled:
             return degraded_analysis("HyDE 의미 분해가 비활성화되어 있습니다.")
@@ -247,10 +267,12 @@ class QueryAnalyzer:
                 model=runtime.decision.hyde_model,
                 messages=[
                     {"role": "system", "content": QUERY_ANALYSIS_PROMPT},
-                    {"role": "user", "content": question.strip()},
+                    {
+                        "role": "user",
+                        "content": _user_payload(question, store_hits),
+                    },
                 ],
-                temperature=0.0,
-                max_tokens=1200,
+                max_completion_tokens=1200,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or ""
@@ -300,11 +322,20 @@ def role_embedding_text(
         role.role,
         role.role,
         *role.search_terms,
-        analysis.intent,
-        analysis.measurement.metric or "",
         *related_keys,
-        *analysis.search_keywords.tables,
     ]
+    text = f"{role.role} {' '.join(role.search_terms)}".casefold()
+    fact_seed = "마스터" not in text and (
+        "팩트" in text or "시계열" in text
+    )
+    if not fact_seed:
+        parts.extend(
+            [
+                analysis.intent,
+                analysis.measurement.metric or "",
+                *analysis.search_keywords.tables,
+            ]
+        )
     return "\n".join(value.strip() for value in parts if value and value.strip())
 
 

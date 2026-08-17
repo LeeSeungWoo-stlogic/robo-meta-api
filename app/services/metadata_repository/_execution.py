@@ -40,7 +40,9 @@ class ExecutionSourceMixin:
                  jsonb_agg(
                    DISTINCT jsonb_build_object(
                      'schema_name', t.schema_name,
-                     'original_name', t.original_name
+                     'original_name', t.original_name,
+                     'subject_area', NULLIF(t.metadata->>'subject_area', ''),
+                     'subject_area_override', NULLIF(t.metadata->>'subject_area_override', '')
                    )
                  ) FILTER (
                    WHERE t.original_name IS NOT NULL
@@ -91,6 +93,8 @@ class ExecutionSourceMixin:
             {
                 "schema_name": str(item.get("schema_name") or ""),
                 "original_name": str(item.get("original_name") or ""),
+                "subject_area": str(item.get("subject_area") or ""),
+                "subject_area_override": str(item.get("subject_area_override") or ""),
             }
             for item in refs
             if isinstance(item, dict)

@@ -1,16 +1,39 @@
-# robo-meta-api
+# robo-meta-api 1.0
 
 자연어 질의를 분석해 SQL 생성에 필요한 최소 Metadata Context를 제공하고, 검증된
 읽기 전용 SQL을 federation backend로 실행하는 FastAPI 서비스입니다.
 
-Metadata Store(K-AIR-metadata-platform)의 승인·활성화된 테이블, 컬럼, embedding,
-FK 및 논리 join hint를 조회하며 API가 SQL을 직접 생성하지는 않습니다.
+서비스 버전 **1.0.0**. Metadata Store(K-AIR-metadata-platform)의 승인·활성화된 테이블, 컬럼, embedding,
+FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생성하지 않고,
+`POST /t2sql`이 확정 SQL과 used 메타를 반환합니다. `/data_decision` 0.7 계약은 무변경입니다.
 
-**Serving MVP 소비면(동결):** `POST /data_decision` · `POST /query_execute`  
+**Serving MVP 소비면:** `POST /data_decision` · `POST /t2sql` · `POST /query_execute`  
+(`/data_decision` 0.7 동결. `/t2sql`은 동일 Serving 6표 추가 READ)  
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
 (Wave 0–3 적용 완료 기준, 2026-08-06)
 
-## 최근 작업 요약 (2026-08-11)
+## 1.0 엔진 업데이트 (2026-08-17)
+
+Store 승인 메타만으로 decide/T2SQL을 조립한다. 질문 ID·물리 표명·TAGSN 하드코딩 없음.
+라이브 검사 산출(`t2sql_test/`, `_tmp_*`)은 Git 추적에서 제외한다. 단위 테스트 `tests/`는 계약을 잠근다.
+
+| 항목 | 내용 |
+| --- | --- |
+| **기간·입도** | 기간을 팩트보다 먼저 파싱. ISO 주. 질문 문구 입도 > analyzer hint. 연 창이 day/hour를 월 팩트로 덮지 않음 |
+| **시계열 입도** | 월+추이/변화/추세/트렌드 → 일 팩트. 일+동일 시계열 → 시간 팩트. `월별` 등 명시 입도 우선 |
+| **time_role** | `latest` / `extremum` / `none`. 목록·추이는 LIMIT 없음. 극값은 측정컬럼 ORDER BY + LIMIT 1 |
+| **표 선정** | 카탈로그-only JOIN 드롭. 팩트 [0]/LLM 추측 금지. JOIN은 팩트(없으면 매핑) 앵커만 |
+| **별칭·그룹** | 유역/권역/지역본부/유역본부/권역본부. `본부`는 치환 없이 그룹만. `발전` 미사용. `X별`/`X들`은 표 시드 |
+| **식별 컬럼** | 차원은 명칭·코드. 설명/비고/광역/사무소 등은 제외 |
+| **시계열 출력** | 측정점 키 + 태그 명칭/설명 + 시각 + 원천 VAL. 전일 증감 창작 없음 |
+| **측정점 교집합** | 별량 코드매핑 AND 태그 설명에 측정어. `사용안함` 기본 제외 |
+| **태그 마스터** | 시계열이면 SELECT 대상. 식별은 PK+명칭/설명/별칭. 주소·경로·산출·사이트·상위 코드는 식별에서 제외. JOIN 키는 ON만 |
+| **기간 바인딩** | `YYYYMM` LIKE, `YYYYMMDD`/`YYYYMMDDHH` BETWEEN |
+| **범위** | `/data_decision` 0.7 응답 키 동결. Metadata Store 스키마·값매핑 미변경 |
+
+관련 테스트: `tests/test_engine_contracts.py` · `tests/test_store_first.py` · `tests/test_time_grain.py`
+
+## 이전 작업 요약 (2026-08-11)
 
 | 항목 | 내용 |
 | --- | --- |
@@ -88,6 +111,14 @@ LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector
 - **filter**: verified value mapping의 컬럼·코드값을 semantic 컬럼 후보보다 우선. metric은 VM 매칭 시에만 필터 승격. 승인 FK 1 hop으로 plan/bridge에 EQ 필터 전파
 - **embedding**: OpenAI `text-embedding-3-*`는 Store와 맞추기 위해 `dimensions`(예: 1024)를 요청하고, GenOS bge-m3 등 matryoshka 미지원 모델에는 해당 필드를 넣지 않음
 
+## `/t2sql`
+
+자연어로 읽기 전용 SQL과 그 SQL에 쓰인 메타(`used_metadata`)를 반환합니다.
+성공 SQL은 `/query_execute`에 그대로 넣을 수 있는 SourceName 3단 수식입니다.
+`timeout_s`는 파이프라인 벽시계이며 미지정 시 **60초**입니다.
+모델은 YAML `t2sql.model` 또는 env `T2SQL_LLM_MODEL`(우선)이며 `app/config.py`에는
+T2SQL 키를 넣지 않습니다. `/data_decision` Request/Response 타입을 재사용하지 않습니다.
+
 ## `/query_execute`
 
 외부 SQL 생성기가 작성한 SQL을 다음 정책으로 검사한 뒤 MindsDB HTTP SQL API에
@@ -121,6 +152,7 @@ LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector
 |---|---|---|
 | `GET` | `/health` | Metadata Store 및 execution backend 설정 확인 |
 | `POST` | `/data_decision` | 자연어 질의 분석과 Metadata Context 계획 |
+| `POST` | `/t2sql` | 자연어 → 확정 SQL + used 메타 (`timeout_s` 미지정 시 60초) |
 | `POST` | `/query_execute` | 검증된 읽기 전용 SQL 실행 |
 | `POST` | `/meta/batch` | metadata batch 조회 |
 | `POST` | `/meta/table` | table metadata 조회 |
@@ -140,7 +172,7 @@ OpenAPI: [`docs/openapi.json`](docs/openapi.json) · 로컬 Swagger `/docs`
 
 ADR-002 Wave 2부터 `/semantic_decision`은 항상 **410**을 반환합니다.
 Metadata Store의 semantic pack DDL도 DROP되었습니다. Serving MVP 소비면은
-`/data_decision`과 `/query_execute`입니다.
+`/data_decision`, `/t2sql`, `/query_execute`입니다.
 
 ## 실행 전제
 
@@ -177,6 +209,9 @@ export OPENAI_API_KEY='<api-key>'
 - `execution`: MindsDB endpoint 및 SQL 제한(timeout/rows). **소스 등록 금지**
   (`source_bindings` / `default_source_instance_id` / integration·catalog 키 존재 시
   로드 실패). 소스 정본은 Metadata Store `t2s_datasources.profile_id`.
+- `t2sql`: `/t2sql` LLM 모델·파이프라인 제한. `model` 미설정(및 env `T2SQL_LLM_MODEL`
+  공백)이면 부팅은 되고 `POST /t2sql`은 200 + `UPSTREAM_UNAVAILABLE`.
+  `timeout_s` 미지정 시 파이프라인 벽시계 기본 60초 (`/query_execute.timeout_s`와 다름).
 
 요청의 `source_instance_id`로 Store에서 binding을 조립합니다. Store의
 `mindsdb_integration`/`mindsdb_catalog`가 비어 있거나 서로 다르면 해당 요청은

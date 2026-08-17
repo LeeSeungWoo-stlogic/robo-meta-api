@@ -22,6 +22,10 @@ venv/
 *.log
 logs/
 *.jsonl.tmp
+_tmp_*
+
+# --- 라이브 T2SQL 검사 (단위 tests/ 는 추적) ---
+t2sql_test/
 
 # --- IDE ---
 .vscode/
