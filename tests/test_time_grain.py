@@ -15,6 +15,8 @@ from app.schemas import (
     SchemaRoleRequirement,
 )
 from app.services.decision_postgres.grain import (
+    empty_result_fallback_grain,
+    explicit_time_grain,
     fact_role_for_grain,
     is_measurement_role,
     is_period_fact_role,
@@ -75,6 +77,28 @@ class TimeGrainTests(unittest.TestCase):
             resolve_time_grain("2025년 공주정수장의 월별 TOC 농도 평균 알려줘"),
             "month",
         )
+
+    def test_period_month_empty_falls_back_to_day(self) -> None:
+        self.assertIsNone(explicit_time_grain("단양정수장 2025년 8월 탁도 알려줘"))
+        self.assertEqual(
+            empty_result_fallback_grain("단양정수장 2025년 8월 탁도 알려줘"),
+            "day",
+        )
+
+    def test_explicit_month_does_not_empty_fallback(self) -> None:
+        self.assertEqual(
+            explicit_time_grain("단양정수장 2025년 8월 월별 탁도 알려줘"),
+            "month",
+        )
+        self.assertIsNone(
+            empty_result_fallback_grain("단양정수장 2025년 8월 월별 탁도 알려줘")
+        )
+        self.assertIsNone(
+            empty_result_fallback_grain("단양정수장 2025년 8월 월 집계 탁도 알려줘")
+        )
+
+    def test_non_month_query_does_not_empty_fallback(self) -> None:
+        self.assertIsNone(empty_result_fallback_grain("화성정수장 평균 탁도"))
 
     def test_month_window_with_event_time_is_day(self) -> None:
         self.assertEqual(

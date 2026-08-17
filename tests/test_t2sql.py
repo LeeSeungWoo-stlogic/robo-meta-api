@@ -68,7 +68,17 @@ FACT_SQL_PUBLIC = (
     "SELECT AVG(t1.`val`) FROM `RWIS`.`RDF01HH_TB` AS t1 "
     "WHERE t1.`suj_code` = '617'"
 )
-FACT_SQL_NO_WHERE_PUBLIC = "SELECT AVG(t1.`val`) FROM `RWIS`.`RDF01HH_TB` AS t1"
+FACT_SQL_NO_WHERE_PUBLIC = (
+    "SELECT AVG(t1.`val`) FROM `RWIS`.`RDF01HH_TB` AS t1"
+)
+MONTH_FACT_SQL = (
+    "SELECT AVG(val) FROM `RWIS`.`RWIS`.`RDD01MM_TB` "
+    "WHERE suj_code = '358'"
+)
+DAY_FACT_SQL = (
+    "SELECT AVG(val) FROM `RWIS`.`RWIS`.`RDD01DD_TB` "
+    "WHERE suj_code = '358'"
+)
 
 
 def _norm_sql(sql: str | None) -> str:
@@ -386,6 +396,154 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         probe_sqls = result.probe_summary.probe_sqls
         self.assertTrue(probe_sqls)
         self.assertNotEqual(result.sql, probe_sqls[0])
+
+    async def test_empty_month_fact_retries_day_grain(self):
+        captured = {"overrides": [], "validate_sqls": []}
+        resolved_entity = _decision().resolved_entities[0].model_copy(
+            update={"values": [ResolvedValue(code="358", confidence=1.0)]}
+        )
+
+        def month_decision():
+            return _decision(
+                resolved_entities=[resolved_entity],
+                query_plan=QueryPlan(
+                    completeness="complete",
+                    required_tables=[
+                        PlannedTable(
+                            schema_name="RWIS",
+                            table_name="RDITAG_TB",
+                            role="태그 마스터",
+                        ),
+                        PlannedTable(
+                            schema_name="RWIS",
+                            table_name="RDD01MM_TB",
+                            role="월별 계측 팩트",
+                        ),
+                    ],
+                ),
+                candidates=[
+                    DecisionCandidate(
+                        db="RWIS",
+                        schema_name="RWIS",
+                        table_name="RDITAG_TB",
+                        score=0.9,
+                        subject_area="master",
+                    ),
+                    DecisionCandidate(
+                        db="RWIS",
+                        schema_name="RWIS",
+                        table_name="RDD01MM_TB",
+                        score=0.8,
+                        subject_area="agg",
+                    ),
+                ],
+            )
+
+        def day_decision():
+            return _decision(
+                resolved_entities=[resolved_entity],
+                query_plan=QueryPlan(
+                    completeness="complete",
+                    required_tables=[
+                        PlannedTable(
+                            schema_name="RWIS",
+                            table_name="RDITAG_TB",
+                            role="태그 마스터",
+                        ),
+                        PlannedTable(
+                            schema_name="RWIS",
+                            table_name="RDD01DD_TB",
+                            role="일별 계측 팩트",
+                        ),
+                    ],
+                ),
+                candidates=[
+                    DecisionCandidate(
+                        db="RWIS",
+                        schema_name="RWIS",
+                        table_name="RDITAG_TB",
+                        score=0.9,
+                        subject_area="master",
+                    ),
+                    DecisionCandidate(
+                        db="RWIS",
+                        schema_name="RWIS",
+                        table_name="RDD01DD_TB",
+                        score=0.8,
+                        subject_area="agg",
+                    ),
+                ],
+            )
+
+        async def decide(repository, **kwargs):
+            captured["overrides"].append(kwargs.get("grain_override"))
+            if kwargs.get("grain_override") == "day":
+                return day_decision()
+            return month_decision()
+
+        async def generate(question, payload, timeout_s):
+            plan = payload.get("query_plan") or {}
+            names = [
+                str(item.get("table_name") or "")
+                for item in (plan.get("required_tables") or [])
+            ]
+            if "RDD01DD_TB" in names:
+                return DAY_FACT_SQL
+            return MONTH_FACT_SQL
+
+        async def execute(**kwargs):
+            sql = kwargs.get("sql") or ""
+            if kwargs.get("caller") == "t2sql_validate":
+                captured["validate_sqls"].append(sql)
+                if "RDD01MM_TB" in sql.upper():
+                    return {
+                        "status": "ok",
+                        "columns": ["avg"],
+                        "rows": [],
+                        "row_count": 0,
+                    }
+                return {
+                    "status": "ok",
+                    "columns": ["avg"],
+                    "rows": [[1.2]],
+                    "row_count": 1,
+                }
+            return await _ok_execute(**kwargs)
+
+        set_t2sql_decide(decide)
+        set_t2sql_execute(execute)
+        set_t2sql_llm(confirm=_confirm_ok, generate=generate)
+        result = await run_t2sql(
+            FakeRepository(
+                _state(
+                    allowed_objects=["RDITAG_TB", "RDD01MM_TB", "RDD01DD_TB"],
+                    allowed_object_refs=[
+                        {
+                            "schema_name": "RWIS",
+                            "original_name": "RDITAG_TB",
+                            "subject_area": "master",
+                        },
+                        {
+                            "schema_name": "RWIS",
+                            "original_name": "RDD01MM_TB",
+                            "subject_area": "fact",
+                        },
+                        {
+                            "schema_name": "RWIS",
+                            "original_name": "RDD01DD_TB",
+                            "subject_area": "fact",
+                        },
+                    ],
+                )
+            ),
+            T2SqlRequest(query="단양정수장 2025년 8월 탁도 알려줘"),
+        )
+        self.assertEqual(result.sql_status, "generated")
+        self.assertEqual(captured["overrides"], [None, "day"])
+        self.assertEqual(len(captured["validate_sqls"]), 2)
+        self.assertIn("RDD01DD_TB", result.sql or "")
+        self.assertNotIn("RDD01MM_TB", result.sql or "")
+        self.assertEqual(result.sql_reason, "월 팩트 0건으로 일 팩트를 재조회했습니다")
 
     async def test_generate_payload_uses_plan_not_candidates(self):
         captured: dict = {}

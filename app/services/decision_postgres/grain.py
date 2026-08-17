@@ -49,7 +49,7 @@ _EXPLICIT: tuple[tuple[TimeGrain, tuple[str, ...]], ...] = (
     ("instant", ("실시간", "순시", "현재값")),
     ("hour", ("시간별", "시간 단위", "매시간")),
     ("day", ("일별", "일자별", "하루 단위")),
-    ("month", ("월별", "월 단위")),
+    ("month", ("월별", "월 단위", "월 집계")),
 )
 
 _MONTH_PERIOD = re.compile(
@@ -78,6 +78,31 @@ def fallback_grains(grain: str | None) -> tuple[TimeGrain, ...]:
     if key not in _FALLBACK:
         return ()
     return _FALLBACK[key]  # type: ignore[index, return-value]
+
+
+def explicit_time_grain(query: str) -> TimeGrain | None:
+    """Grain words the question locked. Period-only '8월' is not explicit."""
+
+    q = query or ""
+    for grain, terms in _EXPLICIT:
+        if any(term in q for term in terms):
+            return grain
+    return None
+
+
+def empty_result_fallback_grain(query: str) -> TimeGrain | None:
+    """After a 0-row execute, retry the next finer family once.
+
+    Period-inferred month ('8월 탁도') may fall back to day.
+    Explicit 월별/월 집계 stays on the month fact.
+    """
+
+    if explicit_time_grain(query) is not None:
+        return None
+    if resolve_time_grain(query) != "month":
+        return None
+    finer = fallback_grains("month")
+    return finer[0] if finer else None
 
 
 def _asks_clock_answer(query: str) -> bool:

@@ -21,6 +21,7 @@ from ...schemas import (
     T2SqlUsedMetadata,
 )
 from ..decision_postgres.decide import decide as decide_postgres
+from ..decision_postgres.grain import TimeGrain, empty_result_fallback_grain
 from ..decision_postgres.period import parse_korean_period
 from ..decision_postgres.store_first import (
     is_fact_unresolved_reason,
@@ -171,16 +172,30 @@ async def _execute(**kwargs: Any) -> dict[str, Any]:
     return await fn(**kwargs)
 
 
-async def _decide(repository: Any, req: T2SqlRequest) -> DecisionResponse:
+def _empty_ok_result(result: dict[str, Any]) -> bool:
+    if result.get("status") != "ok":
+        return False
+    if int(result.get("row_count") or 0) > 0:
+        return False
+    return not (result.get("rows") or [])
+
+
+async def _decide(
+    repository: Any,
+    req: T2SqlRequest,
+    grain_override: TimeGrain | None = None,
+) -> DecisionResponse:
     fn = _decide_override or decide_postgres
-    return await fn(
-        repository,
-        query=req.query,
-        include_matched_columns=True,
-        column_top_m=req.column_top_m,
-        table_limit=req.table_limit,
-        auto_resolve_entities=req.auto_resolve_entities,
-    )
+    kwargs: dict[str, Any] = {
+        "query": req.query,
+        "include_matched_columns": True,
+        "column_top_m": req.column_top_m,
+        "table_limit": req.table_limit,
+        "auto_resolve_entities": req.auto_resolve_entities,
+    }
+    if grain_override is not None:
+        kwargs["grain_override"] = grain_override
+    return await fn(repository, **kwargs)
 
 
 async def _source_id(repository: Any, decision: DecisionResponse) -> str | None:
@@ -613,146 +628,193 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
         for item in (scope.get("allowed_object_refs") or [])
         if item.get("schema_name") and item.get("original_name")
     }
-    for _ in range(attempts):
-        if budget.expired():
-            return _empty(
-                generation_id=generation_id,
-                started=started,
-                status="failed",
-                code="TIMEOUT",
-                reason="파이프라인 시간 초과",
-                probe=probe,
-            )
-        try:
-            sql_text = await generate_sql(
-                req.query,
-                {
-                    "query_analysis": analysis.model_dump(),
-                    "query_plan": plan.model_dump(by_alias=True) if plan else None,
-                    "glossary_routes": [
-                        item.model_dump() for item in decision.glossary_routes
-                    ],
-                    "resolved_entities": [
-                        item.model_dump() for item in aligned_entities
-                    ],
-                    "probe_rows": probe_rows,
-                    "source_name": source_name or resolved.source_name,
-                    "table_notes": _plan_table_notes(decision, plan),
-                },
-                llm_timeout(),
-            )
-        except Exception as exc:
-            return _empty(
-                generation_id=generation_id,
-                started=started,
-                status="failed",
-                code="UPSTREAM_UNAVAILABLE",
-                reason=f"generate LLM 실패: {exc}",
-                probe=probe,
-            )
-        sql_text = _strip_sql_fence(sql_text)
-        sql_text = quote_resolved_code_literals(sql_text, plan)
-        if sql_text.upper().startswith("NO_SQL"):
-            return _empty(
-                generation_id=generation_id,
-                started=started,
-                status="failed",
-                code="GENERATION_FAILED",
-                reason=sql_text,
-                probe=probe,
-            )
-        if not sql_text:
-            last_guard = "빈 SQL"
-            continue
-        try:
-            assert_sql_in_allowlist(sql_text, store_allowed)
-            if _uses_unfiltered_fact(sql_text, probe_allowed):
-                raise GuardError("fact 테이블은 WHERE 필터가 필요합니다")
-            missing_on = missing_approved_on_predicates(
+    first_success: T2SqlResponse | None = None
+    grain_retry_used = False
+    empty_month_reason = "월 팩트 0건으로 일 팩트를 재조회했습니다"
+    while True:
+        success: T2SqlResponse | None = None
+        empty_ok = False
+        sql_text = ""
+        last_guard = None
+        for _ in range(attempts):
+            if budget.expired():
+                return first_success or _empty(
+                    generation_id=generation_id,
+                    started=started,
+                    status="failed",
+                    code="TIMEOUT",
+                    reason="파이프라인 시간 초과",
+                    probe=probe,
+                )
+            try:
+                sql_text = await generate_sql(
+                    req.query,
+                    {
+                        "query_analysis": analysis.model_dump(),
+                        "query_plan": plan.model_dump(by_alias=True) if plan else None,
+                        "glossary_routes": [
+                            item.model_dump() for item in decision.glossary_routes
+                        ],
+                        "resolved_entities": [
+                            item.model_dump() for item in aligned_entities
+                        ],
+                        "probe_rows": probe_rows,
+                        "source_name": source_name or resolved.source_name,
+                        "table_notes": _plan_table_notes(decision, plan),
+                    },
+                    llm_timeout(),
+                )
+            except Exception as exc:
+                if first_success is not None:
+                    return first_success
+                return _empty(
+                    generation_id=generation_id,
+                    started=started,
+                    status="failed",
+                    code="UPSTREAM_UNAVAILABLE",
+                    reason=f"generate LLM 실패: {exc}",
+                    probe=probe,
+                )
+            sql_text = _strip_sql_fence(sql_text)
+            sql_text = quote_resolved_code_literals(sql_text, plan)
+            if sql_text.upper().startswith("NO_SQL"):
+                if first_success is not None:
+                    return first_success
+                return _empty(
+                    generation_id=generation_id,
+                    started=started,
+                    status="failed",
+                    code="GENERATION_FAILED",
+                    reason=sql_text,
+                    probe=probe,
+                )
+            if not sql_text:
+                last_guard = "빈 SQL"
+                continue
+            try:
+                assert_sql_in_allowlist(sql_text, store_allowed)
+                if _uses_unfiltered_fact(sql_text, probe_allowed):
+                    raise GuardError("fact 테이블은 WHERE 필터가 필요합니다")
+                missing_on = missing_approved_on_predicates(
+                    sql_text,
+                    plan.join_paths if plan else [],
+                )
+                if missing_on:
+                    raise GuardError("승인 JOIN ON이 빠짐: " + ",".join(missing_on))
+                extra_tables = _unplanned_sql_tables(sql_text, plan)
+                if extra_tables:
+                    raise GuardError("계획에 없는 표: " + ",".join(extra_tables))
+                used_keys = used_table_keys(sql_text)
+                validate_sql = with_limit(sql_text, settings.validate_max_rows)
+                requested = sorted({table for _, table in used_keys if table})
+                resolved_validate = await resolve_execution_context(
+                    repository,
+                    source_instance_id=source_id,
+                    requested_objects=requested or None,
+                )
+                result = await _execute(
+                    sql=validate_sql,
+                    timeout_s=stmt_timeout(max_stmt),
+                    max_rows=settings.validate_max_rows,
+                    caller="t2sql_validate",
+                    execution_context=resolved_validate,
+                )
+            except GuardError as exc:
+                last_guard = str(exc)
+                continue
+            except ExecutionBindingError as exc:
+                last_guard = str(exc)
+                continue
+            if result.get("status") == "timeout":
+                return first_success or T2SqlResponse(
+                    generation_id=generation_id,
+                    sql=_public_sql(sql_text, resolved) if sql_text else None,
+                    sql_status="failed",
+                    sql_reason=str(result.get("error") or "validate timeout"),
+                    sql_reason_code="TIMEOUT",
+                    elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
+                    used_metadata=used_after_decide,
+                    probe_summary=probe,
+                )
+            if result.get("status") == "rejected":
+                last_guard = str(result.get("error") or "rejected")
+                continue
+            if result.get("status") in {"error", "db_error"}:
+                last_guard = str(result.get("error") or result.get("status"))
+                logger.warning(
+                    "t2sql validate db_error generation_id=%s sql=%s error=%s",
+                    generation_id,
+                    sql_text,
+                    last_guard,
+                )
+                continue
+            public_ec = _public_ec_from_resolved(resolved_validate)
+            used = filter_used_metadata(
+                decision,
                 sql_text,
-                plan.join_paths if plan else [],
+                include_matched_columns=req.include_matched_columns,
+                execution_context=public_ec,
             )
-            if missing_on:
-                raise GuardError("승인 JOIN ON이 빠짐: " + ",".join(missing_on))
-            extra_tables = _unplanned_sql_tables(sql_text, plan)
-            if extra_tables:
-                raise GuardError("계획에 없는 표: " + ",".join(extra_tables))
-            used_keys = used_table_keys(sql_text)
-            validate_sql = with_limit(sql_text, settings.validate_max_rows)
-            requested = sorted({table for _, table in used_keys if table})
-            resolved_validate = await resolve_execution_context(
-                repository,
-                source_instance_id=source_id,
-                requested_objects=requested or None,
-            )
-            result = await _execute(
-                sql=validate_sql,
-                timeout_s=stmt_timeout(max_stmt),
-                max_rows=settings.validate_max_rows,
-                caller="t2sql_validate",
-                execution_context=resolved_validate,
-            )
-        except GuardError as exc:
-            last_guard = str(exc)
-            continue
-        except ExecutionBindingError as exc:
-            last_guard = str(exc)
-            continue
-        if result.get("status") == "timeout":
-            return T2SqlResponse(
+            success = T2SqlResponse(
                 generation_id=generation_id,
-                sql=_public_sql(sql_text, resolved) if sql_text else None,
-                sql_status="failed",
-                sql_reason=str(result.get("error") or "validate timeout"),
-                sql_reason_code="TIMEOUT",
+                sql=_public_sql(sql_text, resolved),
+                sql_status="generated",
+                sql_reason=None,
+                sql_reason_code=None,
                 elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
-                used_metadata=used_after_decide,
+                used_metadata=used,
                 probe_summary=probe,
             )
-        if result.get("status") == "rejected":
-            last_guard = str(result.get("error") or "rejected")
-            continue
-        if result.get("status") in {"error", "db_error"}:
-            last_guard = str(result.get("error") or result.get("status"))
-            logger.warning(
-                "t2sql validate db_error generation_id=%s sql=%s error=%s",
-                generation_id,
-                sql_text,
-                last_guard,
-            )
-            continue
-        public_ec = _public_ec_from_resolved(resolved_validate)
-        used = filter_used_metadata(
-            decision,
-            sql_text,
-            include_matched_columns=req.include_matched_columns,
-            execution_context=public_ec,
+            empty_ok = _empty_ok_result(result)
+            break
+        if success is not None and empty_ok and not grain_retry_used:
+            fallback = empty_result_fallback_grain(req.query)
+            if fallback:
+                retry_decision = await _decide(
+                    repository,
+                    req,
+                    grain_override=fallback,
+                )
+                retry_plan = retry_decision.query_plan
+                if retry_plan is not None and not fact_left_unresolved(retry_plan):
+                    grain_retry_used = True
+                    first_success = success
+                    decision = retry_decision
+                    plan = retry_plan
+                    analysis = retry_decision.query_analysis
+                    aligned_entities = align_entities_to_plan(
+                        retry_decision.resolved_entities,
+                        plan,
+                    )
+                    used_after_decide = T2SqlUsedMetadata(
+                        query_analysis=analysis,
+                        query_plan=plan,
+                        candidates=retry_decision.candidates,
+                        join_groups=retry_decision.join_groups,
+                        resolved_entities=retry_decision.resolved_entities,
+                        execution_context=retry_decision.execution_context,
+                    )
+                    continue
+        if success is not None:
+            if grain_retry_used:
+                return success.model_copy(update={"sql_reason": empty_month_reason})
+            return success
+        if first_success is not None:
+            return first_success
+        logger.warning(
+            "t2sql failed generation_id=%s status=%s reason=%s sql=%s",
+            generation_id,
+            "validation_failed" if last_guard else "failed",
+            last_guard,
+            sql_text or None,
         )
         return T2SqlResponse(
             generation_id=generation_id,
-            sql=_public_sql(sql_text, resolved),
-            sql_status="generated",
-            sql_reason=None,
-            sql_reason_code=None,
+            sql=_public_sql(sql_text, resolved) if sql_text else None,
+            sql_status="validation_failed" if last_guard else "failed",
+            sql_reason=last_guard or "SQL을 생성하지 못했습니다",
+            sql_reason_code="GUARD_REJECTED" if last_guard else "GENERATION_FAILED",
             elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
-            used_metadata=used,
+            used_metadata=used_after_decide,
             probe_summary=probe,
         )
-
-    logger.warning(
-        "t2sql failed generation_id=%s status=%s reason=%s sql=%s",
-        generation_id,
-        "validation_failed" if last_guard else "failed",
-        last_guard,
-        sql_text or None,
-    )
-    return T2SqlResponse(
-        generation_id=generation_id,
-        sql=_public_sql(sql_text, resolved) if sql_text else None,
-        sql_status="validation_failed" if last_guard else "failed",
-        sql_reason=last_guard or "SQL을 생성하지 못했습니다",
-        sql_reason_code="GUARD_REJECTED" if last_guard else "GENERATION_FAILED",
-        elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
-        used_metadata=used_after_decide,
-        probe_summary=probe,
-    )

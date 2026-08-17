@@ -688,7 +688,6 @@ _TAG_IDENTITY_SKIP = (
     "변량",
 )
 _IDENTITY_RELATIONAL = ("광역", "사무소", "소재지", "배열", "순서")
-_UNUSED_LABEL = "사용안함"
 
 
 def is_tag_master_table(table: dict[str, Any] | None) -> bool:
@@ -851,8 +850,6 @@ def measure_point_label_filters(
     needles = _measure_needles(query, mappings)
     if not needles:
         return []
-    compact_q = SearchMixin._compact_natural_text(query)
-    keep_unused = _UNUSED_LABEL in compact_q
     filters: list[PlannedFilter] = []
     for table_id in sorted(table_ids):
         table = tables_by_id.get(int(table_id))
@@ -870,17 +867,6 @@ def measure_point_label_filters(
                     column=fqn,
                     operator="LIKE",
                     value=f"%{needle}%",
-                    resolution_status="resolved",
-                    confidence=1.0,
-                )
-            )
-        if not keep_unused:
-            filters.append(
-                PlannedFilter(
-                    meaning="측정점 사용안함 제외",
-                    column=fqn,
-                    operator="NOT_LIKE",
-                    value=f"%{_UNUSED_LABEL}%",
                     resolution_status="resolved",
                     confidence=1.0,
                 )

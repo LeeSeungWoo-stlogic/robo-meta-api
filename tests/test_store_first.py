@@ -464,8 +464,7 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertEqual(len(likes), 1)
         self.assertEqual(likes[0].value, "%탁도%")
         self.assertEqual(likes[0].column, "RWIS.POINT_MASTER.TAG_DESC")
-        self.assertEqual(len(unused), 1)
-        self.assertEqual(unused[0].value, "%사용안함%")
+        self.assertEqual(unused, [])
         self.assertNotIn("충주", likes[0].value)
 
     def test_fact_time_column_names_keeps_store_date_drops_audit(self) -> None:

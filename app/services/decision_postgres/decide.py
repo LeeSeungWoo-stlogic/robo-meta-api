@@ -40,7 +40,7 @@ from .plan_format import (
     assemble_join_groups,
 )
 from .aliases import expand_region_hq_aliases
-from .grain import resolve_time_grain, year_window_narrows_to_month
+from .grain import TimeGrain, resolve_time_grain, year_window_narrows_to_month
 from .period import parse_korean_period, week_mention
 from .store_first import (
     chosen_labels,
@@ -88,6 +88,7 @@ async def decide(
     column_top_m: int | None,
     auto_resolve_entities: bool,
     table_limit: int | None = None,
+    grain_override: TimeGrain | None = None,
 ) -> DecisionResponse:
     runtime = get_runtime()
     decision = runtime.decision
@@ -283,12 +284,16 @@ async def decide(
     parsed_period = parse_korean_period(query)
     week_parsed = parsed_period is not None and parsed_period.week_start is not None
     query_grain = resolve_time_grain(query)
+    if grain_override in ("month", "day", "hour", "instant"):
+        query_grain = grain_override
     hint = query_grain or str(analysis.measurement.storage_type_hint or "").strip() or None
     if not hint:
         hint = resolve_time_grain(query, analysis)
     fact_pool = list(tables_by_id.values())
     apply_query_grain = True
-    if week_parsed:
+    if grain_override in ("month", "day", "hour", "instant"):
+        hint = grain_override
+    elif week_parsed:
         fact_pool = [table for table in fact_pool if not is_month_grain_table(table)]
         hint = None
         apply_query_grain = False
