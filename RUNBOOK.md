@@ -13,7 +13,7 @@
 |---|---:|---|
 | `robo-neo4j` | `7687` | 메타 그래프 |
 | `robo-postgres` | `5432` | 원천 DB + entity probe |
-| `robo-meta-api-v4` | `8100` | 본 서비스 |
+| `robo-meta-api` | `8100` | 본 서비스 |
 
 ## 3) 기동
 

@@ -24,6 +24,7 @@ def test_candidate_maps_serving_descriptions() -> None:
                 "is_foreign_key": False,
                 "description": "사업장 코드",
                 "analyzed_description": "사업장을 구분하는 식별 코드",
+                "metadata": {"logical_name": "사업장 코드"},
             }
         ],
         source="vector",
@@ -32,6 +33,35 @@ def test_candidate_maps_serving_descriptions() -> None:
     assert candidate.description == "사업장 식별 코드와 명칭을 관리"
     assert candidate.matched_columns[0].column_name_kr == "사업장 코드"
     assert candidate.matched_columns[0].description == "사업장을 구분하는 식별 코드"
+
+
+def test_candidate_does_not_use_description_as_column_name_kr() -> None:
+    candidate = _candidate(
+        {
+            "id": 1,
+            "db": "src",
+            "source_name": "SRC",
+            "schema_name": "S",
+            "name": "SITE_TB",
+            "original_name": "SITE_TB",
+            "score": 0.8,
+        },
+        [
+            {
+                "name": "SITE_CD",
+                "score": 0.7,
+                "is_primary_key": True,
+                "is_foreign_key": False,
+                "description": "사업장을 구분하는 식별 코드. 코드 마스터와 조인한다.",
+                "analyzed_description": "사업장을 구분하는 식별 코드. 코드 마스터와 조인한다.",
+            }
+        ],
+        source="vector",
+    )
+    assert candidate.matched_columns[0].column_name_kr is None
+    assert candidate.matched_columns[0].description == (
+        "사업장을 구분하는 식별 코드. 코드 마스터와 조인한다."
+    )
 
 
 def test_candidate_blank_description_is_none() -> None:

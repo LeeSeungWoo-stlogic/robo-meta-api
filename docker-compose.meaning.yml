@@ -1,16 +1,17 @@
-# 의미 우선 Serving 검수 컨테이너. 기존 v4(8100)와 포트를 분리한다.
+# 8101 검수 기동. 본 서비스(docker-compose.yml, 8100)와 컨테이너 이름이 같으므로
+# 동시에 올리지 않는다.
 #
 # 기동: docker compose -f docker-compose.meaning.yml up -d --build
 # OpenAPI: http://127.0.0.1:8101/docs
 # 헬스: curl http://127.0.0.1:8101/health
 
 services:
-  robo-meta-api-meaning:
+  robo-meta-api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: robo-meta-api-meaning:dev
-    container_name: robo-meta-api-meaning
+    image: robo-meta-api:dev
+    container_name: robo-meta-api
     restart: unless-stopped
     ports:
       - "8101:8100"

@@ -373,11 +373,12 @@ class MatchedColumn(BaseModel):
     """자연어 질의-컬럼 매칭 결과. 컬럼 RAG(`embedding_columns`) 활성화 후 채워짐.
     미적재 시 빈 배열.
 
-    슬롯 매핑 정책 (테이블 측 column_name_kr/column_comment 와 동일):
-      - column_name_kr : 짧은 원본 한글명 (t2s_columns.description).
-      - description    : 풍부한 LLM 증강 한국어 설명 우선 + 원본 폴백
+    슬롯 매핑 정책:
+      - column_name_kr : 짧은 한글 논리명
+        (metadata.column_name_kr / logical_name / 승인 표준화 제안명).
+        설명 장문을 넣지 않는다.
+      - description    : 분석 설명 우선, 없으면 원본 설명
                          (t2s_columns.analyzed_description or .description).
-                         v0.6.x forward-compatible 신규 필드 — 미적재 시 None.
     """
     column_name: str
     score: float = 0.0

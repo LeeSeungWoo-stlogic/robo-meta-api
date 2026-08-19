@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import json
+import re
 from typing import Any
 
 from ...schemas import (
@@ -108,6 +109,108 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+_CHAR_LENGTH_TYPES = frozenset(
+    {
+        "char",
+        "character",
+        "nchar",
+        "varchar",
+        "varchar2",
+        "nvarchar",
+        "nvarchar2",
+        "character varying",
+    }
+)
+_NUMERIC_LENGTH_TYPES = frozenset({"number", "numeric", "decimal"})
+_DATE_FORMAT_RES = (
+    (re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$"), "YYYY-MM-DD HH24:MI:SS"),
+    (re.compile(r"^\d{14}$"), "YYYYMMDDHH24MISS"),
+    (re.compile(r"^\d{12}$"), "YYYYMMDDHHMI"),
+    (re.compile(r"^\d{10}$"), "YYYYMMDDHH"),
+    (re.compile(r"^\d{8}$"), "YYYYMMDD"),
+    (re.compile(r"^\d{6}$"), "YYYYMM"),
+)
+
+
+def _column_name_kr(column: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    standardization = metadata.get("standardization")
+    std = standardization if isinstance(standardization, dict) else {}
+    properties = metadata.get("properties")
+    props = properties if isinstance(properties, dict) else {}
+    for value in (
+        metadata.get("column_name_kr"),
+        metadata.get("logical_name"),
+        metadata.get("korean_name"),
+        metadata.get("display_name"),
+        column.get("logical_name"),
+        std.get("proposed_logical_name"),
+        props.get("korean_name"),
+        props.get("logical_name"),
+        props.get("column_name_kr"),
+    ):
+        text = _optional_string(value)
+        if text and text != "「미정」":
+            return text
+    return None
+
+
+def _pk_ordinal(column: dict[str, Any], metadata: dict[str, Any]) -> int | None:
+    ordinal = _optional_int(metadata.get("pk_ordinal"))
+    if ordinal is not None:
+        return ordinal
+    if column.get("is_primary_key"):
+        return 1
+    return None
+
+
+def _serving_data_type(column: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    explicit = _optional_string(metadata.get("data_type_with_length"))
+    if explicit:
+        return explicit
+    raw = _optional_string(column.get("dtype"))
+    if not raw:
+        return None
+    if "(" in raw:
+        return raw
+    folded = raw.casefold()
+    if folded in _CHAR_LENGTH_TYPES:
+        length = _optional_int(
+            metadata.get("character_maximum_length") or metadata.get("data_length")
+        )
+        if length is not None and length > 0:
+            return f"{raw}({length})"
+        return raw
+    if folded in _NUMERIC_LENGTH_TYPES:
+        precision = _optional_int(
+            metadata.get("numeric_precision") or metadata.get("data_precision")
+        )
+        scale = _optional_int(
+            metadata.get("numeric_scale") or metadata.get("data_scale")
+        )
+        if precision is not None and precision > 0:
+            if scale is not None and scale >= 0:
+                return f"{raw}({precision},{scale})"
+            return f"{raw}({precision})"
+    return raw
+
+
+def _format_pattern(metadata: dict[str, Any], examples: list[str]) -> str | None:
+    published = _optional_string(metadata.get("format_pattern"))
+    if published:
+        return published
+    return _infer_format_pattern(examples)
+
+
+def _infer_format_pattern(values: list[str]) -> str | None:
+    texts = [str(item).strip() for item in values if str(item).strip()]
+    if len(texts) < 2:
+        return None
+    for matcher, pattern in _DATE_FORMAT_RES:
+        if all(matcher.match(text) for text in texts):
+            return pattern
+    return None
+
+
 def _merge_column_hits(
     question_hits: dict[int, list[dict[str, Any]]],
     metric_hits: dict[int, list[dict[str, Any]]],
@@ -148,26 +251,27 @@ def _candidate(
             constraints.append("PK")
         if column.get("is_foreign_key"):
             constraints.append("FK")
+        examples = _value_examples(metadata)
         matched.append(
             MatchedColumn(
                 column_name=str(column["name"]),
                 score=float(column.get("score") or 0.0),
                 constraints=constraints,
-                column_name_kr=(column.get("description") or None),
-                data_type=(column.get("dtype") or None),
+                column_name_kr=_column_name_kr(column, metadata),
+                data_type=_serving_data_type(column, metadata),
                 description=(
                     column.get("analyzed_description")
                     or column.get("description")
                     or None
                 ),
-                value_examples=_value_examples(metadata),
-                format_pattern=_optional_string(metadata.get("format_pattern")),
+                value_examples=examples,
+                format_pattern=_format_pattern(metadata, examples),
                 unit=_optional_string(metadata.get("unit")),
                 facility_code=_optional_string(
                     metadata.get("facility_code") or metadata.get("facility_scope")
                 ),
                 system_code=_optional_string(metadata.get("system_code")),
-                pk_ordinal=_optional_int(metadata.get("pk_ordinal")),
+                pk_ordinal=_pk_ordinal(column, metadata),
             )
         )
     return DecisionCandidate(
@@ -218,6 +322,7 @@ def _resolved_entities(mappings: list[dict[str, Any]]) -> list[ResolvedEntity]:
                 values=[
                     ResolvedValue(
                         code=str(row.get("code_value") or ""),
+                        label=_optional_string(row.get("natural_value")),
                         confidence=1.0,
                     )
                     for row in rows

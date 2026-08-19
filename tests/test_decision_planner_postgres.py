@@ -87,6 +87,8 @@ class DecisionPlannerTests(unittest.TestCase):
         )
         self.assertEqual(entities[0].name_column, "FACILITY_NAME")
         self.assertEqual(entities[0].code_column, "FACILITY_CODE")
+        self.assertEqual(entities[0].values[0].code, "CJJ")
+        self.assertEqual(entities[0].values[0].label, "청주")
 
     def test_candidate_maps_column_metadata_to_value_examples(self) -> None:
         candidate = _candidate(

@@ -5,12 +5,12 @@
 # 헬스: curl http://127.0.0.1:8100/health
 
 services:
-  robo-meta-api-v4:
+  robo-meta-api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: robo-meta-api-v4:dev
-    container_name: robo-meta-api-v4
+    image: robo-meta-api:dev
+    container_name: robo-meta-api
     restart: unless-stopped
     ports:
       - "8100:8100"
