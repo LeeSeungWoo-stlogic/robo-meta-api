@@ -90,19 +90,32 @@ def explicit_time_grain(query: str) -> TimeGrain | None:
     return None
 
 
+_GRAIN_KO: dict[TimeGrain, str] = {
+    "month": "월",
+    "day": "일",
+    "hour": "시간",
+    "instant": "실시간",
+}
+
+
 def empty_result_fallback_grain(query: str) -> TimeGrain | None:
     """After a 0-row execute, retry the next finer family once.
 
-    Period-inferred month ('8월 탁도') may fall back to day.
-    Explicit 월별/월 집계 stays on the month fact.
+    Explicit 월별/일별/시간별 stays on that grain. Period-inferred grain
+    may fall back once (month→day, day→hour, hour→day).
     """
 
     if explicit_time_grain(query) is not None:
         return None
-    if resolve_time_grain(query) != "month":
-        return None
-    finer = fallback_grains("month")
+    grain = resolve_time_grain(query)
+    finer = fallback_grains(grain)
     return finer[0] if finer else None
+
+
+def grain_fallback_reason(source: TimeGrain | None, dest: TimeGrain | None) -> str:
+    src = _GRAIN_KO[source] if source in _GRAIN_KO else (str(source or "").strip() or "질문")
+    dst = _GRAIN_KO[dest] if dest in _GRAIN_KO else (str(dest or "").strip() or "더 고운")
+    return f"{src} 팩트 0건으로 {dst} 팩트를 재조회했습니다"
 
 
 def _asks_clock_answer(query: str) -> bool:

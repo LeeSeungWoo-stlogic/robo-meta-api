@@ -733,7 +733,7 @@ def _propagate_filters_along_fk(
     for filter_ in planned:
         if filter_.resolution_status != "resolved":
             continue
-        if filter_.operator not in {"EQ", "IN"} or filter_.value is None or not filter_.column:
+        if filter_.operator not in {"EQ", "IN", "NE", "NOT_IN"} or filter_.value is None or not filter_.column:
             continue
         endpoint = _parse_plan_column(filter_.column)
         if endpoint is None:

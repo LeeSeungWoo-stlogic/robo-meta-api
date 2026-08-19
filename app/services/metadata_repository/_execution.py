@@ -66,7 +66,9 @@ class ExecutionSourceMixin:
                        AND a.snapshot_id IS NOT NULL
                    ),
                  ARRAY[]::text[]
-               ) AS allowed_objects
+               ) AS allowed_objects,
+               (array_agg(DISTINCT a.snapshot_id)
+                  FILTER (WHERE a.snapshot_id IS NOT NULL))[1] AS snapshot_id
         FROM t2s_datasources d
         LEFT JOIN kair_platform_sources s ON s.source_id = d.source_id
         LEFT JOIN t2s_tables t

@@ -208,9 +208,15 @@ def shortest_path(
     source_ids: set[int],
     target_id: int,
     max_hops: int,
+    blocked_ids: set[int] | None = None,
 ) -> list[CompositeJoinEdge] | None:
     if target_id in source_ids:
         return []
+    blocked = {
+        int(table_id)
+        for table_id in (blocked_ids or set())
+        if int(table_id) != int(target_id)
+    }
     adjacency: dict[int, list[CompositeJoinEdge]] = {}
     for edge in edges:
         adjacency.setdefault(edge.left_table_id, []).append(edge)
@@ -234,7 +240,7 @@ def shortest_path(
             continue
         for edge in adjacency.get(current, []):
             next_id = edge.other(current)
-            if next_id in visited:
+            if next_id in visited or next_id in blocked:
                 continue
             next_path = [*path, edge]
             if next_id == target_id:

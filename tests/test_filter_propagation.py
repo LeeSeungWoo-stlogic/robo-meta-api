@@ -195,6 +195,59 @@ class ResolveMappedFilterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(unresolved)
 
 
+    async def test_embedding_argmax_does_not_override_store_code(self) -> None:
+        class _Repo:
+            async def search_columns(self, embedding, *, table_ids, per_table_limit):
+                return {
+                    1: [
+                        {
+                            "table_id": 1,
+                            "name": "WRONG_COL",
+                            "dtype": "character",
+                            "score": 0.99,
+                            "description": "유사 명칭",
+                        },
+                        {
+                            "table_id": 1,
+                            "name": "SUJ_CODE",
+                            "dtype": "character",
+                            "score": 0.1,
+                            "description": "사업장코드",
+                        },
+                    ]
+                }
+
+        planned, unresolved = await _resolve_filters(
+            repository=_Repo(),
+            requirements=[
+                FilterRequirement(
+                    meaning="코드매핑:충청지역",
+                    value_text="충청지역",
+                )
+            ],
+            embeddings={"filter:0": [0.1, 0.2]},
+            table_ids=[1],
+            tables_by_id={
+                1: {
+                    "schema_name": "RWIS",
+                    "original_name": "RDISAUP_TB",
+                }
+            },
+            mappings=[
+                {
+                    "natural_value": "충청지역",
+                    "code_value": "902",
+                    "column_fqn": "rwis.RWIS.RDISAUP_TB.SUJ_CODE",
+                }
+            ],
+            minimum_similarity=0.2,
+        )
+        self.assertEqual(unresolved, [])
+        self.assertEqual(planned[0].value, "902")
+        self.assertEqual(planned[0].column, "RWIS.RDISAUP_TB.SUJ_CODE")
+        self.assertNotIn("WRONG_COL", planned[0].column or "")
+
+
 class _ColumnSearchRepo:
     def __init__(self, column: dict) -> None:
         self.column = column
@@ -455,35 +508,55 @@ class MappingCodeMatchTests(unittest.TestCase):
 class ReverseMentionSelectTests(unittest.TestCase):
     def test_keeps_reverse_hits_when_full_label_absent(self) -> None:
         rows = SearchMixin._select_mentioned_mappings(
-            "팔당 취수량",
+            ["팔당1취수장", "팔당권"],
             [
                 {"natural_value": "팔당1취수장", "code_value": "211", "column_fqn": "a.SUJ"},
                 {"natural_value": "팔당권", "code_value": "700", "column_fqn": "a.SUJ"},
             ],
-            ["팔당"],
+            [],
         )
         labels = {row["natural_value"] for row in rows}
         self.assertEqual(labels, {"팔당1취수장", "팔당권"})
 
     def test_shorter_exact_label_drops_when_longer_exact_exists(self) -> None:
         rows = SearchMixin._select_mentioned_mappings(
-            "청주정수장 월평균 PH",
+            ["청주정수장"],
             [
-                {"natural_value": "청주", "code_value": "880", "column_fqn": "a.SUJ"},
+                {"natural_value": "청주", "code_value": "353", "column_fqn": "a.SUJ"},
                 {
                     "natural_value": "청주정수장",
                     "code_value": "353",
                     "column_fqn": "a.SUJ",
                 },
             ],
-            ["청주", "청주정수장", "ph"],
+            [],
         )
         labels = {row["natural_value"] for row in rows}
         self.assertEqual(labels, {"청주정수장"})
 
+    def test_shorter_label_stays_when_codes_differ(self) -> None:
+        rows = SearchMixin._select_mentioned_mappings(
+            ["금강유역본부"],
+            [
+                {
+                    "natural_value": "금강유역본부",
+                    "code_value": "902",
+                    "column_fqn": "S.HQ.BNB_CODE",
+                },
+                {
+                    "natural_value": "금강유역본부(충청)",
+                    "code_value": "701",
+                    "column_fqn": "S.HQ.BNB_CODE",
+                },
+            ],
+            [],
+        )
+        codes = {row["code_value"] for row in rows}
+        self.assertEqual(codes, {"701", "902"})
+
     def test_exact_plant_label_drops_shorter_prefix_alias(self) -> None:
         rows = SearchMixin._select_mentioned_mappings(
-            "청주정수장 월평균 PH",
+            ["청주정수장"],
             [
                 {
                     "natural_value": "청주정수장",
@@ -492,14 +565,14 @@ class ReverseMentionSelectTests(unittest.TestCase):
                 },
                 {"natural_value": "청주권", "code_value": "880", "column_fqn": "a.SUJ"},
             ],
-            ["청주", "청주정수장", "ph"],
+            [],
         )
         labels = {row["natural_value"] for row in rows}
         self.assertEqual(labels, {"청주정수장"})
 
     def test_cheongju_nickname_does_not_invent_plant(self) -> None:
         rows = SearchMixin._select_mentioned_mappings(
-            "청주장 월평균 ph",
+            ["청주장"],
             [
                 {
                     "natural_value": "청주정수장",
@@ -511,9 +584,27 @@ class ReverseMentionSelectTests(unittest.TestCase):
         )
         self.assertEqual(rows, [])
 
+    def test_metric_code_binds_when_needle_is_trusted(self) -> None:
+        rows = SearchMixin._select_mentioned_mappings(
+            ["ph"],
+            [
+                {
+                    "natural_value": "수소이온농도",
+                    "code_value": "PH",
+                    "column_fqn": "S.BYUN.BR_CODE",
+                    "logical_name": "별량코드 정보",
+                }
+            ],
+            ["ph"],
+            trusted_extras={"ph"},
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code_value"], "PH")
+        self.assertEqual(rows[0]["match_type"], "code")
+
     def test_trusted_extra_expands_to_mapping_label(self) -> None:
         rows = SearchMixin._select_mentioned_mappings(
-            "공주정수장 10월 TOC 농도",
+            ["toc"],
             [
                 {
                     "natural_value": "총 유기탄소",
@@ -550,6 +641,66 @@ class ReverseMentionSelectTests(unittest.TestCase):
         tokens = SearchMixin._question_mention_tokens("본부별 평균")
         self.assertIn("본부", tokens)
         self.assertNotIn("본부별", tokens)
+
+    def test_disjunctive_particle_is_stripped(self) -> None:
+        tokens = SearchMixin._question_mention_tokens(
+            "정수장이나 설비 알려주세요",
+        )
+        self.assertIn("정수장", tokens)
+        self.assertIn("설비", tokens)
+        self.assertNotIn("정수장이나", tokens)
+
+    def test_untrusted_prefix_does_not_bind_shorter_code_label(self) -> None:
+        rows = [
+            {
+                "natural_value": "정수",
+                "code_value": "H",
+                "column_fqn": "S.GT.GT_CODE",
+            }
+        ]
+        selected = SearchMixin._select_mentioned_mappings(
+            ["강우량", "정수장", "설비"],
+            rows,
+            ["정수"],
+            trusted_extras=set(),
+        )
+        self.assertEqual(selected, [])
+
+    def test_measure_prefix_does_not_bind_longer_code_label(self) -> None:
+        selected = SearchMixin._select_mentioned_mappings(
+            ["강우량", "설비"],
+            [
+                {
+                    "natural_value": "설비온도",
+                    "code_value": "FT",
+                    "column_fqn": "S.BYUN.BR_CODE",
+                    "logical_name": "별량코드 정보",
+                },
+                {
+                    "natural_value": "강우량(Rainfall)",
+                    "code_value": "RA",
+                    "column_fqn": "S.BYUN.BR_CODE",
+                    "logical_name": "별량코드 정보",
+                },
+            ],
+            [],
+        )
+        self.assertEqual([row["code_value"] for row in selected], ["RA"])
+
+    def test_full_measure_label_still_binds(self) -> None:
+        selected = SearchMixin._select_mentioned_mappings(
+            ["설비온도"],
+            [
+                {
+                    "natural_value": "설비온도",
+                    "code_value": "FT",
+                    "column_fqn": "S.BYUN.BR_CODE",
+                    "logical_name": "별량코드 정보",
+                }
+            ],
+            [],
+        )
+        self.assertEqual([row["code_value"] for row in selected], ["FT"])
 
     def test_aggregation_words_are_not_reverse_tokens(self) -> None:
         tokens = SearchMixin._question_mention_tokens(

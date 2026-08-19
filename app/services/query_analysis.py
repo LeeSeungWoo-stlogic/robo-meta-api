@@ -1,7 +1,9 @@
 """Backend-independent natural-language requirement analysis for v1 decisions."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -13,85 +15,65 @@ from ..schemas import (
     QueryAnalysis,
     SchemaRoleRequirement,
 )
+from .meaning_slots import (
+    ALLOWED_PROCEDURES,
+    extremum_function_from_text,
+    is_answer_axis_text,
+    looks_physical_name,
+    measure_item_surface,
+)
+
+logger = logging.getLogger(__name__)
 
 
 QUERY_ANALYSIS_PROMPT = """\
-당신은 Text-to-SQL의 메타데이터 선택을 위한 요구사항 분석기입니다.
-사용자 질문을 실제 DB 물리 이름을 추측하지 않고 업무 의미와 역할로만 분해하세요.
+당신은 Text-to-SQL의 의미 분해기다.
+스토어 후보·물리 테이블명·컬럼명·코드값을 쓰지 마라.
+질문에만 근거해 「답하려면 무엇을 확보해야 하는가」를 적는다.
+질문에 없는 대상·기간은 빈 문자열이다. 빈 칸은 정상이다.
 
-규칙:
-- 실제 테이블명과 컬럼명을 만들지 마세요.
-- schema_roles의 role은 "사업장" 같은 엔터티 명사만 쓰지 말고
-  "사업장 명칭 마스터", "사무소 연결 상태"처럼 데이터의 업무 역할을 쓰세요.
-- 오류 메시지, 측정값, 이름, 코드, 시각처럼 기존 역할 테이블의 컬럼으로
-  해결되는 항목은 별도 schema_role로 만들지 말고 measurement,
-  filter_requirements, search_keywords.columns에만 넣으세요.
-- schema_role 하나는 서로 다른 물리 테이블 책임 후보 하나를 뜻합니다.
-- 각 역할의 search_terms에는 그 역할을 다른 역할과 구별할 테이블·컬럼 의미를
-  2~6개 넣으세요. 측정값·상태·명칭 중 어느 역할이 보유해야 하는지 구분하세요.
-- 원문에 명시되어 반드시 필요한 역할만 necessity="required"로 표시하세요.
-- 보조적으로 유용하지만 없어도 답할 수 있는 역할은 necessity="optional"입니다.
-- JOIN은 역할 간 요구사항이며, 복수 키 의미를 key_meanings 배열로 보존하세요.
-- 필터 연산자는 EQ, NE, IN, BETWEEN, GT, GTE, LT, LTE, LIKE, ILIKE,
-  IS_NULL, IS_NOT_NULL 중 하나만 사용하세요.
-- 값이 원문에 있으면 value_text에 원문 표현을 보존하세요.
-- 사용자 메시지에 스토어 후보(용어·약어·값매핑·논리명)가 있으면 그 후보만
-  해석 재료로 쓰세요. 후보에 있는 column_fqn만 인용하고 없는 물리표를 만들지 마세요.
-- 접두로 여러 라벨이 있으면 entities_include와 filter value_text에
-  질문과 가장 맞는 스토어 라벨 하나를 쓰세요.
-- storage_type_hint는 물리 테이블명이 아니라 입도만 쓰세요: month|day|hour|instant|null.
-- "4월"·"어제"는 필터 기간입니다. 사용자가 월별/일별/시간별을 말하지 않으면
-  기간 길이에 맞는 입도를 힌트로 두세요 (한 달→month, 어제→day).
-- 기간 팩트 역할은 "월별 계측 팩트"처럼 입도를 넣고, 실제 테이블명을 search_terms에 넣지 마세요.
-- 출력은 아래 구조의 단일 JSON 객체만 반환하세요.
+procedure는 lookup, list, aggregate, extremum 중 하나만.
+- lookup: 특정 대상의 값을 조회
+- list: 대상 목록
+- aggregate: 합·평균·건수 등 집계
+- extremum: 가장 높/낮/많/적
+기간이 없다고 latest로 바꾸지 마라.
+
+역할(meaning_roles)은 연결 구조만. 물리명을 search_terms에 넣지 마라.
+metric은 측정 항목만 쓴다. '평균 탁도'가 아니라 '탁도'다. 평균·합계·건수는 procedure/aggregation이다.
+집계면 measurement.aggregation에 AVG|SUM|COUNT|MIN|MAX 중 하나를 넣는다.
+정의 문장·절·설명('하는 시설', '해당하는 권역')을 넣지 마라.
+target은 범위만. primary_outputs 축 이름을 target에 반복하지 마라.
+primary_outputs는 답의 축 이름만. 목록·현황 같은 절차 단어를 붙이지 마라.
+측정 항목이 답의 축이어도 metric과 meaning_roles(측정항목)에서 빼지 마라.
+search_terms는 역할의 짧은 별칭만.
+
+출력은 아래 구조의 단일 JSON 객체만 반환하라.
 
 {
-  "intent": "한 줄 의도",
-  "entities_include": ["질문에 포함된 엔터티"],
-  "entities_exclude": [],
-  "measurement": {
-    "metric": "측정 또는 조회 대상 의미",
-    "aggregation": "AVG|SUM|COUNT|MIN|MAX|null",
-    "storage_type_hint": null
-  },
-  "schema_roles": [
+  "goal": "한 줄 확보 목표",
+  "procedure": "lookup|list|aggregate|extremum",
+  "procedure_why": "절차를 고른 이유",
+  "metric": "확보할 측정 표현. 없으면 빈 문자열",
+  "target": "범위 대상. 없으면 빈 문자열",
+  "period": "기간 원문. 없으면 빈 문자열",
+  "meaning_roles": [
     {
-      "role": "업무 데이터 역할",
+      "role": "확보 역할",
       "necessity": "required|optional",
       "cardinality": "one|many",
-      "search_terms": ["역할 전용 테이블·컬럼 의미"]
+      "search_terms": ["짧은 별칭"]
     }
   ],
-  "join_requirements": [
-    {
-      "from_role": "역할",
-      "to_role": "역할",
-      "required": true,
-      "key_meanings": ["키 의미"]
-    }
-  ],
-  "filter_requirements": [
-    {
-      "meaning": "필터 의미",
-      "required": true,
-      "operator_hint": "EQ",
-      "value_text": "원문 값 또는 null"
-    }
-  ],
-  "search_keywords": {
-    "tables": ["역할 중심 검색어"],
-    "columns": ["컬럼 의미 검색어"]
-  }
+  "primary_outputs": ["답에 나와야 하는 축"],
+  "answer_must_include": ["답이 반드시 포함해야 하는 표현"],
+  "meaning_status": "complete|partial"
 }
 """
 
 
-def _user_payload(question: str, store_hits: dict[str, Any] | None) -> str:
-    text = question.strip()
-    if not store_hits:
-        return text
-    blob = json.dumps(store_hits, ensure_ascii=False, default=str)
-    return f"{text}\n\n스토어 후보:\n{blob}"
+def _user_payload(question: str) -> str:
+    return question.strip()
 
 
 def _unique(values: list[str], *, limit: int) -> list[str]:
@@ -109,8 +91,154 @@ def _unique(values: list[str], *, limit: int) -> list[str]:
     return result
 
 
+def _blank_physical(text: str) -> tuple[str, bool]:
+    raw = str(text or "").strip()
+    if looks_physical_name(raw):
+        return "", True
+    return raw, False
+
+
+def _has_meaning_slots(analysis: QueryAnalysis) -> bool:
+    return any(
+        [
+            analysis.goal,
+            analysis.procedure,
+            analysis.metric,
+            analysis.target,
+            analysis.period,
+            analysis.primary_outputs,
+            analysis.answer_must_include,
+            analysis.meaning_roles,
+        ]
+    )
+
+
+def _dual_write(analysis: QueryAnalysis) -> QueryAnalysis:
+    if analysis.goal:
+        analysis.intent = analysis.goal
+    elif not analysis.intent and analysis.goal == "":
+        analysis.intent = analysis.intent
+    raw_metric = str(analysis.metric or analysis.measurement.metric or "")
+    if analysis.metric:
+        analysis.measurement.metric = analysis.metric
+    peeled = measure_item_surface(raw_metric)
+    if peeled:
+        analysis.metric = peeled
+        analysis.measurement.metric = peeled
+    procedure = str(analysis.procedure or "").strip()
+    if procedure in {"aggregate", "extremum"}:
+        if procedure == "extremum":
+            asked = extremum_function_from_text(
+                " ".join(
+                    [
+                        str(analysis.intent or ""),
+                        str(analysis.goal or ""),
+                        str(analysis.procedure_why or ""),
+                        raw_metric,
+                    ]
+                )
+            )
+            if asked:
+                analysis.measurement.aggregation = asked
+            elif not analysis.measurement.aggregation:
+                analysis.measurement.aggregation = "MAX"
+        if "평균" in raw_metric and not analysis.measurement.aggregation:
+            analysis.measurement.aggregation = "AVG"
+    if procedure in {"list", "lookup", ""}:
+        analysis.measurement.aggregation = None
+    analysis.schema_roles = list(analysis.meaning_roles)
+    axis = list(analysis.primary_outputs or [])
+    target = str(analysis.target or "").strip()
+    analysis.entities_include = [
+        item
+        for item in analysis.entities_include
+        if not is_answer_axis_text(item, axis)
+        and item.strip() != target
+    ]
+    kept_filters: list[FilterRequirement] = []
+    list_axis = procedure == "list"
+    for requirement in analysis.filter_requirements:
+        value = str(requirement.value_text or requirement.meaning or "").strip()
+        if list_axis and (
+            is_answer_axis_text(value, axis)
+            or is_answer_axis_text(requirement.meaning, axis)
+        ):
+            continue
+        if target and (
+            value == target or requirement.meaning.strip() == target
+        ):
+            continue
+        kept_filters.append(requirement)
+    if target and not is_answer_axis_text(target, axis):
+        kept_filters.append(
+            FilterRequirement(
+                meaning="범위 대상",
+                required=True,
+                operator_hint="EQ",
+                value_text=target,
+            )
+        )
+    analysis.filter_requirements = kept_filters
+    return analysis
+
+
 def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
-    analysis.intent = analysis.intent.strip()[:500]
+    dropped_physical = False
+    analysis.goal, hit = _blank_physical(analysis.goal)
+    dropped_physical = dropped_physical or hit
+    analysis.procedure_why, hit = _blank_physical(analysis.procedure_why)
+    dropped_physical = dropped_physical or hit
+    analysis.metric, hit = _blank_physical(analysis.metric)
+    dropped_physical = dropped_physical or hit
+    analysis.target, hit = _blank_physical(analysis.target)
+    dropped_physical = dropped_physical or hit
+    analysis.period = str(analysis.period or "").strip()[:200]
+    analysis.goal = analysis.goal.strip()[:500]
+    analysis.procedure_why = analysis.procedure_why.strip()[:500]
+    analysis.metric = analysis.metric.strip()[:200]
+    analysis.target = analysis.target.strip()[:200]
+    analysis.primary_outputs = _unique(
+        [
+            blank
+            for item in analysis.primary_outputs
+            for blank, phys in [_blank_physical(item)]
+            if not phys and blank
+        ],
+        limit=12,
+    )
+    analysis.answer_must_include = _unique(
+        [
+            blank
+            for item in analysis.answer_must_include
+            for blank, phys in [_blank_physical(item)]
+            if not phys and blank
+        ],
+        limit=12,
+    )
+    if any(looks_physical_name(item) for item in analysis.primary_outputs):
+        dropped_physical = True
+    procedure = str(analysis.procedure or "").strip().casefold()
+    if procedure and procedure not in ALLOWED_PROCEDURES:
+        analysis.procedure = ""
+    else:
+        analysis.procedure = procedure
+
+    meaning_status = str(analysis.meaning_status or "").strip().casefold()
+    if meaning_status not in {"complete", "partial", "failed"}:
+        meaning_status = ""
+    if meaning_status == "failed":
+        analysis.meaning_status = "failed"
+    elif dropped_physical or analysis.procedure == "":
+        analysis.meaning_status = "partial" if _has_meaning_slots(analysis) else "failed"
+    elif meaning_status:
+        analysis.meaning_status = meaning_status
+    elif _has_meaning_slots(analysis):
+        required_empty = not analysis.primary_outputs
+        analysis.meaning_status = "partial" if required_empty else "complete"
+    else:
+        analysis.meaning_status = "partial"
+
+    analysis.intent = (analysis.intent or analysis.goal).strip()[:500]
     analysis.entities_include = _unique(analysis.entities_include, limit=15)
     analysis.entities_exclude = _unique(analysis.entities_exclude, limit=15)
     analysis.search_keywords.tables = _unique(
@@ -136,14 +264,38 @@ def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
 
     roles: list[SchemaRoleRequirement] = []
     role_names: set[str] = set()
-    for role in analysis.schema_roles[:10]:
+    source_roles = analysis.meaning_roles or []
+    for role in source_roles[:10]:
+        role.role, phys = _blank_physical(role.role)
+        if phys:
+            dropped_physical = True
+            continue
         role.role = role.role.strip()[:200]
-        role.search_terms = _unique(role.search_terms, limit=8)
+        role.search_terms = _unique(
+            [
+                blank
+                for item in role.search_terms
+                for blank, term_phys in [_blank_physical(item)]
+                if not term_phys and blank
+            ],
+            limit=8,
+        )
         key = role.role.lower()
         if role.role and key not in role_names:
             role_names.add(key)
             roles.append(role)
-    analysis.schema_roles = roles
+    analysis.meaning_roles = roles
+    if not roles and analysis.schema_roles:
+        for role in analysis.schema_roles[:10]:
+            role.role = role.role.strip()[:200]
+            role.search_terms = _unique(role.search_terms, limit=8)
+            key = role.role.lower()
+            if role.role and key not in role_names:
+                role_names.add(key)
+                roles.append(role)
+        analysis.meaning_roles = roles
+    if dropped_physical and analysis.meaning_status == "complete":
+        analysis.meaning_status = "partial"
     if roles and not any(role.necessity == "required" for role in roles):
         roles[0].necessity = "required"
 
@@ -164,7 +316,7 @@ def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
 
     column_only_roles = {
         role.role
-        for role in analysis.schema_roles
+        for role in analysis.meaning_roles
         if (
             "메시지" in role.role
             or (
@@ -177,9 +329,7 @@ def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
         )
     }
     if column_only_roles:
-        roles_by_name = {
-            role.role: role for role in analysis.schema_roles
-        }
+        roles_by_name = {role.role: role for role in analysis.meaning_roles}
         for column_role in column_only_roles:
             parent_name = next(
                 (
@@ -205,9 +355,9 @@ def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
                     [*parent.search_terms, column_role, *child.search_terms],
                     limit=8,
                 )
-        analysis.schema_roles = [
+        analysis.meaning_roles = [
             role
-            for role in analysis.schema_roles
+            for role in analysis.meaning_roles
             if role.role not in column_only_roles
         ]
         analysis.join_requirements = [
@@ -216,6 +366,7 @@ def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
             if requirement.from_role not in column_only_roles
             and requirement.to_role not in column_only_roles
         ]
+        role_names = {role.role.lower() for role in analysis.meaning_roles}
 
     filters: list[FilterRequirement] = []
     for requirement in analysis.filter_requirements[:20]:
@@ -231,7 +382,8 @@ def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
         if requirement.meaning:
             filters.append(requirement)
     analysis.filter_requirements = filters
-    return analysis
+    analysis.status = "complete"
+    return _dual_write(analysis)
 
 
 def degraded_analysis(reason: str) -> QueryAnalysis:
@@ -239,6 +391,7 @@ def degraded_analysis(reason: str) -> QueryAnalysis:
         status="degraded",
         reason=reason[:500],
         fallback="question_vector",
+        meaning_status="failed",
     )
 
 
@@ -246,13 +399,25 @@ class QueryAnalyzer:
     async def analyze(
         self,
         question: str,
-        store_hits: dict[str, Any] | None = None,
+        timeout_s: float | None = None,
     ) -> QueryAnalysis:
         runtime = get_runtime()
         if not runtime.decision.hyde_enabled:
             return degraded_analysis("HyDE 의미 분해가 비활성화되어 있습니다.")
         if not runtime.embedding.api_key:
             return degraded_analysis("HyDE 의미 분해용 API key가 없습니다.")
+        configured = float(
+            getattr(runtime.decision, "analysis_timeout_seconds", 15) or 15
+        )
+        timeout = configured
+        if timeout_s is not None:
+            try:
+                timeout = max(0.1, min(configured, float(timeout_s)))
+            except (TypeError, ValueError):
+                timeout = configured
+        if timeout < 1:
+            return degraded_analysis("파이프라인 시간 부족")
+        logger.warning("meaning analyze start timeout=%s", timeout)
 
         client = AsyncOpenAI(
             api_key=runtime.embedding.api_key,
@@ -261,43 +426,62 @@ class QueryAnalyzer:
                 or runtime.embedding.base_url
                 or None
             ),
+            timeout=timeout,
+            max_retries=0,
         )
+        create_kwargs: dict[str, Any] = {
+            "model": runtime.decision.hyde_model,
+            "messages": [
+                {"role": "system", "content": QUERY_ANALYSIS_PROMPT},
+                {"role": "user", "content": _user_payload(question)},
+            ],
+            "max_completion_tokens": 1200,
+            "response_format": {"type": "json_object"},
+        }
+        if getattr(runtime.decision, "analysis_reasoning_effort", False) is True:
+            create_kwargs["reasoning_effort"] = "low"
         try:
-            response = await client.chat.completions.create(
-                model=runtime.decision.hyde_model,
-                messages=[
-                    {"role": "system", "content": QUERY_ANALYSIS_PROMPT},
-                    {
-                        "role": "user",
-                        "content": _user_payload(question, store_hits),
-                    },
-                ],
-                max_completion_tokens=1200,
-                response_format={"type": "json_object"},
-            )
+            async with asyncio.timeout(timeout):
+                response = await client.chat.completions.create(**create_kwargs)
             content = response.choices[0].message.content or ""
             payload: Any = json.loads(content)
             if not isinstance(payload, dict):
                 return degraded_analysis("HyDE 응답이 JSON 객체가 아닙니다.")
             payload["status"] = "complete"
             analysis = QueryAnalysis.model_validate(payload)
-            if not analysis.intent or not analysis.schema_roles:
-                return degraded_analysis("HyDE 응답에 intent 또는 schema_roles가 없습니다.")
+            logger.warning(
+                "meaning analyze ok procedure=%s meaning=%s",
+                analysis.procedure,
+                analysis.meaning_status,
+            )
             return _sanitize(analysis)
+        except TimeoutError:
+            logger.warning("meaning analyze timeout")
+            return degraded_analysis("HyDE 의미 분해 실패: timeout")
         except Exception as exc:
+            logger.warning("meaning analyze fail %s", type(exc).__name__)
             return degraded_analysis(f"HyDE 의미 분해 실패: {exc}")
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                maybe = close()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
 
 
 def analysis_embedding_text(analysis: QueryAnalysis) -> str:
     parts = [
-        analysis.intent,
-        analysis.measurement.metric or "",
+        analysis.goal or analysis.intent,
+        analysis.metric or (analysis.measurement.metric or ""),
         analysis.measurement.aggregation or "",
         analysis.measurement.storage_type_hint or "",
+        analysis.target,
+        analysis.period,
+        *analysis.primary_outputs,
         *analysis.entities_include,
         *analysis.search_keywords.tables,
         *analysis.search_keywords.columns,
-        *(role.role for role in analysis.schema_roles),
+        *(role.role for role in analysis.meaning_roles or analysis.schema_roles),
         *(
             meaning
             for requirement in analysis.join_requirements
@@ -331,8 +515,8 @@ def role_embedding_text(
     if not fact_seed:
         parts.extend(
             [
-                analysis.intent,
-                analysis.measurement.metric or "",
+                analysis.goal or analysis.intent,
+                analysis.metric or (analysis.measurement.metric or ""),
                 *analysis.search_keywords.tables,
             ]
         )

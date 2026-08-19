@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from datetime import timedelta
+from typing import Any, Iterable
 
 from ...schemas import (
     DecisionResponse,
+    PlanAggregation,
     PlannedFilter,
     QueryAnalysis,
     QueryPlan,
@@ -16,7 +18,17 @@ from .default_date import _dtype_looks_like_date, _format_looks_like_date
 from .filters import _column_looks_like_audit_date, _period_bind_value
 from .grain import _asks_series, fallback_grains, resolve_time_grain
 from .helpers import _metadata_dict, _resolve_subject_area, _serving_logical_name
-from .aliases import is_displaced_plant_mapping
+from .aliases import is_displaced_plant_mapping, peel_type_suffix
+from ..meaning_slots import (
+    answer_axis_from_analysis,
+    axis_mention,
+    extremum_function_from_text,
+    filter_needles_from_analysis,
+    is_answer_axis_text,
+    meaning_failed,
+    measure_item_surface,
+    time_role_from_procedure,
+)
 from .period import ParsedPeriod, parse_korean_period, week_mention
 from .table_type import list_table_type
 
@@ -40,8 +52,13 @@ _EXTREMUM_TOKENS = (
     "제일 많",
     "제일 적",
 )
+_EXTREMUM_LEADS = ("가장", "제일")
+_EXTREMUM_TAILS = ("높", "낮", "많", "적")
+_EXTREMUM_WINDOW = 16
 _FACT_UNRESOLVED = "팩트 표 미선정"
 _FACT_GRAIN_UNRESOLVED = "팩트 입도를 스토어 설명과 맞출 수 없음"
+RANGE_CODE_UNRESOLVED = "범위 코드 미결합"
+PERIOD_REQUIRED = "기간을 지정해 주세요"
 
 _NO_META = "맞는 메타데이터가 없다"
 
@@ -58,9 +75,46 @@ def is_fact_unresolved_reason(text: str) -> bool:
     return _FACT_UNRESOLVED in value or "팩트 입도" in value
 
 
-def fact_unresolved_response(
+def is_range_code_unresolved_reason(text: str) -> bool:
+    return RANGE_CODE_UNRESOLVED in str(text or "")
+
+
+def is_period_required_reason(text: str) -> bool:
+    return PERIOD_REQUIRED in str(text or "")
+
+
+def period_required_unresolved(plan: QueryPlan | None) -> bool:
+    if plan is None:
+        return False
+    return any(
+        is_period_required_reason(str(item))
+        for item in (plan.unresolved_requirements or [])
+    )
+
+
+def period_required_response(
     analysis: QueryAnalysis | None = None,
-    reason: str | None = None,
+) -> DecisionResponse:
+    return DecisionResponse(
+        target="none",
+        confidence=0.0,
+        candidates=[],
+        threshold_used={"retrieval_axes": ["store"]},
+        resolution_status="complete",
+        query_analysis=analysis,
+        query_plan=QueryPlan(
+            completeness="failed",
+            unresolved_requirements=[PERIOD_REQUIRED],
+            time_role=time_role_from_procedure(
+                str(getattr(analysis, "procedure", "") or "")
+            ),
+            answer_axis=answer_axis_from_analysis(analysis),
+        ),
+    )
+
+
+def range_unresolved_response(
+    analysis: QueryAnalysis | None = None,
 ) -> DecisionResponse:
     return DecisionResponse(
         target="none",
@@ -71,7 +125,31 @@ def fact_unresolved_response(
         query_analysis=analysis,
         query_plan=QueryPlan(
             completeness="partial",
+            unresolved_requirements=[RANGE_CODE_UNRESOLVED],
+            time_role="none",
+        ),
+    )
+
+
+def fact_unresolved_response(
+    analysis: QueryAnalysis | None = None,
+    reason: str | None = None,
+    *,
+    candidates: list[Any] | None = None,
+    candidate_evidence: list[Any] | None = None,
+) -> DecisionResponse:
+    return DecisionResponse(
+        target="none",
+        confidence=0.0,
+        candidates=list(candidates or []),
+        threshold_used={"retrieval_axes": ["store"]},
+        resolution_status="complete",
+        query_analysis=analysis,
+        query_plan=QueryPlan(
+            completeness="partial",
             unresolved_requirements=[reason or _FACT_UNRESOLVED],
+            time_role="none",
+            candidate_evidence=list(candidate_evidence or []),
         ),
     )
 
@@ -87,6 +165,7 @@ def empty_meta_response(analysis: QueryAnalysis | None = None) -> DecisionRespon
         query_plan=QueryPlan(
             completeness="failed",
             unresolved_requirements=[_NO_META],
+            time_role="none",
         ),
     )
 
@@ -119,6 +198,210 @@ def mapping_labels(mappings: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _mapping_code_column(mapping: dict[str, Any]) -> str:
+    name = str(mapping.get("column_name") or "").strip()
+    if name:
+        return name
+    fqn = str(mapping.get("column_fqn") or "").strip()
+    if "." in fqn:
+        return fqn.rsplit(".", 1)[-1]
+    return fqn
+
+
+def _mapping_table_id(mapping: dict[str, Any]) -> int | None:
+    raw = mapping.get("table_id")
+    if raw is None:
+        return None
+    return int(raw)
+
+
+def _code_tables_are_linked(
+    rows: list[dict[str, Any]],
+    edge_rows: list[dict[str, Any]],
+) -> bool:
+    ids = {
+        table_id
+        for table_id in (_mapping_table_id(row) for row in rows)
+        if table_id is not None
+    }
+    if len(ids) < 2:
+        return False
+    for edge in edge_rows:
+        left = int(edge.get("from_table_id") or 0)
+        right = int(edge.get("to_table_id") or 0)
+        if left in ids and right in ids:
+            return True
+    return False
+
+
+def _fk_parent_table_ids(
+    rows: list[dict[str, Any]],
+    edge_rows: list[dict[str, Any]],
+) -> set[int]:
+    ids = {
+        table_id
+        for table_id in (_mapping_table_id(row) for row in rows)
+        if table_id is not None
+    }
+    parents: set[int] = set()
+    for edge in edge_rows:
+        src = int(edge.get("from_table_id") or 0)
+        dst = int(edge.get("to_table_id") or 0)
+        if src in ids and dst in ids:
+            parents.add(dst)
+    return parents
+
+
+def _child_specific_rows(
+    query: str,
+    mention: str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    mention_c = SearchMixin._compact_natural_text(mention)
+    hits: list[dict[str, Any]] = []
+    for row in rows:
+        label = SearchMixin._compact_natural_text(str(row.get("natural_value") or ""))
+        if len(label) <= len(mention_c):
+            continue
+        if mention_c and mention_c not in label:
+            continue
+        if SearchMixin._natural_value_is_standalone_mention(
+            query,
+            str(row.get("natural_value") or ""),
+        ):
+            hits.append(row)
+    return hits
+
+
+def _measurement_hub_column_names(
+    *,
+    selected_ids: set[int],
+    tables_by_id: dict[int, dict[str, Any]],
+    columns_by_id: dict[int, list[dict[str, Any]]],
+    edges: list[CompositeJoinEdge],
+    max_hops: int,
+) -> set[str]:
+    fact_ids = {
+        int(table_id)
+        for table_id, table in tables_by_id.items()
+        if int(table_id) in selected_ids
+        and list_table_type(_resolve_subject_area(table)) in _FACT_LIKE
+    }
+    hub_ids: set[int] = set(fact_ids)
+    for table_id, table in tables_by_id.items():
+        tid = int(table_id)
+        if not is_tag_master_table(table):
+            continue
+        if tid in selected_ids:
+            hub_ids.add(tid)
+            continue
+        if fact_ids and shortest_path(
+            edges,
+            source_ids=fact_ids,
+            target_id=tid,
+            max_hops=max_hops,
+        ) is not None:
+            hub_ids.add(tid)
+    names: set[str] = set()
+    for table_id in hub_ids:
+        for column in columns_by_id.get(int(table_id), []):
+            name = str(column.get("name") or "").strip()
+            if name:
+                names.add(name.casefold())
+    return names
+
+
+def project_code_mappings_to_hub(
+    kept: list[dict[str, Any]],
+    held: list[dict[str, Any]],
+    query: str,
+    *,
+    selected_ids: set[int],
+    tables_by_id: dict[int, dict[str, Any]],
+    columns_by_id: dict[int, list[dict[str, Any]]],
+    edge_rows: list[dict[str, Any]],
+    edges: list[CompositeJoinEdge],
+    max_hops: int,
+) -> list[dict[str, Any]]:
+    """Keep parent/child dictionary hits that the fact/tag hub can filter on.
+
+    Same mention on a parent code table and a child composite table is not
+    ambiguity. Prefer the code column that exists on the measurement hub.
+    """
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    leftover: list[dict[str, Any]] = []
+    for row in [*kept, *held]:
+        token = SearchMixin._compact_natural_text(str(row.get("matched_mention") or ""))
+        if not token:
+            leftover.append(row)
+            continue
+        grouped.setdefault(token, []).append(row)
+    hub_cols = _measurement_hub_column_names(
+        selected_ids=selected_ids,
+        tables_by_id=tables_by_id,
+        columns_by_id=columns_by_id,
+        edges=edges,
+        max_hops=max_hops,
+    )
+    admitted: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _take(rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            key = (
+                SearchMixin._compact_natural_text(str(row.get("matched_mention") or "")),
+                str(row.get("column_fqn") or "").casefold(),
+                str(row.get("code_value") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            admitted.append(row)
+
+    kept_ids = {id(row) for row in kept}
+    for mention, rows in grouped.items():
+        columns = {
+            str(row.get("column_fqn") or "").strip().casefold()
+            for row in rows
+            if str(row.get("column_fqn") or "").strip()
+        }
+        if len(columns) <= 1 or not _code_tables_are_linked(rows, edge_rows):
+            _take([row for row in rows if id(row) in kept_ids])
+            continue
+        on_hub = [
+            row
+            for row in rows
+            if _mapping_code_column(row).casefold() in hub_cols
+        ]
+        specific = _child_specific_rows(query, mention, rows)
+        if specific:
+            specific_hub = [
+                row
+                for row in specific
+                if _mapping_code_column(row).casefold() in hub_cols
+            ]
+            _take(specific_hub or specific)
+            continue
+        parents = _fk_parent_table_ids(rows, edge_rows)
+        if on_hub:
+            parent_on_hub = [
+                row
+                for row in on_hub
+                if _mapping_table_id(row) in parents
+            ]
+            _take(parent_on_hub or on_hub)
+            continue
+        parent_rows = [
+            row
+            for row in rows
+            if _mapping_table_id(row) in parents
+        ]
+        _take(parent_rows)
+    _take(leftover)
+    return admitted
+
+
 def filter_mappings_to_labels(
     mappings: list[dict[str, Any]],
     labels: list[str],
@@ -142,14 +425,7 @@ def filter_mappings_to_labels(
 
 
 def chosen_labels(analysis: QueryAnalysis) -> list[str]:
-    labels = list(analysis.entities_include)
-    for requirement in analysis.filter_requirements:
-        if requirement.value_text:
-            labels.append(requirement.value_text)
-    metric = str(analysis.measurement.metric or "").strip()
-    if metric:
-        labels.append(metric)
-    return labels
+    return filter_needles_from_analysis(analysis)
 
 
 def partition_mention_mappings(
@@ -281,6 +557,11 @@ def pick_fact_tables(
     if len(chosen) == 1:
         return chosen, None
     if len(chosen) > 1:
+        day_only = prefer_day_grain_facts(chosen)
+        if len(day_only) == 1:
+            return day_only, None
+        if len(day_only) > 1:
+            return day_only, _FACT_UNRESOLVED
         return chosen, _FACT_UNRESOLVED
     return chosen, None
 
@@ -372,24 +653,36 @@ def prefer_unique_fact_type(
     return list(facts)
 
 
-def group_dimension_needles(
-    query: str,
-    tokens: list[str],
-    extras: list[str],
-) -> list[str]:
-    """Group/list/HQ stems only. Prefix leftovers are not group dimensions."""
+def prefer_day_grain_facts(
+    facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """When the question did not lock a grain, keep day-grain facts."""
 
-    needles: list[str] = []
-    for token in tokens:
-        if (
-            is_groupby_mention(query, token)
-            or is_category_mention(query, token)
-            or is_list_target_mention(query, token)
-            or SearchMixin._compact_natural_text(token) == "본부"
-        ):
-            needles.append(token)
-    needles.extend(extras)
-    return needles
+    if len(facts) <= 1:
+        return list(facts)
+    day_only = [table for table in facts if is_day_grain_table(table)]
+    if day_only:
+        return day_only
+    return list(facts)
+
+
+def group_dimension_needles(
+    needles: list[str],
+    query: str = "",
+    extras: list[str] | None = None,
+) -> list[str]:
+    """Catalog needles only. Glossary extras are not group seeds."""
+
+    del extras
+    kept: list[str] = []
+    seen: set[str] = set()
+    for token in needles:
+        compact = SearchMixin._compact_natural_text(token)
+        if len(compact) < 2 or compact in seen:
+            continue
+        seen.add(compact)
+        kept.append(token)
+    return kept
 
 
 def catalog_group_dimensions(
@@ -420,7 +713,15 @@ def catalog_group_dimensions(
                 ]
             )
         )
-        if any(needle and needle in blob for needle in needles):
+        if any(
+            needle
+            and (
+                SearchMixin._label_matches_needle(blob, needle)
+                or SearchMixin._label_starts_with(blob, needle)
+                or blob.endswith(SearchMixin._compact_natural_text(needle))
+            )
+            for needle in needles
+        ):
             seen.add(int(table_id))
             kept.append(table)
     return kept
@@ -433,10 +734,19 @@ _LOCATION_TABLE_MARKERS = ("사업장", "정수장", "측정위치")
 def location_group_tables(
     tables: list[dict[str, Any]],
     query: str,
+    analysis: QueryAnalysis | None = None,
 ) -> list[dict[str, Any]]:
-    """어디/곳이 asks for a place. Keep store location masters, do not invent names."""
+    """Keep store location masters when the answer axis is a place."""
 
-    if not any(token in (query or "") for token in _LOCATION_QUERY_TOKENS):
+    outputs = answer_axis_from_analysis(analysis) if analysis else []
+    target = str(getattr(analysis, "target", "") or "") if analysis else ""
+    procedure = str(getattr(analysis, "procedure", "") or "") if analysis else ""
+    axis_blob = SearchMixin._compact_natural_text(
+        " ".join([*outputs, target, procedure])
+    )
+    query_hit = any(token in (query or "") for token in _LOCATION_QUERY_TOKENS)
+    axis_hit = any(marker in axis_blob for marker in _LOCATION_TABLE_MARKERS)
+    if not query_hit and not axis_hit:
         return []
     kept: list[dict[str, Any]] = []
     seen: set[int] = set()
@@ -545,14 +855,19 @@ def assemble_anchor_join_paths(
     fact_ids: set[int],
     mapped_ids: set[int] | None = None,
     tables_by_id: dict[int, dict[str, Any]] | None = None,
+    blocked_ids: set[int] | None = None,
+    allow_disconnected: bool = False,
 ) -> tuple[list[list[CompositeJoinEdge]], set[int], list[str]]:
     """Reach each required table from measurement/mapping anchors.
 
     Parent dimensions already on the path are not search origins. A place
     master must attach through the fact/tag identity, not a region parent.
+    List without a fact stays on already selected tables; unselected hops
+    are not pulled into the plan.
     """
 
-    selected = {int(table_id) for table_id in selected_ids}
+    blocked = {int(table_id) for table_id in (blocked_ids or set())}
+    selected = {int(table_id) for table_id in selected_ids} - blocked
     if not selected:
         return [], set(), []
     facts = {int(table_id) for table_id in fact_ids if int(table_id) in selected}
@@ -571,8 +886,12 @@ def assemble_anchor_join_paths(
             source_ids=anchors,
             target_id=table_id,
             max_hops=max_hops,
+            blocked_ids=blocked,
         )
         if path is None:
+            if allow_disconnected:
+                connected.add(table_id)
+                continue
             table = (tables_by_id or {}).get(table_id) or {}
             label = table.get("original_name") or table.get("name") or table_id
             unresolved.append(f"승인 JOIN 경로 없음: {label}")
@@ -583,17 +902,58 @@ def assemble_anchor_join_paths(
                 connected.add(int(edge.left_table_id))
                 connected.add(int(edge.right_table_id))
         connected.add(table_id)
-    return paths, connected, unresolved
+    return paths, connected - blocked, unresolved
 
 
-def resolve_time_role(query: str, period: ParsedPeriod | None) -> str:
-    if is_dimension_list_query(query):
-        return "none"
-    if any(token in (query or "") for token in _EXTREMUM_TOKENS):
-        return "extremum"
-    if period is not None or week_mention(query):
-        return "none"
-    return "latest"
+def list_stays_on_selected_tables(
+    analysis: QueryAnalysis | None,
+    *,
+    has_facts: bool,
+) -> bool:
+    """A list with no fact does not admit unselected join hops."""
+
+    if has_facts:
+        return False
+    return str(getattr(analysis, "procedure", "") or "").strip() == "list"
+
+
+def join_path_left_unresolved(plan: QueryPlan | None) -> bool:
+    if plan is None:
+        return False
+    return any(
+        "승인 JOIN 경로 없음" in str(item)
+        for item in (plan.unresolved_requirements or [])
+    )
+
+
+def asks_extremum(query: str) -> bool:
+    """Peak language. Allow a short span between 가장/제일 and 높/낮/많/적."""
+
+    text = query or ""
+    if any(token in text for token in _EXTREMUM_TOKENS):
+        return True
+    compact = SearchMixin._compact_natural_text(text)
+    for lead in _EXTREMUM_LEADS:
+        start = 0
+        while True:
+            index = compact.find(lead, start)
+            if index < 0:
+                break
+            rest = compact[index + len(lead) : index + len(lead) + _EXTREMUM_WINDOW]
+            if any(tail in rest for tail in _EXTREMUM_TAILS):
+                return True
+            start = index + len(lead)
+    return False
+
+
+def resolve_time_role(
+    query: str = "",
+    period: ParsedPeriod | None = None,
+    *,
+    procedure: str = "",
+) -> str:
+    del query, period
+    return time_role_from_procedure(procedure)
 
 
 def unbound_period_filter(period: ParsedPeriod) -> PlannedFilter:
@@ -616,8 +976,10 @@ def period_filter_for_fact(
     query: str,
     fact: dict[str, Any],
     columns: list[dict[str, Any]],
+    period_text: str | None = None,
 ) -> PlannedFilter | None:
-    period = parse_korean_period(query)
+    source = str(period_text or "").strip() or query
+    period = parse_korean_period(source)
     if period is None:
         return None
     dated = [
@@ -665,8 +1027,124 @@ def measure_column_names(columns: list[dict[str, Any]]) -> list[str]:
     return names
 
 
+def _column_dtype_text(column: dict[str, Any]) -> str:
+    return str(column.get("dtype") or column.get("data_type") or "").casefold()
+
+
+def _column_is_integral(column: dict[str, Any]) -> bool:
+    dtype = _column_dtype_text(column)
+    if any(token in dtype for token in ("numeric", "decimal", "float", "double", "real")):
+        return False
+    return "int" in dtype
+
+
+def column_declared_weight(
+    column: dict[str, Any],
+    glossary_rows: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Weight only when column meta or glossary says 가중. Count-like names are not enough."""
+
+    blob = _column_identity_blob(column)
+    if "가중" in blob:
+        return True
+    name = SearchMixin._compact_natural_text(str(column.get("name") or ""))
+    logical = SearchMixin._compact_natural_text(
+        str((_metadata_dict(column.get("metadata")).get("column_name_kr") or ""))
+    )
+    for row in glossary_rows or []:
+        surfaces = " ".join(
+            str(row.get(key) or "")
+            for key in ("standard_term", "word_korean", "mention", "surface")
+        )
+        if "가중" not in SearchMixin._compact_natural_text(surfaces):
+            continue
+        if name and name in SearchMixin._compact_natural_text(surfaces):
+            return True
+        if logical and logical in SearchMixin._compact_natural_text(surfaces):
+            return True
+    return False
+
+
+def _time_scope_text(period: ParsedPeriod) -> str:
+    if period.week_start is not None and period.week_end is not None:
+        return f"{period.week_start.isoformat()}/{period.week_end.isoformat()}"
+    start = period.start_date()
+    end = period.end_date_exclusive() - timedelta(days=1)
+    return f"{start.isoformat()}/{end.isoformat()}"
+
+
+def aggregation_contract(
+    *,
+    analysis: QueryAnalysis | None,
+    facts: list[dict[str, Any]],
+    columns_by_id: dict[int, list[dict[str, Any]]],
+    period: ParsedPeriod | None,
+    glossary_rows: list[dict[str, Any]] | None = None,
+    query: str = "",
+) -> PlanAggregation | None:
+    procedure = str(getattr(analysis, "procedure", "") or "").strip() if analysis else ""
+    if procedure not in {"aggregate", "extremum"}:
+        return None
+    function = ""
+    if analysis is not None:
+        function = str(analysis.measurement.aggregation or "").strip().upper()
+    asked = extremum_function_from_text(
+        " ".join(
+            [
+                query,
+                str(getattr(analysis, "intent", "") or "") if analysis else "",
+                str(getattr(analysis, "goal", "") or "") if analysis else "",
+                str(getattr(analysis, "procedure_why", "") or "") if analysis else "",
+            ]
+        )
+    )
+    if procedure == "extremum":
+        function = asked or function or "MAX"
+    elif not function:
+        function = "AVG"
+    value_column = None
+    weight_column = None
+    for fact in facts:
+        columns = columns_by_id.get(int(fact["id"]), [])
+        measure = [
+            column
+            for column in columns
+            if str(column.get("name") or "").strip()
+            in set(measure_column_names(columns))
+        ]
+        weights = [
+            column for column in measure if column_declared_weight(column, glossary_rows)
+        ]
+        values = [column for column in measure if column not in weights]
+        if weight_column is None and weights:
+            weight_column = str(weights[0].get("name") or "").strip() or None
+        if value_column is None and values:
+            def _rank(column: dict[str, Any]) -> tuple[int, int, int]:
+                blob = _column_identity_blob(column)
+                countish = int(
+                    any(token in blob for token in ("건수", "횟수"))
+                )
+                valueish = int(
+                    any(token in blob for token in ("측정값", "수치"))
+                )
+                return (countish, int(_column_is_integral(column)), 1 - valueish)
+
+            chosen = sorted(values, key=_rank)[0]
+            value_column = str(chosen.get("name") or "").strip() or None
+        if value_column is not None:
+            break
+    weighted = bool(weight_column)
+    return PlanAggregation(
+        function=function,
+        value_column=value_column,
+        weighted=weighted,
+        weight_column=weight_column,
+        time_scope=_time_scope_text(period) if period is not None else None,
+    )
+
+
 _LABEL_MARKERS = ("명칭", "이름")
-_TAG_LABEL_MARKERS = ("명칭", "이름", "설명", "별칭")
+_TAG_LABEL_MARKERS = ("설명",)
 _CODE_MARKERS = ("코드", "식별")
 _IDENTITY_SKIP = ("설명", "비고", "구분", "여부")
 _TAG_IDENTITY_SKIP = (
@@ -686,6 +1164,9 @@ _TAG_IDENTITY_SKIP = (
     "사업장",
     "유역",
     "변량",
+    "별칭",
+    "명칭",
+    "이름",
 )
 _IDENTITY_RELATIONAL = ("광역", "사무소", "소재지", "배열", "순서")
 
@@ -710,11 +1191,12 @@ def promote_series_identity_tables(
     *,
     tables_by_id: dict[int, dict[str, Any]],
     query: str,
+    needs_fact: bool = False,
 ) -> set[int]:
-    """Series answers need the tag catalog in SELECT, not as a join-only hop."""
+    """Fact/series answers keep the tag catalog in SELECT, not as a join-only hop."""
 
     kept = {int(table_id) for table_id in bridge_ids}
-    if not _asks_series(query):
+    if not needs_fact and not _asks_series(query):
         return kept
     for table_id in list(kept):
         if is_tag_master_table(tables_by_id.get(table_id)):
@@ -796,19 +1278,48 @@ def _mapping_is_measure(mapping: dict[str, Any]) -> bool:
     return any(word in blob for word in ("별량", "측정항목"))
 
 
-def _measure_needles(query: str, mappings: list[dict[str, Any]]) -> list[str]:
+def _measure_needles(
+    query: str,
+    mappings: list[dict[str, Any]],
+    analysis: QueryAnalysis | None = None,
+) -> list[str]:
+    if analysis is not None and meaning_failed(analysis):
+        return []
     compact_q = SearchMixin._compact_natural_text(query)
     needles: list[str] = []
     seen: set[str] = set()
+    confirmed: set[str] = set()
     for mapping in mappings:
         if not _mapping_is_measure(mapping):
             continue
+        if str(mapping.get("code_value") or "").strip():
+            confirmed.add(
+                SearchMixin._compact_natural_text(
+                    str(mapping.get("matched_mention") or "")
+                )
+            )
+            confirmed.add(
+                SearchMixin._compact_natural_text(
+                    str(mapping.get("natural_value") or "")
+                )
+            )
+    confirmed.discard("")
+    for mapping in mappings:
+        if not _mapping_is_measure(mapping):
+            continue
+        mention = str(mapping.get("matched_mention") or "")
+        if is_list_target_mention(query, mention):
+            continue
         for raw in (
-            mapping.get("matched_mention"),
+            mention,
             mapping.get("natural_value"),
         ):
             token = SearchMixin._compact_natural_text(str(raw or ""))
             if len(token) < 2 or token not in compact_q or token in seen:
+                continue
+            if token in confirmed:
+                continue
+            if is_list_target_mention(query, token):
                 continue
             seen.add(token)
             needles.append(token)
@@ -844,10 +1355,11 @@ def measure_point_label_filters(
     tables_by_id: dict[int, dict[str, Any]],
     columns_by_id: dict[int, list[dict[str, Any]]],
     table_ids: set[int],
+    analysis: QueryAnalysis | None = None,
 ) -> list[PlannedFilter]:
     """Keep measure-code rows whose tag label still contains the measure word."""
 
-    needles = _measure_needles(query, mappings)
+    needles = _measure_needles(query, mappings, analysis)
     if not needles:
         return []
     filters: list[PlannedFilter] = []
@@ -897,8 +1409,9 @@ def _column_is_store_date(column: dict[str, Any]) -> bool:
 
 
 _LIST_QUERY_TOKENS = ("목록", "리스트")
+_LIST_ANSWER_CUES = ("목록", "리스트", "알려")
+_LIST_COORDINATORS = ("이나", "또는", "및")
 _INVENTORY_QUERY_TOKENS = ("어떤 게", "어떤게", "어떤 것", "무엇이 있", "뭐가 있")
-_MEASURE_BLOBS = ("별량", "측정항목", "태그")
 
 
 def _mention_type_stem(token: str) -> str:
@@ -907,6 +1420,48 @@ def _mention_type_stem(token: str) -> str:
         if stem.endswith(suffix) and len(stem) - len(suffix) >= 2:
             stem = stem[: -len(suffix)]
     return stem
+
+
+def _mention_is_measure_item(analysis: QueryAnalysis | None, mention: str) -> bool:
+    """측정 항목 표면은 목록의 답 축으로 보아도 코드 필터에서 빼지 않는다."""
+
+    if analysis is None:
+        return False
+    key = SearchMixin._compact_natural_text(mention)
+    if not key:
+        return False
+    metric = SearchMixin._compact_natural_text(
+        measure_item_surface(
+            str(analysis.metric or "")
+            or str(getattr(analysis.measurement, "metric", "") or "")
+        )
+    )
+    if metric and (key == metric or metric in key or key in metric):
+        return True
+    for role in analysis.meaning_roles or []:
+        role_name = SearchMixin._compact_natural_text(str(role.role or ""))
+        if "측정" not in role_name:
+            continue
+        for term in role.search_terms or []:
+            if SearchMixin._compact_natural_text(str(term or "")) == key:
+                return True
+    return False
+
+
+def _mention_is_answer_axis(analysis: QueryAnalysis | None, mention: str) -> bool:
+    """목록의 답 축(정수장 목록의 정수장)만 값 필터에서 뺀다. 측정 항목은 빼지 않는다."""
+
+    if analysis is None:
+        return False
+    if str(analysis.procedure or "").strip() != "list":
+        return False
+    if _mention_is_measure_item(analysis, mention):
+        return False
+    outputs = list(analysis.primary_outputs or [])
+    axis = [axis_mention(item) for item in outputs]
+    return is_answer_axis_text(mention, outputs) or is_answer_axis_text(
+        mention, axis
+    )
 
 
 def is_groupby_mention(query: str, token: str) -> bool:
@@ -950,51 +1505,124 @@ def is_dimension_list_query(query: str) -> bool:
 
 
 def is_list_target_mention(query: str, token: str) -> bool:
+    """X목록, or X이나 Y 알려주세요: X/Y are the answer grain, not code values.
+
+    권역 인스턴스를 '또는'으로 이은 것은 범위 OR이지 목록 축이 아니다.
+    """
+
     stem = SearchMixin._compact_natural_text(token)
     compact_q = SearchMixin._compact_natural_text(query)
-    return bool(stem) and any(
-        f"{stem}{tail}" in compact_q for tail in _LIST_QUERY_TOKENS
+    if not stem or len(stem) < 2:
+        return False
+    peeled = peel_type_suffix(token)
+    if peeled is not None and peeled[0]:
+        return False
+    if any(f"{stem}{tail}" in compact_q for tail in _LIST_QUERY_TOKENS):
+        return True
+    if not any(cue in compact_q for cue in _LIST_ANSWER_CUES):
+        return False
+    return any(
+        f"{stem}{coord}" in compact_q or f"{coord}{stem}" in compact_q
+        for coord in _LIST_COORDINATORS
     )
 
 
-def query_requests_fact(
-    query: str,
-    period: ParsedPeriod | None,
-    analysis: QueryAnalysis | None = None,
-    mappings: list[dict[str, Any]] | None = None,
-) -> bool:
-    """A list of dimensions does not need a fact pick."""
+_AGG_QUERY_TOKENS = (
+    "평균",
+    "합계",
+    "총합",
+    "건수",
+    "최대",
+    "최소",
+    "최댓값",
+    "최솟값",
+)
 
-    if is_dimension_list_query(query):
-        return False
-    if period is not None or week_mention(query):
+
+def asks_aggregation(query: str = "", analysis: QueryAnalysis | None = None) -> bool:
+    """Aggregation/extremum from procedure, measurement, or 평균/합계 in the question."""
+
+    procedure = str(getattr(analysis, "procedure", "") or "").strip() if analysis else ""
+    if procedure in {"aggregate", "extremum"}:
         return True
-    if resolve_time_grain(query):
-        return True
-    if any(token in (query or "") for token in _EXTREMUM_TOKENS):
-        return True
-    metric = ""
     if analysis is not None:
-        metric = str(analysis.measurement.metric or "").strip()
-    if metric:
-        return True
-    for mapping in mappings or []:
+        if str(getattr(analysis.measurement, "aggregation", "") or "").strip():
+            return True
         blob = SearchMixin._compact_natural_text(
             " ".join(
                 [
-                    str(mapping.get("logical_name") or ""),
-                    str(mapping.get("column_fqn") or ""),
+                    str(analysis.metric or ""),
+                    str(getattr(analysis.measurement, "metric", "") or ""),
+                    *[str(item) for item in (analysis.primary_outputs or [])],
                 ]
             )
         )
-        if any(word in blob for word in _MEASURE_BLOBS):
+        if any(token in blob for token in _AGG_QUERY_TOKENS):
             return True
-    return False
+    compact_q = SearchMixin._compact_natural_text(query or "")
+    return any(token in compact_q for token in _AGG_QUERY_TOKENS)
+
+
+def query_requests_fact(
+    query: str = "",
+    period: ParsedPeriod | None = None,
+    analysis: QueryAnalysis | None = None,
+    mappings: list[dict[str, Any]] | None = None,
+) -> bool:
+    """집계·극값·시계열, 또는 기간+측정 항목이면 팩트가 필요하다."""
+
+    del mappings
+    if asks_aggregation(query, analysis):
+        return True
+    if _asks_series(query):
+        return True
+    metric = ""
+    if analysis is not None:
+        metric = str(analysis.metric or analysis.measurement.metric or "").strip()
+        if not metric:
+            for role in analysis.meaning_roles or []:
+                role_name = SearchMixin._compact_natural_text(str(role.role or ""))
+                if "측정" not in role_name:
+                    continue
+                metric = " ".join(str(term) for term in (role.search_terms or []))
+                break
+    has_period = period is not None
+    if not has_period and query:
+        has_period = parse_korean_period(query) is not None
+    if metric and has_period:
+        return True
+    procedure = str(getattr(analysis, "procedure", "") or "").strip() if analysis else ""
+    if procedure in {"list", "lookup", ""}:
+        return False
+    return bool(metric)
+
+
+def is_embedding_recall_row(row: dict[str, Any]) -> bool:
+    """Embedding/vector hits are recall only. They do not bind codes."""
+
+    match_type = str(row.get("match_type") or "").strip().casefold()
+    source = str(row.get("source") or "").strip().casefold()
+    return match_type in {"embedding", "vector", "semantic"} or source in {
+        "vector",
+        "embedding",
+        "semantic",
+    }
+
+
+def approved_code_mappings(rows: Iterable[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [row for row in (rows or []) if not is_embedding_recall_row(row)]
+
+
+def embedding_recall_mappings(
+    rows: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    return [row for row in (rows or []) if is_embedding_recall_row(row)]
 
 
 def value_mappings_for_plan(
     mappings: list[dict[str, Any]],
     query: str,
+    analysis: QueryAnalysis | None = None,
 ) -> list[dict[str, Any]]:
     """Keep value bindings that belong in filters/entities. Type/HQ-displaced rows stay as table seeds."""
 
@@ -1003,20 +1631,74 @@ def value_mappings_for_plan(
         for mapping in mappings
         if not is_category_mention(query, str(mapping.get("matched_mention") or ""))
         and not is_list_target_mention(query, str(mapping.get("matched_mention") or ""))
+        and not _mention_is_answer_axis(
+            analysis, str(mapping.get("matched_mention") or "")
+        )
         and not is_displaced_plant_mapping(query, mapping, mappings)
     ]
+
+
+def _row_licensed_for_mention(row: dict[str, Any], query: str) -> bool:
+    mention = str(row.get("matched_mention") or query)
+    natural = str(row.get("natural_value") or "")
+    if SearchMixin._label_matches_needle(natural, mention):
+        return True
+    mention_peel = peel_type_suffix(mention)
+    natural_peel = peel_type_suffix(
+        SearchMixin._natural_label_head(natural) or natural
+    )
+    if mention_peel is None or natural_peel is None:
+        return False
+    mention_instance, mention_group = mention_peel
+    natural_instance, natural_group = natural_peel
+    return bool(
+        mention_instance
+        and natural_instance == mention_instance
+        and mention_group.name == natural_group.name
+    )
+
+
+def _rows_for_single_mention_codes(
+    rows: list[dict[str, Any]],
+    query: str,
+) -> list[dict[str, Any]]:
+    """같은 컬럼에 걸린 여러 include 언급은 OR이므로 코드를 합친다.
+
+    라벨이 언급과 맞지 않는 그룹만 뺀다. 한 언급만 남기지 않는다.
+    """
+
+    if len(rows) <= 1 or not query:
+        return rows
+    by_mention: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = SearchMixin._compact_natural_text(str(row.get("matched_mention") or ""))
+        by_mention.setdefault(key or "_", []).append(row)
+    if len(by_mention) <= 1:
+        return rows
+    licensed: list[dict[str, Any]] = []
+    for group in by_mention.values():
+        if any(_row_licensed_for_mention(row, query) for row in group):
+            licensed.extend(group)
+    return licensed
 
 
 def mapping_filters(
     mappings: list[dict[str, Any]],
     query: str = "",
+    analysis: QueryAnalysis | None = None,
 ) -> list[PlannedFilter]:
+    if analysis is not None and meaning_failed(analysis):
+        return []
     grouped: dict[str, list[dict[str, Any]]] = {}
     for mapping in mappings:
+        if is_embedding_recall_row(mapping):
+            continue
         mention = str(mapping.get("matched_mention") or "")
         if query and is_category_mention(query, mention):
             continue
         if query and is_list_target_mention(query, mention):
+            continue
+        if _mention_is_answer_axis(analysis, mention):
             continue
         if query and is_displaced_plant_mapping(query, mapping, mappings):
             continue
@@ -1024,9 +1706,13 @@ def mapping_filters(
         code = str(mapping.get("code_value") or "").strip()
         if not fqn or not code:
             continue
-        grouped.setdefault(fqn.casefold(), []).append(mapping)
+        polarity = str(mapping.get("filter_polarity") or "include").strip().lower()
+        if polarity not in {"include", "exclude"}:
+            polarity = "include"
+        grouped.setdefault((fqn.casefold(), polarity), []).append(mapping)
     filters: list[PlannedFilter] = []
     for rows in grouped.values():
+        rows = _rows_for_single_mention_codes(rows, query)
         codes = sorted(
             {
                 str(row.get("code_value") or "").strip()
@@ -1041,7 +1727,11 @@ def mapping_filters(
             continue
         fqn = str(rows[0].get("column_fqn") or "")
         natural = str(rows[0].get("natural_value") or "")
-        operator = "IN" if len(codes) > 1 else "EQ"
+        polarity = str(rows[0].get("filter_polarity") or "include").strip().lower()
+        if polarity == "exclude":
+            operator = "NOT_IN" if len(codes) > 1 else "NE"
+        else:
+            operator = "IN" if len(codes) > 1 else "EQ"
         filters.append(
             PlannedFilter(
                 meaning=f"코드매핑:{natural}",

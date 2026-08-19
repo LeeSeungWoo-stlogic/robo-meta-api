@@ -17,9 +17,27 @@ from .sql_guard import GuardError, check
 from .sql_source_qualify import qualify_and_rewrite, to_source_name_sql
 
 
+def _repair_latin1_utf8(text: str) -> str:
+    """Undo UTF-8 bytes that were decoded as Latin-1. Leave real Hangul alone."""
+
+    if not text or not any("\x80" <= ch <= "\xff" for ch in text):
+        return text
+    try:
+        repaired = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    return repaired
+
+
 def _serialize(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (int, float, bool)):
         return value
+    if isinstance(value, str):
+        return _repair_latin1_utf8(value)
+    if isinstance(value, dict):
+        return {str(key): _serialize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize(item) for item in value]
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value).decode("utf-8", errors="replace")
     try:

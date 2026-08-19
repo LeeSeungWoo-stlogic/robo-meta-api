@@ -19,7 +19,8 @@ router = APIRouter(tags=["t2sql"])
         "자연어로 읽기 전용 SQL과 그 SQL에 쓰인 메타를 반환한다. "
         "`/data_decision` meta_version은 1.0. "
         "성공 SQL은 `/query_execute`에 그대로 넣을 수 있는 SourceName 3단 수식이다. "
-        "timeout_s는 파이프라인 벽시계이며 미지정 시 runtime total_timeout_seconds."
+        "파이프라인 벽시계는 runtime t2sql.total_timeout_seconds다. "
+        "`/query_execute.timeout_s`(statement timeout)와 다르다."
     ),
 )
 async def t2sql(req: T2SqlRequest) -> T2SqlResponse:

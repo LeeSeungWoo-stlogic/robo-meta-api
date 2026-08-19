@@ -18,6 +18,7 @@ from app.services.decision_postgres.grain import (
     empty_result_fallback_grain,
     explicit_time_grain,
     fact_role_for_grain,
+    grain_fallback_reason,
     is_measurement_role,
     is_period_fact_role,
     resolve_time_grain,
@@ -99,6 +100,20 @@ class TimeGrainTests(unittest.TestCase):
 
     def test_non_month_query_does_not_empty_fallback(self) -> None:
         self.assertIsNone(empty_result_fallback_grain("화성정수장 평균 탁도"))
+
+    def test_day_period_falls_back_to_hour_with_same_helper(self) -> None:
+        self.assertEqual(
+            empty_result_fallback_grain("어제 화성정수장 탁도 알려줘"),
+            "hour",
+        )
+        self.assertEqual(
+            grain_fallback_reason("month", "day"),
+            "월 팩트 0건으로 일 팩트를 재조회했습니다",
+        )
+        self.assertEqual(
+            grain_fallback_reason("day", "hour"),
+            "일 팩트 0건으로 시간 팩트를 재조회했습니다",
+        )
 
     def test_month_window_with_event_time_is_day(self) -> None:
         self.assertEqual(

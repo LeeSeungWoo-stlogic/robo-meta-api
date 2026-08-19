@@ -9,27 +9,43 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.schemas import MeasurementRequirement, QueryAnalysis
+from app.schemas import (
+    CandidateEvidence,
+    MeasurementRequirement,
+    QueryAnalysis,
+    SchemaRoleRequirement,
+)
+from app.services.decision_postgres.candidate_evidence import (
+    build_candidate_evidence,
+)
 from app.services.decision_postgres.decide import decide
 from app.services.decision_postgres.fact_choose import (
     reset_fact_chooser,
     set_fact_chooser,
 )
 from app.services.decision_postgres.period import parse_korean_period
+from app.services.decision_planner import build_composite_edges
 from app.services.decision_postgres.store_first import (
+    PERIOD_REQUIRED,
+    aggregation_contract,
     dimension_identity_column_names,
     fact_time_column_names,
     filter_mappings_to_labels,
     is_category_mention,
     is_groupby_mention,
+    is_list_target_mention,
     is_tag_master_table,
     mapping_filters,
     measure_point_label_filters,
     partition_mention_mappings,
     period_filter_for_fact,
     pick_fact_tables,
+    prefer_day_grain_facts,
+    project_code_mappings_to_hub,
     promote_series_identity_tables,
     query_requests_fact,
+    resolve_time_role,
+    approved_code_mappings,
 )
 from app.services.metadata_repository._search import SearchMixin
 
@@ -39,6 +55,96 @@ def _runtime() -> MagicMock:
     runtime.decision.table_top_k = 10
     runtime.decision.fk_max_hops = 3
     return runtime
+
+
+def _fk_edge(
+    from_id: int,
+    to_id: int,
+    from_table: str,
+    to_table: str,
+    from_col: str,
+    to_col: str,
+) -> dict:
+    return {
+        "from_table_id": from_id,
+        "from_schema": "S",
+        "from_table": from_table,
+        "from_column": from_col,
+        "to_table_id": to_id,
+        "to_schema": "S",
+        "to_table": to_table,
+        "to_column": to_col,
+        "constraint_name": "fk",
+        "metadata": {},
+    }
+
+
+def _parent_child_tables() -> dict[int, dict]:
+    return {
+        1: {
+            "id": 1,
+            "logical_name": "일 DATA",
+            "subject_area": "agg",
+            "original_name": "FACT_DD",
+        },
+        2: {
+            "id": 2,
+            "logical_name": "태그 마스터",
+            "subject_area": "master",
+            "original_name": "TAG_TB",
+        },
+        10: {
+            "id": 10,
+            "logical_name": "별량",
+            "subject_area": "code",
+            "original_name": "PARENT_TB",
+        },
+        20: {
+            "id": 20,
+            "logical_name": "변량기능",
+            "subject_area": "code",
+            "original_name": "CHILD_TB",
+        },
+    }
+
+
+def _parent_child_edges() -> list[dict]:
+    return [
+        _fk_edge(1, 2, "FACT_DD", "TAG_TB", "TAGSN", "TAGSN"),
+        _fk_edge(20, 10, "CHILD_TB", "PARENT_TB", "PARENT_CODE", "PARENT_CODE"),
+    ]
+
+
+def _parent_child_columns(*, hub_codes: tuple[str, ...]) -> dict[int, list[dict]]:
+    hub = [{"name": "TAGSN"}]
+    hub.extend({"name": name} for name in hub_codes)
+    return {
+        1: [{"name": "TAGSN"}, {"name": "VAL"}],
+        2: hub,
+        10: [{"name": "PARENT_CODE"}],
+        20: [{"name": "CHILD_CODE"}, {"name": "PARENT_CODE"}],
+    }
+
+
+def _parent_child_code_rows() -> list[dict]:
+    return [
+        {
+            "natural_value": "항목",
+            "code_value": "P",
+            "matched_mention": "항목",
+            "table_id": 10,
+            "column_name": "PARENT_CODE",
+            "column_fqn": "S.PARENT_TB.PARENT_CODE",
+        },
+        {
+            "natural_value": "항목 적산",
+            "code_value": "C",
+            "matched_mention": "항목",
+            "table_id": 20,
+            "column_name": "CHILD_CODE",
+            "column_fqn": "S.CHILD_TB.CHILD_CODE",
+        },
+    ]
 
 
 class StoreFirstUnitTests(unittest.TestCase):
@@ -66,6 +172,101 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertTrue(is_category_mention("떨어진 사업장들 본부별", "사업장들"))
         self.assertTrue(is_category_mention("떨어진 사업장들 본부별", "사업장"))
         self.assertFalse(is_groupby_mention("청주정수장 PH", "사업장"))
+
+    def test_count_column_is_not_weight_without_store_weight_term(self) -> None:
+        fact = {"id": 1, "original_name": "FACT_DD", "schema_name": "S"}
+        columns = {
+            1: [
+                {
+                    "name": "VAL",
+                    "dtype": "numeric",
+                    "metadata": {"column_name_kr": "측정값"},
+                },
+                {
+                    "name": "CNT",
+                    "dtype": "int",
+                    "metadata": {"column_name_kr": "기록 건수"},
+                },
+            ]
+        }
+        analysis = QueryAnalysis(
+            status="complete",
+            procedure="aggregate",
+            measurement=MeasurementRequirement(aggregation="AVG"),
+        )
+        period = parse_korean_period("2024년")
+        spec = aggregation_contract(
+            analysis=analysis,
+            facts=[fact],
+            columns_by_id=columns,
+            period=period,
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.function, "AVG")
+        self.assertEqual(spec.value_column, "VAL")
+        self.assertEqual(spec.weighted, False)
+        self.assertIsNone(spec.weight_column)
+        self.assertEqual(spec.time_scope, "2024-01-01/2024-12-31")
+
+    def test_countish_numeric_loses_to_measured_value(self) -> None:
+        fact = {"id": 1, "original_name": "FACT_DD", "schema_name": "S"}
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(
+                status="complete",
+                procedure="aggregate",
+                measurement=MeasurementRequirement(aggregation="AVG"),
+            ),
+            facts=[fact],
+            columns_by_id={
+                1: [
+                    {
+                        "name": "CNT",
+                        "dtype": "numeric",
+                        "metadata": {"column_name_kr": "기록 건수"},
+                    },
+                    {
+                        "name": "VAL",
+                        "dtype": "numeric",
+                        "metadata": {"column_name_kr": "측정값"},
+                    },
+                ]
+            },
+            period=parse_korean_period("2024년"),
+        )
+        assert spec is not None
+        self.assertEqual(spec.value_column, "VAL")
+        self.assertEqual(spec.weighted, False)
+
+    def test_weight_column_only_when_meta_says_weight(self) -> None:
+        fact = {"id": 1, "original_name": "FACT_DD", "schema_name": "S"}
+        columns = {
+            1: [
+                {
+                    "name": "VAL",
+                    "dtype": "float",
+                    "metadata": {"column_name_kr": "측정값"},
+                },
+                {
+                    "name": "WGT",
+                    "dtype": "int",
+                    "metadata": {"column_name_kr": "가중 건수"},
+                },
+            ]
+        }
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(
+                status="complete",
+                procedure="aggregate",
+                measurement=MeasurementRequirement(),
+            ),
+            facts=[fact],
+            columns_by_id=columns,
+            period=parse_korean_period("2024년"),
+        )
+        assert spec is not None
+        self.assertTrue(spec.weighted)
+        self.assertEqual(spec.weight_column, "WGT")
         rows = [
             {
                 "column_fqn": "S.DIM.SUJ_CODE",
@@ -127,15 +328,236 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertEqual(len(hq_filters), 1)
         self.assertEqual(hq_filters[0].column, "S.HQ.BNB_CODE")
 
+    def test_coordinated_list_targets_are_not_code_filters(self) -> None:
+        query = "한강유역 본부에 가장 강우량이 많았던 정수장이나 설비 알려주세요"
+        self.assertTrue(is_list_target_mention(query, "설비"))
+        self.assertTrue(is_list_target_mention(query, "정수장"))
+        self.assertFalse(is_list_target_mention(query, "강우량"))
+        self.assertFalse(is_list_target_mention("설비온도가 높았던 곳 알려주세요", "설비"))
+        rows = [
+            {
+                "column_fqn": "S.BYUN.BR_CODE",
+                "code_value": "RA",
+                "natural_value": "강우량(Rainfall)",
+                "matched_mention": "강우량",
+                "logical_name": "별량코드 정보",
+            },
+            {
+                "column_fqn": "S.BYUN.BR_CODE",
+                "code_value": "FT",
+                "natural_value": "설비온도",
+                "matched_mention": "설비",
+                "logical_name": "별량코드 정보",
+            },
+        ]
+        filters = mapping_filters(rows, query=query)
+        self.assertEqual(len(filters), 1)
+        self.assertEqual(filters[0].operator, "EQ")
+        needles = measure_point_label_filters(
+            query,
+            rows,
+            tables_by_id={
+                2: {
+                    "id": 2,
+                    "logical_name": "태그 마스터",
+                    "subject_area": "master",
+                    "schema_name": "RWIS",
+                    "original_name": "rditag_tb",
+                }
+            },
+            columns_by_id={
+                2: [
+                    {
+                        "name": "TAG_ADD_DC",
+                        "metadata": {"column_name_kr": "태그 설명"},
+                    }
+                ]
+            },
+            table_ids={2},
+        )
+        self.assertEqual([item.value for item in needles], [])
+
+    def test_or_range_instances_are_not_list_targets(self) -> None:
+        query = "금강권역 또는 낙동강권역 정수장 목록"
+        self.assertFalse(is_list_target_mention(query, "금강권역"))
+        self.assertFalse(is_list_target_mention(query, "낙동강권역"))
+        self.assertTrue(is_list_target_mention(query, "정수장"))
+        rows = [
+            {
+                "column_fqn": "S.HQ.BNB_CODE",
+                "code_value": "902",
+                "natural_value": "금강유역본부",
+                "matched_mention": "금강권역",
+                "logical_name": "지역본부",
+            },
+            {
+                "column_fqn": "S.HQ.BNB_CODE",
+                "code_value": "701",
+                "natural_value": "금강유역본부(충청)",
+                "matched_mention": "금강권역",
+                "logical_name": "지역본부",
+            },
+            {
+                "column_fqn": "S.HQ.BNB_CODE",
+                "code_value": "802",
+                "natural_value": "낙동강유역본부",
+                "matched_mention": "낙동강권역",
+                "logical_name": "지역본부",
+            },
+            {
+                "column_fqn": "S.HQ.BNB_CODE",
+                "code_value": "801",
+                "natural_value": "낙동강유역본부(경남)",
+                "matched_mention": "낙동강권역",
+                "logical_name": "지역본부",
+            },
+        ]
+        filters = mapping_filters(rows, query=query)
+        self.assertEqual(len(filters), 1)
+        self.assertEqual(filters[0].operator, "IN")
+        self.assertEqual(
+            {item.strip() for item in str(filters[0].value).split(",")},
+            {"701", "801", "802", "902"},
+        )
+
     def test_list_query_does_not_request_fact(self) -> None:
-        self.assertFalse(query_requests_fact("금강권역 정수장 목록", None))
+        listed = QueryAnalysis(
+            status="complete",
+            procedure="list",
+            meaning_status="complete",
+            primary_outputs=["정수장"],
+        )
+        self.assertFalse(query_requests_fact("금강권역 정수장 목록", None, listed))
         self.assertFalse(
-            query_requests_fact("아산정수장에서 측정되고 있는 데이터들은 어떤 게 있어?", None)
+            query_requests_fact(
+                "아산정수장에서 측정되고 있는 데이터들은 어떤 게 있어?",
+                None,
+                listed,
+            )
+        )
+        metric = QueryAnalysis(
+            status="complete",
+            procedure="aggregate",
+            metric="잔류염소",
+            meaning_status="complete",
         )
         period = parse_korean_period("25년 10월 잔류염소")
-        self.assertTrue(query_requests_fact("25년 10월 잔류염소", period))
-        listed = parse_korean_period("2025년 10월 사업장 목록")
-        self.assertFalse(query_requests_fact("2025년 10월 사업장 목록", listed))
+        self.assertTrue(query_requests_fact("25년 10월 잔류염소", period, metric))
+        self.assertFalse(
+            query_requests_fact("2025년 10월 사업장 목록", None, listed)
+        )
+        gapped = QueryAnalysis(
+            status="complete",
+            procedure="extremum",
+            metric="강우량",
+            meaning_status="complete",
+            primary_outputs=["정수장", "설비"],
+        )
+        self.assertTrue(
+            query_requests_fact(
+                "한강유역 본부에 가장 강우량이 많았던 정수장이나 설비 알려주세요",
+                None,
+                gapped,
+            )
+        )
+        self.assertEqual(resolve_time_role(procedure="extremum"), "extremum")
+        self.assertEqual(resolve_time_role(procedure="list"), "none")
+
+    def test_series_or_period_metric_list_requests_fact(self) -> None:
+        series = QueryAnalysis(
+            status="complete",
+            procedure="list",
+            metric="탁도",
+            meaning_status="complete",
+            primary_outputs=["측정시점", "탁도"],
+            meaning_roles=[
+                SchemaRoleRequirement(
+                    role="측정항목",
+                    necessity="required",
+                    cardinality="one",
+                    search_terms=["탁도"],
+                )
+            ],
+        )
+        period = parse_korean_period("충주정수장 2025년 8월 탁도변화 알려줘")
+        self.assertTrue(
+            query_requests_fact(
+                "충주정수장 2025년 8월 탁도변화 알려줘",
+                period,
+                series,
+            )
+        )
+        rows = [
+            {
+                "column_fqn": "S.BYUN.BR_CODE",
+                "code_value": "TB",
+                "natural_value": "탁도",
+                "matched_mention": "탁도",
+                "logical_name": "별량코드 정보",
+            }
+        ]
+        filters = mapping_filters(rows, query="충주정수장 2025년 8월 탁도변화 알려줘", analysis=series)
+        self.assertEqual(len(filters), 1)
+        self.assertEqual(filters[0].value, "TB")
+
+    def test_extremum_low_overrides_max_default(self) -> None:
+        fact = {"id": 1, "original_name": "FACT_MM", "schema_name": "S"}
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(
+                status="complete",
+                procedure="extremum",
+                measurement=MeasurementRequirement(aggregation="MAX"),
+                metric="pH",
+            ),
+            facts=[fact],
+            columns_by_id={
+                1: [
+                    {
+                        "name": "VAL",
+                        "dtype": "numeric",
+                        "metadata": {"column_name_kr": "측정값"},
+                    }
+                ]
+            },
+            period=parse_korean_period("2025년 9월"),
+            query="2025년 9월 청주정수장에서 월 평균 PH가 제일 낮은 곳이 어디야?",
+        )
+        assert spec is not None
+        self.assertEqual(spec.function, "MIN")
+
+    def test_unspecified_grain_defaults_to_day_fact(self) -> None:
+        tables = [
+            {
+                "id": 1,
+                "logical_name": "월 DATA",
+                "subject_area": "agg",
+                "description": "01mm",
+            },
+            {
+                "id": 2,
+                "logical_name": "일 DATA",
+                "subject_area": "agg",
+                "description": "01dd",
+            },
+            {
+                "id": 3,
+                "logical_name": "시간 DATA",
+                "subject_area": "agg",
+                "description": "01hh",
+            },
+        ]
+        picked, err = pick_fact_tables(tables, None, query="가장 강우량이 많았던 곳")
+        self.assertIsNone(err)
+        self.assertEqual([int(item["id"]) for item in picked], [2])
+        self.assertEqual(
+            [int(item["id"]) for item in prefer_day_grain_facts(tables)],
+            [2],
+        )
+        month_locked, month_err = pick_fact_tables(
+            tables, "month", query="월별 평균"
+        )
+        self.assertIsNone(month_err)
+        self.assertEqual([int(item["id"]) for item in month_locked], [1])
 
     def test_ambiguous_mention_labels_are_held_back(self) -> None:
         unique, ambiguous = partition_mention_mappings(
@@ -183,6 +605,82 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertEqual(sorted(row["code_value"] for row in unique), ["701", "703"])
         self.assertEqual(ambiguous, [])
 
+    def test_hub_projects_parent_code_when_child_column_absent(self) -> None:
+        admitted = project_code_mappings_to_hub(
+            [],
+            _parent_child_code_rows(),
+            "측정값이 많았던 곳",
+            selected_ids={1},
+            tables_by_id=_parent_child_tables(),
+            columns_by_id=_parent_child_columns(hub_codes=("PARENT_CODE",)),
+            edge_rows=_parent_child_edges(),
+            edges=build_composite_edges(_parent_child_edges()),
+            max_hops=3,
+        )
+        self.assertEqual([row["code_value"] for row in admitted], ["P"])
+        self.assertEqual(admitted[0]["column_name"], "PARENT_CODE")
+
+    def test_hub_projects_child_code_when_hub_has_composite(self) -> None:
+        admitted = project_code_mappings_to_hub(
+            [],
+            _parent_child_code_rows(),
+            "측정값이 많았던 곳",
+            selected_ids={1},
+            tables_by_id=_parent_child_tables(),
+            columns_by_id=_parent_child_columns(hub_codes=("CHILD_CODE",)),
+            edge_rows=_parent_child_edges(),
+            edges=build_composite_edges(_parent_child_edges()),
+            max_hops=3,
+        )
+        self.assertEqual([row["code_value"] for row in admitted], ["C"])
+        self.assertEqual(admitted[0]["column_name"], "CHILD_CODE")
+
+    def test_child_specific_label_keeps_child_mapping(self) -> None:
+        admitted = project_code_mappings_to_hub(
+            [],
+            _parent_child_code_rows(),
+            "항목 적산이 많았던 곳",
+            selected_ids={1},
+            tables_by_id=_parent_child_tables(),
+            columns_by_id=_parent_child_columns(hub_codes=("PARENT_CODE",)),
+            edge_rows=_parent_child_edges(),
+            edges=build_composite_edges(_parent_child_edges()),
+            max_hops=3,
+        )
+        self.assertEqual([row["code_value"] for row in admitted], ["C"])
+
+    def test_unrelated_ambiguous_codes_stay_held(self) -> None:
+        held = [
+            {
+                "natural_value": "AA 임시1",
+                "code_value": "1",
+                "matched_mention": "aa",
+                "table_id": 30,
+                "column_name": "COL_A",
+                "column_fqn": "S.TMP1.COL_A",
+            },
+            {
+                "natural_value": "AA 임시2",
+                "code_value": "2",
+                "matched_mention": "aa",
+                "table_id": 31,
+                "column_name": "COL_B",
+                "column_fqn": "S.TMP2.COL_B",
+            },
+        ]
+        admitted = project_code_mappings_to_hub(
+            [],
+            held,
+            "AA 조회",
+            selected_ids={1},
+            tables_by_id=_parent_child_tables(),
+            columns_by_id=_parent_child_columns(hub_codes=("PARENT_CODE",)),
+            edge_rows=_parent_child_edges(),
+            edges=build_composite_edges(_parent_child_edges()),
+            max_hops=3,
+        )
+        self.assertEqual(admitted, [])
+
     def test_pick_fact_uses_store_logical_text(self) -> None:
         tables = [
             {
@@ -202,8 +700,8 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual([int(item["id"]) for item in picked], [1])
         kept, kept_err = pick_fact_tables(tables, None, query="항목 조회")
-        self.assertEqual({int(item["id"]) for item in kept}, {1, 2})
-        self.assertIsNotNone(kept_err)
+        self.assertEqual([int(item["id"]) for item in kept], [2])
+        self.assertIsNone(kept_err)
         mixed = [
             *tables,
             {
@@ -214,8 +712,8 @@ class StoreFirstUnitTests(unittest.TestCase):
             },
         ]
         facts_only, raw_err = pick_fact_tables(mixed, None, query="항목 조회")
-        self.assertEqual({int(item["id"]) for item in facts_only}, {1, 2})
-        self.assertIsNotNone(raw_err)
+        self.assertEqual([int(item["id"]) for item in facts_only], [2])
+        self.assertIsNone(raw_err)
         from_query, query_err = pick_fact_tables(
             tables, None, query="한달 평균 항목"
         )
@@ -398,7 +896,7 @@ class StoreFirstUnitTests(unittest.TestCase):
             ],
             table,
         )
-        self.assertEqual(set(names), {"TAGSN", "TAG_DESC", "TAG_NAME"})
+        self.assertEqual(set(names), {"TAGSN", "TAG_DESC"})
 
     def test_series_promotes_tag_master_off_bridge(self) -> None:
         tables = {
@@ -417,8 +915,33 @@ class StoreFirstUnitTests(unittest.TestCase):
             {3},
             tables_by_id=tables,
             query="충주정수장 2025년 8월 평균 탁도 알려줘",
+            needs_fact=True,
         )
-        self.assertEqual(still_bridge, {3})
+        self.assertEqual(still_bridge, set())
+
+    def test_aggregate_keeps_measure_code_when_metric_is_answer_axis(self) -> None:
+        analysis = QueryAnalysis(
+            status="complete",
+            meaning_status="complete",
+            procedure="aggregate",
+            metric="탁도",
+            primary_outputs=["평균 탁도"],
+        )
+        filters = mapping_filters(
+            [
+                {
+                    "column_fqn": "S.BYUN.BR_CODE",
+                    "code_value": "TB",
+                    "natural_value": "탁 도",
+                    "matched_mention": "탁도",
+                    "logical_name": "측정항목",
+                }
+            ],
+            query="2024년 화성정수장 평균 탁도",
+            analysis=analysis,
+        )
+        self.assertEqual(len(filters), 1)
+        self.assertEqual(filters[0].value, "TB")
 
     def test_measure_point_label_intersects_code_and_description(self) -> None:
         table = {
@@ -461,11 +984,8 @@ class StoreFirstUnitTests(unittest.TestCase):
         )
         likes = [item for item in planned if item.operator == "LIKE"]
         unused = [item for item in planned if item.operator == "NOT_LIKE"]
-        self.assertEqual(len(likes), 1)
-        self.assertEqual(likes[0].value, "%탁도%")
-        self.assertEqual(likes[0].column, "RWIS.POINT_MASTER.TAG_DESC")
+        self.assertEqual(likes, [])
         self.assertEqual(unused, [])
-        self.assertNotIn("충주", likes[0].value)
 
     def test_fact_time_column_names_keeps_store_date_drops_audit(self) -> None:
         names = fact_time_column_names(
@@ -492,6 +1012,109 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertEqual(names, ["MEAS_TM", "OBS_DT"])
         self.assertNotIn("CRT_DT", names)
 
+    def test_candidate_evidence_rejected_fact_has_reason(self) -> None:
+        items = build_candidate_evidence(
+            catalog_tables=[
+                {
+                    "id": 1,
+                    "original_name": "PLANT_TB",
+                    "schema_name": "S",
+                    "logical_name": "사업장",
+                    "matched_mention": "정수장",
+                    "match_type": "exact",
+                    "matched_field": "logical_name",
+                    "score": 1.0,
+                }
+            ],
+            fact_tables=[
+                {
+                    "id": 2,
+                    "original_name": "FACT_A",
+                    "schema_name": "S",
+                    "logical_name": "월 DATA",
+                    "description": "월 집계",
+                    "subject_area": "agg",
+                },
+                {
+                    "id": 3,
+                    "original_name": "FACT_B",
+                    "schema_name": "S",
+                    "logical_name": "일 DATA",
+                    "description": "일 집계",
+                    "subject_area": "agg",
+                },
+            ],
+            selected_ids={1, 3},
+            chosen_fact_ids={3},
+            query_requests_fact=True,
+            grain="day",
+        )
+        by_name = {item.table_name: item for item in items if item.kind == "fact"}
+        self.assertTrue(by_name["FACT_B"].selected)
+        self.assertFalse(by_name["FACT_A"].selected)
+        self.assertTrue(by_name["FACT_A"].reason.strip())
+        self.assertTrue(by_name["FACT_B"].reason.strip())
+        plant = next(item for item in items if item.kind == "catalog")
+        self.assertTrue(plant.selected)
+        self.assertEqual(plant.match_type, "exact")
+        self.assertEqual(plant.matched_field, "logical_name")
+
+    def test_list_query_fact_evidence_is_one_summary(self) -> None:
+        items = build_candidate_evidence(
+            fact_tables=[
+                {
+                    "id": 2,
+                    "original_name": "FACT_A",
+                    "schema_name": "S",
+                    "logical_name": "월 DATA",
+                    "subject_area": "agg",
+                },
+                {
+                    "id": 3,
+                    "original_name": "FACT_B",
+                    "schema_name": "S",
+                    "logical_name": "일 DATA",
+                    "subject_area": "agg",
+                },
+            ],
+            query_requests_fact=False,
+        )
+        facts = [item for item in items if item.kind == "fact"]
+        self.assertEqual(len(facts), 1)
+        self.assertFalse(facts[0].selected)
+        self.assertEqual(facts[0].reason, "목록·비측정 질의라 팩트 2개를 계획에 넣지 않음")
+        self.assertIsNone(facts[0].table_name)
+
+    def test_candidate_evidence_rejects_blank_reason(self) -> None:
+        with self.assertRaises(Exception):
+            CandidateEvidence(
+                kind="fact",
+                selected=False,
+                reason="   ",
+            )
+
+    def test_embedding_mapping_is_not_bound(self) -> None:
+        rows = [
+            {
+                "natural_value": "금강유역본부",
+                "code_value": "999",
+                "column_fqn": "S.HQ.BNB_CODE",
+                "match_type": "embedding",
+                "score": 0.99,
+            },
+            {
+                "natural_value": "금강유역본부",
+                "code_value": "902",
+                "column_fqn": "S.HQ.BNB_CODE",
+                "match_type": "exact",
+                "matched_mention": "금강권역",
+            },
+        ]
+        kept = approved_code_mappings(rows)
+        self.assertEqual([row["code_value"] for row in kept], ["902"])
+        planned = mapping_filters(rows, query="금강권역 조회")
+        self.assertEqual(planned[0].value, "902")
+
 
 class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
     async def test_decide_empty_seed_returns_no_meta(self) -> None:
@@ -499,7 +1122,16 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         repo.find_glossary_routes = AsyncMock(return_value=[])
         repo.find_value_mappings = AsyncMock(return_value=[])
         repo.find_catalog_by_mentions = AsyncMock(return_value=[])
-        analyze = AsyncMock()
+        analyze = AsyncMock(
+            return_value=QueryAnalysis(
+                status="complete",
+                intent="x",
+                procedure="lookup",
+                meaning_status="complete",
+                measurement=MeasurementRequirement(),
+                schema_roles=[],
+            )
+        )
         with (
             patch(
                 "app.services.decision_postgres.decide.get_runtime",
@@ -521,9 +1153,9 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
             "맞는 메타데이터가 없다",
             response.query_plan.unresolved_requirements or [],
         )
-        analyze.assert_not_called()
+        analyze.assert_called()
 
-    async def test_decide_calls_store_before_analyze(self) -> None:
+    async def test_decide_calls_analyze_before_store(self) -> None:
         order: list[str] = []
 
         async def glossary(_query: str):
@@ -568,14 +1200,15 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         repo.fetch_approved_columns = AsyncMock(return_value={})
         repo.execution_source_scope = AsyncMock(return_value=None)
 
-        async def analyze(question: str, store_hits=None):
+        async def analyze(question: str, timeout_s=None, store_hits=None):
             order.append("analyze")
-            self.assertIsNotNone(store_hits)
-            assert store_hits is not None
-            self.assertIn("catalog", store_hits)
+            self.assertIsNone(store_hits)
             return QueryAnalysis(
                 status="complete",
                 intent="x",
+                goal="x",
+                procedure="lookup",
+                meaning_status="complete",
                 measurement=MeasurementRequirement(),
                 schema_roles=[],
             )
@@ -597,9 +1230,9 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
                 column_top_m=None,
                 auto_resolve_entities=True,
             )
-        self.assertLess(order.index("glossary"), order.index("analyze"))
-        self.assertLess(order.index("mappings"), order.index("analyze"))
-        self.assertLess(order.index("catalog"), order.index("analyze"))
+        self.assertLess(order.index("analyze"), order.index("glossary"))
+        self.assertLess(order.index("analyze"), order.index("mappings"))
+        self.assertLess(order.index("analyze"), order.index("catalog"))
 
     async def test_decide_seed_excludes_unchosen_prefix_tables(self) -> None:
         rows = [
@@ -672,7 +1305,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         repo.fetch_approved_columns = AsyncMock(return_value={})
         repo.execution_source_scope = AsyncMock(return_value=None)
 
-        async def analyze(question: str, store_hits=None):
+        async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
                 intent="x",
@@ -721,8 +1354,8 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
                 "id": 2,
                 "original_name": "FACT_A",
                 "name": "FACT_A",
-                "logical_name": "월 DATA",
-                "description": "월 집계",
+                "logical_name": "일 DATA A",
+                "description": "일별 01dd",
                 "subject_area": "agg",
                 "schema_name": "S",
             },
@@ -730,8 +1363,8 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
                 "id": 3,
                 "original_name": "FACT_B",
                 "name": "FACT_B",
-                "logical_name": "일 DATA",
-                "description": "일 집계",
+                "logical_name": "일 DATA B",
+                "description": "일별 01dd",
                 "subject_area": "agg",
                 "schema_name": "S",
             },
@@ -746,10 +1379,14 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         repo.fetch_approved_columns = AsyncMock(return_value={})
         repo.execution_source_scope = AsyncMock(return_value=None)
 
-        async def analyze(question: str, store_hits=None):
+        async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
                 intent="x",
+                procedure="aggregate",
+                period="2024년",
+                metric="항목",
+                meaning_status="complete",
                 entities_include=["QQ항목"],
                 measurement=MeasurementRequirement(metric="항목"),
                 schema_roles=[],
@@ -772,7 +1409,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
                 getter.return_value.analyze = analyze
                 response = await decide(
                     repo,
-                    query="QQ항목 조회",
+                    query="2024년 QQ항목 조회",
                     include_matched_columns=False,
                     column_top_m=None,
                     auto_resolve_entities=True,
@@ -787,6 +1424,15 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
                 for item in (response.query_plan.unresolved_requirements or [])
             )
         )
+        facts = [
+            item
+            for item in response.query_plan.candidate_evidence
+            if item.kind == "fact"
+        ]
+        self.assertGreaterEqual(len(facts), 2)
+        self.assertTrue(all(item.reason.strip() for item in facts))
+        self.assertTrue(all(not item.selected for item in facts))
+        self.assertTrue(all(item.match_type for item in facts))
 
     async def test_decide_uses_store_fact_choice(self) -> None:
         dim = {
@@ -830,10 +1476,14 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         repo.fetch_approved_columns = AsyncMock(return_value={})
         repo.execution_source_scope = AsyncMock(return_value=None)
 
-        async def analyze(question: str, store_hits=None):
+        async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
                 intent="x",
+                procedure="aggregate",
+                period="2024년 5월 10일",
+                metric="항목",
+                meaning_status="complete",
                 entities_include=["QQ항목"],
                 measurement=MeasurementRequirement(metric="항목"),
                 schema_roles=[],
@@ -856,7 +1506,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
                 getter.return_value.analyze = analyze
                 response = await decide(
                     repo,
-                    query="QQ항목 조회",
+                    query="2024년 QQ항목 조회",
                     include_matched_columns=False,
                     column_top_m=None,
                     auto_resolve_entities=True,
@@ -864,17 +1514,25 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         finally:
             reset_fact_chooser()
         names = {table.table_name for table in response.query_plan.required_tables}
-        self.assertEqual(names, {"DIM_TB"})
+        self.assertEqual(names, {"DIM_TB", "FACT_B"})
         self.assertNotIn("FACT_A", names)
-        self.assertNotIn("FACT_B", names)
-        self.assertTrue(
+        self.assertFalse(
             any(
                 "팩트" in item
                 for item in (response.query_plan.unresolved_requirements or [])
             )
         )
+        by_name = {
+            item.table_name: item
+            for item in response.query_plan.candidate_evidence
+            if item.kind == "fact"
+        }
+        self.assertTrue(by_name["FACT_B"].selected)
+        self.assertFalse(by_name["FACT_A"].selected)
+        self.assertTrue(by_name["FACT_A"].reason.strip())
+        self.assertTrue(by_name["FACT_B"].reason.strip())
 
-    async def test_decide_adds_fact_time_column_without_period_filter(self) -> None:
+    async def test_decide_adds_fact_time_column_with_period_filter(self) -> None:
         dim = {
             "id": 1,
             "original_name": "DIM_TB",
@@ -917,10 +1575,14 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         )
         repo.execution_source_scope = AsyncMock(return_value=None)
 
-        async def analyze(question: str, store_hits=None):
+        async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
                 intent="x",
+                procedure="aggregate",
+                period="2024년",
+                metric="항목",
+                meaning_status="complete",
                 entities_include=["QQ항목"],
                 measurement=MeasurementRequirement(metric="항목"),
                 schema_roles=[],
@@ -955,7 +1617,10 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
             for item in response.query_plan.filters
             if item.meaning == "측정 기간"
         ]
-        self.assertEqual(period_filters, [])
+        self.assertEqual(len(period_filters), 1)
+        self.assertEqual(period_filters[0].resolution_status, "resolved")
+        self.assertIsNotNone(response.query_plan.aggregation)
+        self.assertIn("2024", response.query_plan.aggregation.time_scope or "")
 
     async def test_decide_keeps_group_dimension_without_value_mapping(self) -> None:
         dim = {
@@ -977,7 +1642,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         repo.fetch_approved_columns = AsyncMock(return_value={})
         repo.execution_source_scope = AsyncMock(return_value=None)
 
-        async def analyze(question: str, store_hits=None):
+        async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
                 intent="x",
@@ -1005,6 +1670,196 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
             )
         names = {table.table_name for table in response.query_plan.required_tables}
         self.assertIn("HQ_TB", names)
+
+    async def test_decide_list_does_not_select_unselected_join_hops(self) -> None:
+        hq = {
+            "id": 20,
+            "original_name": "HQ_TB",
+            "name": "HQ_TB",
+            "logical_name": "지역본부",
+            "subject_area": "master",
+            "schema_name": "S",
+            "table_id": 20,
+            "natural_value": "금강유역본부",
+            "code_value": "902",
+            "column_fqn": "S.HQ_TB.BNB_CODE",
+            "column_name": "BNB_CODE",
+            "matched_mention": "금강권역",
+        }
+        plant = {
+            "id": 30,
+            "original_name": "PLANT_TB",
+            "name": "PLANT_TB",
+            "logical_name": "사업장",
+            "description": "정수장 마스터",
+            "subject_area": "master",
+            "schema_name": "S",
+            "table_id": 30,
+            "natural_value": "금강유역본부",
+            "code_value": "902",
+            "column_fqn": "S.PLANT_TB.BNB_CODE",
+            "column_name": "BNB_CODE",
+            "matched_mention": "금강권역",
+        }
+        extra = {
+            "id": 40,
+            "original_name": "EXTRA_TB",
+            "name": "EXTRA_TB",
+            "logical_name": "코드사전",
+            "subject_area": "code",
+            "schema_name": "S",
+        }
+        repo = AsyncMock()
+        repo.find_glossary_routes = AsyncMock(return_value=[])
+        repo.find_value_mappings = AsyncMock(return_value=[hq, plant])
+        repo.find_catalog_by_mentions = AsyncMock(return_value=[plant])
+        repo.fk_neighbor_table_ids = AsyncMock(return_value={40})
+        repo.fetch_tables_by_ids = AsyncMock(return_value=[hq, plant, extra])
+        repo.fetch_join_edges = AsyncMock(
+            return_value=[
+                _fk_edge(20, 40, "HQ_TB", "EXTRA_TB", "BNB_CODE", "BNB_CODE"),
+                _fk_edge(40, 30, "EXTRA_TB", "PLANT_TB", "BNB_CODE", "BNB_CODE"),
+            ]
+        )
+        repo.fetch_approved_columns = AsyncMock(
+            return_value={
+                20: [{"name": "BNB_CODE", "metadata": {"column_name_kr": "본부코드"}}],
+                30: [
+                    {"name": "BNB_CODE", "metadata": {"column_name_kr": "본부코드"}},
+                    {"name": "SUJ_NAME", "metadata": {"column_name_kr": "사업장명"}},
+                ],
+                40: [{"name": "BNB_CODE"}],
+            }
+        )
+        repo.execution_source_scope = AsyncMock(return_value=None)
+
+        async def analyze(question: str, timeout_s=None, store_hits=None):
+            return QueryAnalysis(
+                status="complete",
+                intent="x",
+                procedure="list",
+                target="금강권역",
+                primary_outputs=["정수장"],
+                meaning_status="complete",
+                entities_include=[],
+                measurement=MeasurementRequirement(),
+                schema_roles=[],
+            )
+
+        with (
+            patch(
+                "app.services.decision_postgres.decide.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.decision_postgres.decide.get_query_analyzer"
+            ) as getter,
+        ):
+            getter.return_value.analyze = analyze
+            response = await decide(
+                repo,
+                query="금강권역 정수장 목록",
+                include_matched_columns=False,
+                column_top_m=None,
+                auto_resolve_entities=True,
+            )
+        names = {table.table_name for table in response.query_plan.required_tables}
+        self.assertIn("HQ_TB", names)
+        self.assertIn("PLANT_TB", names)
+        self.assertNotIn("EXTRA_TB", names)
+        self.assertEqual(response.query_plan.completeness, "complete")
+        self.assertFalse(
+            any(
+                "승인 JOIN 경로 없음" in str(item)
+                for item in (response.query_plan.unresolved_requirements or [])
+            )
+        )
+        evidence = response.query_plan.candidate_evidence
+        self.assertTrue(evidence)
+        self.assertTrue(all(item.reason.strip() for item in evidence))
+        plant = next(
+            item
+            for item in evidence
+            if item.kind == "catalog" and item.table_name == "PLANT_TB"
+        )
+        self.assertTrue(plant.selected)
+        mappings = [item for item in evidence if item.kind == "value_mapping"]
+        self.assertTrue(mappings)
+        self.assertTrue(any(item.selected for item in mappings))
+
+    async def test_decide_aggregate_without_period_asks_for_period(self) -> None:
+        repo = AsyncMock()
+
+        async def analyze(question: str, timeout_s=None, store_hits=None):
+            return QueryAnalysis(
+                status="complete",
+                intent="x",
+                procedure="aggregate",
+                metric="탁도",
+                meaning_status="complete",
+                measurement=MeasurementRequirement(metric="탁도", aggregation="AVG"),
+                schema_roles=[],
+            )
+
+        with (
+            patch(
+                "app.services.decision_postgres.decide.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.decision_postgres.decide.get_query_analyzer"
+            ) as getter,
+        ):
+            getter.return_value.analyze = analyze
+            response = await decide(
+                repo,
+                query="화성정수장 평균 탁도",
+                include_matched_columns=False,
+                column_top_m=None,
+                auto_resolve_entities=True,
+            )
+        self.assertEqual(response.query_plan.completeness, "failed")
+        self.assertEqual(
+            response.query_plan.unresolved_requirements, [PERIOD_REQUIRED]
+        )
+        repo.find_value_mappings.assert_not_called()
+
+    async def test_decide_lookup_average_without_period_asks_for_period(self) -> None:
+        repo = AsyncMock()
+
+        async def analyze(question: str, timeout_s=None, store_hits=None):
+            return QueryAnalysis(
+                status="complete",
+                intent="x",
+                procedure="lookup",
+                metric="평균 탁도",
+                meaning_status="complete",
+                measurement=MeasurementRequirement(metric="평균 탁도"),
+                schema_roles=[],
+            )
+
+        with (
+            patch(
+                "app.services.decision_postgres.decide.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.decision_postgres.decide.get_query_analyzer"
+            ) as getter,
+        ):
+            getter.return_value.analyze = analyze
+            response = await decide(
+                repo,
+                query="화성정수장 평균 탁도",
+                include_matched_columns=False,
+                column_top_m=None,
+                auto_resolve_entities=True,
+            )
+        self.assertEqual(response.query_plan.completeness, "failed")
+        self.assertEqual(
+            response.query_plan.unresolved_requirements, [PERIOD_REQUIRED]
+        )
+        repo.find_value_mappings.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -27,13 +27,14 @@ from app.services.decision_postgres.store_first import (
     facts_joinable_to_mappings,
     is_day_grain_table,
     is_month_grain_table,
+    join_path_left_unresolved,
     narrow_facts_by_query_clock,
     narrow_facts_for_week,
     prefer_unique_fact_type,
     pick_fact_tables,
     resolve_time_role,
 )
-from app.services.t2sql.confirm import fact_left_unresolved
+from app.services.t2sql.confirm import fact_left_unresolved, range_code_left_unresolved
 from app.services.t2sql.llm import GENERATE_PROMPT
 from app.schemas import PlannedFilter, QueryPlan
 from app.services.t2sql.engine import quote_resolved_code_literals
@@ -157,6 +158,58 @@ class AnchorJoinTests(unittest.TestCase):
         self.assertEqual(pairs, {(hq, plant)})
         self.assertEqual(connected, {hq, plant})
 
+    def test_list_without_fact_does_not_pull_unselected_hop(self) -> None:
+        hq, plant, extra = 20, 30, 40
+        edges = [
+            CompositeJoinEdge(left_table_id=hq, right_table_id=extra, confidence=1.0),
+            CompositeJoinEdge(left_table_id=extra, right_table_id=plant, confidence=1.0),
+        ]
+        paths, connected, unresolved = assemble_anchor_join_paths(
+            {hq, plant},
+            edges=edges,
+            max_hops=3,
+            fact_ids=set(),
+            mapped_ids={hq},
+            blocked_ids={extra},
+            allow_disconnected=True,
+        )
+        pairs = {
+            tuple(sorted((edge.left_table_id, edge.right_table_id)))
+            for path in paths
+            for edge in path
+        }
+        self.assertEqual(unresolved, [])
+        self.assertEqual(paths, [])
+        self.assertEqual(pairs, set())
+        self.assertEqual(connected, {hq, plant})
+        self.assertNotIn(extra, connected)
+
+    def test_list_without_fact_prefers_selected_direct_edge(self) -> None:
+        hq, plant, extra = 20, 30, 40
+        edges = [
+            CompositeJoinEdge(left_table_id=hq, right_table_id=extra, confidence=1.0),
+            CompositeJoinEdge(left_table_id=extra, right_table_id=plant, confidence=1.0),
+            CompositeJoinEdge(left_table_id=hq, right_table_id=plant, confidence=0.28),
+        ]
+        paths, connected, unresolved = assemble_anchor_join_paths(
+            {hq, plant},
+            edges=edges,
+            max_hops=3,
+            fact_ids=set(),
+            mapped_ids={hq},
+            blocked_ids={extra},
+            allow_disconnected=True,
+        )
+        pairs = {
+            tuple(sorted((edge.left_table_id, edge.right_table_id)))
+            for path in paths
+            for edge in path
+        }
+        self.assertEqual(unresolved, [])
+        self.assertEqual(pairs, {(hq, plant)})
+        self.assertEqual(connected, {hq, plant})
+        self.assertNotIn(extra, connected)
+
 
 class UnselectedFactDropTests(unittest.TestCase):
     def test_strips_unchosen_fact_keeps_dimension(self) -> None:
@@ -246,6 +299,35 @@ class FactGuessTests(unittest.TestCase):
         picked, err = pick_fact_tables(tables, "hour")
         self.assertEqual([int(item["id"]) for item in picked], [1])
         self.assertIsNone(err)
+
+    def test_unspecified_fact_defaults_to_day_not_month_or_hour(self) -> None:
+        tables = [
+            {
+                "id": 1,
+                "logical_name": "월 DATA",
+                "subject_area": "agg",
+                "description": "월별 01mm",
+            },
+            {
+                "id": 2,
+                "logical_name": "일 DATA",
+                "subject_area": "agg",
+                "description": "일별 01dd",
+            },
+            {
+                "id": 3,
+                "logical_name": "시간 DATA",
+                "subject_area": "agg",
+                "description": "시간별 01hh",
+            },
+        ]
+        picked, err = pick_fact_tables(
+            tables,
+            None,
+            query="한강유역 본부에 가장 강우량이 많았던 정수장이나 설비 알려주세요",
+        )
+        self.assertIsNone(err)
+        self.assertEqual([int(item["id"]) for item in picked], [2])
 
 
 class TimeRoleTests(unittest.TestCase):
@@ -369,34 +451,23 @@ class TimeRoleTests(unittest.TestCase):
         )
 
     def test_list_query_time_role_is_none(self) -> None:
-        self.assertEqual(resolve_time_role("금강권역 정수장 목록", None), "none")
-        self.assertEqual(
-            resolve_time_role("아산정수장에서 측정되고 있는 데이터들은 어떤 게 있어?", None),
-            "none",
-        )
+        self.assertEqual(resolve_time_role(procedure="list"), "none")
+        self.assertEqual(resolve_time_role(procedure="lookup"), "none")
 
     def test_extremum_token_without_period(self) -> None:
-        self.assertEqual(resolve_time_role("가장 높은 값과 시각", None), "extremum")
+        self.assertEqual(resolve_time_role(procedure="extremum"), "extremum")
 
     def test_parsed_period_is_none_role(self) -> None:
-        period = parse_korean_period("2025년 10월 항목")
-        self.assertEqual(resolve_time_role("2025년 10월 항목", period), "none")
+        self.assertEqual(resolve_time_role(procedure="aggregate"), "none")
 
     def test_period_with_peak_is_extremum_role(self) -> None:
-        period = parse_korean_period(
-            "25년 10월 한달동안 유량이 가장 많았던 시간/사업장/정보 알려줘"
-        )
-        self.assertEqual(
-            resolve_time_role(
-                "25년 10월 한달동안 유량이 가장 많았던 시간/사업장/정보 알려줘",
-                period,
-            ),
-            "extremum",
-        )
+        self.assertEqual(resolve_time_role(procedure="extremum"), "extremum")
 
     def test_prompt_max_only_when_latest(self) -> None:
         self.assertIn("time_role이 latest", GENERATE_PROMPT)
         self.assertIn("extremum 또는 none", GENERATE_PROMPT)
+        self.assertIn("query_analysis.procedure", GENERATE_PROMPT)
+        self.assertIn("answer_axis", GENERATE_PROMPT)
         self.assertIn("ORDER BY 측정컬럼", GENERATE_PROMPT)
         self.assertIn("VAL = (SELECT MAX(VAL)", GENERATE_PROMPT)
         self.assertNotIn(
@@ -485,7 +556,23 @@ class WeekPeriodTests(unittest.TestCase):
     def test_week_without_month_is_unparsed(self) -> None:
         self.assertTrue(week_mention("셋째 주 항목"))
         self.assertIsNone(parse_korean_period("셋째 주 항목"))
-        self.assertEqual(resolve_time_role("셋째 주 항목", None), "none")
+
+    def test_relative_year_and_bare_recent(self) -> None:
+        today = date(2026, 8, 19)
+        last = parse_korean_period("작년", today=today)
+        this = parse_korean_period("올해 평균", today=today)
+        self.assertIsNotNone(last)
+        self.assertIsNotNone(this)
+        assert last is not None and this is not None
+        self.assertEqual(last.year, 2025)
+        self.assertEqual(this.year, 2026)
+        self.assertIsNone(parse_korean_period("최근", today=today))
+        span = parse_korean_period("최근 3개월", today=today)
+        self.assertIsNotNone(span)
+        assert span is not None
+        self.assertEqual(span.week_start, date(2026, 5, 19))
+        self.assertEqual(span.week_end, today)
+        self.assertEqual(resolve_time_role(procedure=""), "none")
 
     def test_join_disambiguates_one_fact(self) -> None:
         edges = [
@@ -595,6 +682,26 @@ class FactUnresolvedGateTests(unittest.TestCase):
             )
         )
         self.assertFalse(fact_left_unresolved(QueryPlan(completeness="complete")))
+        self.assertEqual(QueryPlan(completeness="failed").time_role, "none")
+        self.assertEqual(QueryPlan(completeness="failed").answer_axis, [])
+        self.assertTrue(
+            range_code_left_unresolved(
+                QueryPlan(
+                    completeness="partial",
+                    unresolved_requirements=["범위 코드 미결합"],
+                )
+            )
+        )
+        self.assertFalse(range_code_left_unresolved(QueryPlan(completeness="complete")))
+        self.assertTrue(
+            join_path_left_unresolved(
+                QueryPlan(
+                    completeness="partial",
+                    unresolved_requirements=["승인 JOIN 경로 없음: FACT_TB"],
+                )
+            )
+        )
+        self.assertFalse(join_path_left_unresolved(QueryPlan(completeness="complete")))
 
 
 if __name__ == "__main__":

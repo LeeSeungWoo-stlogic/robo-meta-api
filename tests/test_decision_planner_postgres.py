@@ -316,7 +316,7 @@ class DecisionPlannerTests(unittest.TestCase):
 
 
 class FakeAnalyzer:
-    async def analyze(self, question: str, store_hits=None) -> QueryAnalysis:
+    async def analyze(self, question: str, timeout_s=None, store_hits=None) -> QueryAnalysis:
         del question, store_hits
         return QueryAnalysis(
             status="complete",
@@ -369,7 +369,7 @@ class FakeEmbeddingProvider:
 
 
 class FakeDegradedAnalyzer:
-    async def analyze(self, question: str, store_hits=None) -> QueryAnalysis:
+    async def analyze(self, question: str, timeout_s=None, store_hits=None) -> QueryAnalysis:
         del question, store_hits
         return QueryAnalysis(
             status="degraded",
@@ -421,13 +421,13 @@ class FakeRepository:
         }
 
     async def find_value_mappings(
-        self, question, source_instance_id=None, extra_mentions=None
+        self, needles=None, source_instance_id=None, extra_mentions=None, trusted_mentions=None
     ):
-        del question, source_instance_id, extra_mentions
+        del needles, source_instance_id, extra_mentions, trusted_mentions
         return []
 
-    async def find_glossary_routes(self, question):
-        del question
+    async def find_glossary_routes(self, needles=None):
+        del needles
         return []
 
     async def fetch_tables_by_ids(self, table_ids):

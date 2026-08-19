@@ -125,6 +125,8 @@ class DecisionRuntime:
     fk_max_hops: int = 3
     fk_path_limit: int = 50
     analysis_base_url: str | None = None
+    analysis_timeout_seconds: float = 15
+    analysis_reasoning_effort: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,6 +169,7 @@ class T2SqlRuntime:
     max_generate_retries: int = 1
     validate_max_rows: int = 5
     total_timeout_seconds: int = 60
+    expose_draft_sql: bool = False
 
     def configured(self) -> bool:
         return bool(self.model) and bool(self.base_url)
@@ -225,6 +228,7 @@ def _load_t2sql(
         max_generate_retries=int(_optional(mapping, "max_generate_retries", 1)),
         validate_max_rows=validate_max_rows,
         total_timeout_seconds=total_timeout,
+        expose_draft_sql=bool(mapping.get("expose_draft_sql") or False),
     )
 
 
@@ -310,6 +314,12 @@ def load_runtime(path: str | Path) -> RoboRuntime:
             fk_max_hops=int(_optional(decision, "fk_max_hops", 3)),
             fk_path_limit=int(_optional(decision, "fk_path_limit", 50)),
             analysis_base_url=analysis_base_url,
+            analysis_timeout_seconds=float(
+                _optional(decision, "analysis_timeout_seconds", 15)
+            ),
+            analysis_reasoning_effort=_as_bool(
+                _optional(decision, "analysis_reasoning_effort", False)
+            ),
         ),
         execution=ExecutionRuntime(
             backend=str(_required(execution, "backend")),

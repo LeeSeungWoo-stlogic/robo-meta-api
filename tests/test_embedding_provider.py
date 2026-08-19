@@ -111,6 +111,8 @@ class HttpEmbeddingProviderTests(unittest.IsolatedAsyncioTestCase):
         client_factory.assert_called_once_with(
             api_key="test-key",
             base_url="http://chat.test/v1",
+            timeout=15.0,
+            max_retries=0,
         )
 
 

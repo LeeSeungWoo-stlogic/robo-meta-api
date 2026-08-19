@@ -12,6 +12,25 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
 (Wave 0–3 적용 완료 기준, 2026-08-06)
 
+## 1.0 엔진 업데이트 (2026-08-19)
+
+자연어 → 저장소 메타 교차 → 계획 → SQL → `/query_execute`가 본 경로다.
+confirm 재판은 생략하고, 질문 전용 가드가 아니라 엔진 규칙으로 맞춘다.
+
+| 항목 | 내용 |
+| --- | --- |
+| **기간** | 집계·극값은 기간이 없으면 SQL을 만들지 않고 `기간을 지정해 주세요` |
+| **범위 OR/제외** | `금강권역 또는 낙동강권역`은 목록 축이 아니라 범위. 같은 컬럼 코드는 IN으로 합침. `아닌`은 NOT IN |
+| **팩트 필요** | 평균/합계뿐 아니라 추이·변화, 기간+측정 항목이면 팩트를 고름 |
+| **측정 항목** | 답의 축이어도 코드 필터를 유지. `pH`/`PH`처럼 짧은 표면은 저장소 코드값으로 결합 |
+| **극값** | 제일 낮/적 → MIN, 높/많 → MAX. LLM이 MAX로 적어도 질문 문구가 우선 |
+| **측정점 식별** | 태그 카탈로그 SELECT는 PK·설명. 별칭/`TAG_NAME`은 넣지 않음 |
+| **SQL 식별자** | 생성기가 `p`.'SUJ_NAME'처럼 컬럼을 문자 리터럴로 쓰면 백틱 식별자로 되돌림 |
+| **실행** | `/t2sql` `sql_fingerprint`를 `/query_execute`에서 다시 비교 가능 |
+| **검수 기동** | `docker compose -f docker-compose.meaning.yml up -d --build` (호스트 8101, orphans 유지) |
+
+관련 테스트: `tests/test_store_first.py` · `tests/test_meaning_slots.py` · `tests/test_sql_source_qualify.py` · `tests/test_engine_contracts.py`
+
 ## 1.0 엔진 업데이트 (2026-08-17)
 
 Store 승인 메타만으로 decide/T2SQL을 조립한다. 질문 ID·물리 표명·TAGSN 하드코딩 없음.
@@ -21,7 +40,7 @@ Store 승인 메타만으로 decide/T2SQL을 조립한다. 질문 ID·물리 표
 | --- | --- |
 | **기간·입도** | 기간을 팩트보다 먼저 파싱. ISO 주. 질문 문구 입도 > analyzer hint. 연 창이 day/hour를 월 팩트로 덮지 않음 |
 | **시계열 입도** | 월+추이/변화/추세/트렌드 → 일 팩트. 일+동일 시계열 → 시간 팩트. `월별` 등 명시 입도 우선 |
-| **time_role** | `latest` / `extremum` / `none`. 목록·추이는 LIMIT 없음. 극값은 측정컬럼 ORDER BY + LIMIT 1 |
+| **time_role** | 기본 `none`. `procedure=extremum`만 극값. `lookup`은 latest가 아님. 생성 정본은 procedure+answer_axis |
 | **표 선정** | 카탈로그-only JOIN 드롭. 팩트 [0]/LLM 추측 금지. JOIN은 팩트(없으면 매핑) 앵커만 |
 | **별칭·그룹** | 유역/권역/지역본부/유역본부/권역본부. `본부`는 치환 없이 그룹만. `발전` 미사용. `X별`/`X들`은 표 시드 |
 | **식별 컬럼** | 차원은 명칭·코드. 설명/비고/광역/사무소 등은 제외 |
@@ -115,7 +134,7 @@ LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector
 
 자연어로 읽기 전용 SQL과 그 SQL에 쓰인 메타(`used_metadata`)를 반환합니다.
 성공 SQL은 `/query_execute`에 그대로 넣을 수 있는 SourceName 3단 수식입니다.
-`timeout_s`는 파이프라인 벽시계이며 미지정 시 **60초**입니다.
+파이프라인 벽시계는 YAML `t2sql.total_timeout_seconds`(기본 **60초**)입니다.
 모델은 YAML `t2sql.model` 또는 env `T2SQL_LLM_MODEL`(우선)이며 `app/config.py`에는
 T2SQL 키를 넣지 않습니다. `/data_decision` Request/Response 타입을 재사용하지 않습니다.
 
@@ -152,7 +171,7 @@ T2SQL 키를 넣지 않습니다. `/data_decision` Request/Response 타입을 �
 |---|---|---|
 | `GET` | `/health` | Metadata Store 및 execution backend 설정 확인 |
 | `POST` | `/data_decision` | 자연어 질의 분석과 Metadata Context 계획 |
-| `POST` | `/t2sql` | 자연어 → 확정 SQL + used 메타 (`timeout_s` 미지정 시 60초) |
+| `POST` | `/t2sql` | 자연어 → 확정 SQL + used 메타 (벽시계는 `t2sql.total_timeout_seconds`, 기본 60초) |
 | `POST` | `/query_execute` | 검증된 읽기 전용 SQL 실행 |
 | `POST` | `/meta/batch` | metadata batch 조회 |
 | `POST` | `/meta/table` | table metadata 조회 |
@@ -211,7 +230,7 @@ export OPENAI_API_KEY='<api-key>'
   로드 실패). 소스 정본은 Metadata Store `t2s_datasources.profile_id`.
 - `t2sql`: `/t2sql` LLM 모델·파이프라인 제한. `model` 미설정(및 env `T2SQL_LLM_MODEL`
   공백)이면 부팅은 되고 `POST /t2sql`은 200 + `UPSTREAM_UNAVAILABLE`.
-  `timeout_s` 미지정 시 파이프라인 벽시계 기본 60초 (`/query_execute.timeout_s`와 다름).
+  파이프라인 벽시계는 `t2sql.total_timeout_seconds`(기본 60초). `/query_execute.timeout_s`와 다름.
 
 요청의 `source_instance_id`로 Store에서 binding을 조립합니다. Store의
 `mindsdb_integration`/`mindsdb_catalog`가 비어 있거나 서로 다르면 해당 요청은

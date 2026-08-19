@@ -39,7 +39,7 @@ python -m app.main
 ## 4) API 경로 (1.0)
 - `GET /health` (`t2sql_configured` boolean 포함. LLM/probe는 health에서 호출하지 않음)
 - `POST /data_decision`
-- `POST /t2sql` (파이프라인 `timeout_s` 미지정 시 60초. statement timeout과 다름)
+- `POST /t2sql` (파이프라인 벽시계는 `t2sql.total_timeout_seconds`, 기본 60초. statement timeout과 다름)
 - `POST /meta/batch`
 - `POST /meta/table`
 - `POST /meta/column`

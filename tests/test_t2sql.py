@@ -29,6 +29,7 @@ from app.routers import t2sql as t2sql_router
 from app.schemas import (
     META_VERSION,
     DecisionCandidate,
+    DecisionRequest,
     DecisionResponse,
     ExecutionContext,
     JoinGroup,
@@ -267,9 +268,9 @@ async def _ok_execute(**kwargs):
 
 
 class TimeoutDefaultTests(unittest.TestCase):
-    def test_omitted_timeout_is_none_and_runtime_default_is_60(self):
+    def test_request_has_no_timeout_s_and_runtime_default_is_60(self):
         req = T2SqlRequest(query="화성정수장 평균 탁도")
-        self.assertIsNone(req.timeout_s)
+        self.assertNotIn("timeout_s", req.model_fields)
         self.assertEqual(
             T2SqlRuntime(model="m", base_url="http://x").total_timeout_seconds,
             60,
@@ -396,6 +397,12 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         probe_sqls = result.probe_summary.probe_sqls
         self.assertTrue(probe_sqls)
         self.assertNotEqual(result.sql, probe_sqls[0])
+        stage_names = [item.name for item in result.pipeline_stages]
+        self.assertIn("decide", stage_names)
+        self.assertIn("confirm", stage_names)
+        self.assertIn("generate", stage_names)
+        self.assertIn("guard", stage_names)
+        self.assertIn("validate", stage_names)
 
     async def test_empty_month_fact_retries_day_grain(self):
         captured = {"overrides": [], "validate_sqls": []}
@@ -637,6 +644,86 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.sql_reason_code, "PLAN_INCOMPLETE")
         self.assertIsNone(result.sql)
 
+    async def test_fact_ambiguity_keeps_candidate_tables(self):
+        async def decide(repository, **kwargs):
+            return _decision(
+                candidates=[
+                    DecisionCandidate(
+                        db="RWIS",
+                        schema_name="RWIS",
+                        table_name="RDD01MM_TB",
+                        score=0.7,
+                        subject_area="raw",
+                    ),
+                    DecisionCandidate(
+                        db="RWIS",
+                        schema_name="RWIS",
+                        table_name="RDD01DD_TB",
+                        score=0.7,
+                        subject_area="raw",
+                    ),
+                ],
+                query_analysis=QueryAnalysis(
+                    status="complete",
+                    procedure="aggregate",
+                    meaning_status="complete",
+                    metric="탁도",
+                    period="2024년",
+                    intent="avg turbidity",
+                ),
+                query_plan=QueryPlan(
+                    completeness="partial",
+                    unresolved_requirements=["팩트 표 미선정"],
+                ),
+            )
+
+        set_t2sql_decide(decide)
+        set_t2sql_llm(confirm=_confirm_ok, generate=_generate_fact)
+        result = await run_t2sql(
+            FakeRepository(_state()),
+            T2SqlRequest(query="2024년 화성정수장 평균 탁도"),
+        )
+        self.assertEqual(result.sql_status, "failed")
+        self.assertEqual(result.sql_reason_code, "PLAN_INCOMPLETE")
+        self.assertIsNone(result.sql)
+        names = {item.table_name for item in result.used_metadata.candidates}
+        self.assertIn("RDD01MM_TB", names)
+        self.assertIn("RDD01DD_TB", names)
+
+    async def test_range_code_unresolved_blocks_generation(self):
+        async def decide(repository, **kwargs):
+            return _decision(
+                query_analysis=QueryAnalysis(
+                    status="complete",
+                    procedure="list",
+                    meaning_status="complete",
+                    target="금강권역",
+                    primary_outputs=["정수장 목록"],
+                ),
+                query_plan=QueryPlan(
+                    completeness="partial",
+                    required_tables=[
+                        PlannedTable(
+                            schema_name="RWIS",
+                            table_name="RDIBONBU_TB",
+                            role="지역본부",
+                        )
+                    ],
+                    unresolved_requirements=["범위 코드 미결합"],
+                ),
+            )
+
+        set_t2sql_decide(decide)
+        set_t2sql_llm(confirm=_confirm_ok, generate=_generate_fact)
+        result = await run_t2sql(
+            FakeRepository(_state()),
+            T2SqlRequest(query="금강권역 정수장 목록"),
+        )
+        self.assertEqual(result.sql_status, "failed")
+        self.assertEqual(result.sql_reason_code, "PLAN_INCOMPLETE")
+        self.assertEqual(result.sql_reason, "범위 코드 미결합")
+        self.assertIsNone(result.sql)
+
     async def test_generates_when_analysis_degraded_if_plan_has_tables(self):
         async def decide(repository, **kwargs):
             return _decision(
@@ -684,9 +771,9 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
             FakeRepository(_state()),
             T2SqlRequest(query="화성정수장 평균 탁도"),
         )
-        self.assertEqual(result.sql_status, "failed")
-        self.assertEqual(result.sql_reason_code, "ENTITY_UNRESOLVED")
-        self.assertIsNone(result.sql)
+        self.assertEqual(result.sql_status, "generated")
+        self.assertEqual(_norm_sql(result.sql), FACT_SQL_PUBLIC)
+        self.assertIsNone(result.sql_reason_code)
 
     async def test_confirm_reject_is_reconciled_when_plan_has_codes(self):
         async def decide(repository, **kwargs):
@@ -717,13 +804,13 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
 
         captured = {"confirm_called": False}
 
-        async def confirm_must_not_run(question, payload, timeout_s):
+        async def confirm_runs(question, payload, timeout_s):
             captured["confirm_called"] = True
             return {"accept": False, "missing": ["사업장 코드", "기간"]}
 
         set_t2sql_decide(decide)
         set_t2sql_execute(_ok_execute)
-        set_t2sql_llm(confirm=confirm_must_not_run, generate=_generate_fact)
+        set_t2sql_llm(confirm=confirm_runs, generate=_generate_fact)
         result = await run_t2sql(
             FakeRepository(_state()),
             T2SqlRequest(query="화성정수장 평균 탁도"),
@@ -731,6 +818,45 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.sql_status, "generated")
         self.assertEqual(_norm_sql(result.sql), FACT_SQL_PUBLIC)
         self.assertFalse(captured["confirm_called"])
+
+    async def test_confirm_llm_failure_keeps_store_codes(self):
+        async def decide(repository, **kwargs):
+            return _decision(
+                query_plan=QueryPlan(
+                    completeness="complete",
+                    required_tables=[
+                        PlannedTable(
+                            schema_name="RWIS",
+                            table_name="RDF01HH_TB",
+                            role="계측 팩트",
+                        )
+                    ],
+                    filters=[
+                        PlannedFilter(
+                            meaning="사업장 명칭",
+                            column="RWIS.RDITAG_TB.SUJ_CODE",
+                            operator="EQ",
+                            value="617",
+                            resolution_status="resolved",
+                            confidence=1.0,
+                        )
+                    ],
+                )
+            )
+
+        async def confirm_down(question, payload, timeout_s):
+            raise RuntimeError("confirm timeout")
+
+        set_t2sql_decide(decide)
+        set_t2sql_execute(_ok_execute)
+        set_t2sql_llm(confirm=confirm_down, generate=_generate_fact)
+        result = await run_t2sql(
+            FakeRepository(_state()),
+            T2SqlRequest(query="화성정수장 평균 탁도"),
+        )
+        self.assertEqual(result.sql_status, "generated")
+        self.assertIsNone(result.sql_reason_code)
+        self.assertIsNone(result.probe_summary.last_error)
 
     async def test_guard_rejected_sql_is_null(self):
         async def decide(repository, **kwargs):
@@ -745,7 +871,8 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.sql_status, "validation_failed")
         self.assertEqual(result.sql_reason_code, "GUARD_REJECTED")
-        self.assertEqual(_norm_sql(result.sql), FACT_SQL_NO_WHERE_PUBLIC)
+        self.assertIsNone(result.sql)
+        self.assertIsNone(result.draft_sql)
 
     async def test_validate_missing_relation_is_not_accepted(self):
         async def decide(repository, **kwargs):
@@ -768,6 +895,7 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.sql_status, "validation_failed")
         self.assertIn("does not exist", result.sql_reason or "")
+        self.assertIsNone(result.sql)
 
     async def test_unplanned_table_is_rejected(self):
         async def decide(repository, **kwargs):
@@ -818,6 +946,7 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.sql_status, "validation_failed")
         self.assertIn("계획에 없는 표", result.sql_reason or "")
+        self.assertIsNone(result.sql)
 
     async def test_validate_timeout(self):
         async def decide(repository, **kwargs):
@@ -837,7 +966,7 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.sql_status, "failed")
         self.assertEqual(result.sql_reason_code, "TIMEOUT")
-        self.assertEqual(_norm_sql(result.sql), FACT_SQL_PUBLIC)
+        self.assertIsNone(result.sql)
 
     async def test_upstream_unconfigured(self):
         runtime_config._runtime = _runtime(configured=False)
@@ -888,9 +1017,9 @@ class T2SqlHttpTests(unittest.TestCase):
             schemas["T2SqlRequest"],
             schemas.get("DecisionRequest"),
         )
-        timeout = schemas["T2SqlRequest"]["properties"]["timeout_s"]
-        dumped = str(timeout)
-        self.assertIn("60", dumped)
+        self.assertNotIn("timeout_s", schemas["T2SqlRequest"]["properties"])
+        self.assertNotIn("column_top_m", schemas["T2SqlRequest"]["properties"])
+        self.assertIn("auto_resolve_entities", schemas["T2SqlRequest"]["properties"])
 
     def test_http_generated(self):
         async def decide(repository, **kwargs):
@@ -909,6 +1038,59 @@ class T2SqlHttpTests(unittest.TestCase):
         self.assertEqual(body["sql_status"], "generated")
         self.assertEqual(_norm_sql(body["sql"]), FACT_SQL_PUBLIC)
         self.assertIsNone(body["sql_reason_code"])
+        self.assertTrue(body.get("sql_fingerprint"))
+
+    def test_auto_resolve_entities_is_not_422(self):
+        async def decide(repository, **kwargs):
+            return _decision()
+
+        set_t2sql_decide(decide)
+        set_t2sql_execute(_ok_execute)
+        set_t2sql_llm(confirm=_confirm_ok, generate=_generate_fact)
+        response = self.client.post(
+            "/t2sql",
+            json={
+                "query": "화성정수장 평균 탁도",
+                "auto_resolve_entities": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+
+    def test_decision_request_keeps_column_top_m(self):
+        props = DecisionRequest.model_json_schema()["properties"]
+        self.assertIn("column_top_m", props)
+        self.assertNotIn(
+            "column_top_m",
+            T2SqlRequest.model_json_schema()["properties"],
+        )
+
+
+class QueryExecuteFingerprintTests(unittest.TestCase):
+    def setUp(self):
+        from app.routers import query_exec as query_exec_router
+        from app.services.t2sql.fingerprint import sql_fingerprint
+
+        self.sql_fingerprint = sql_fingerprint
+        self.app = FastAPI()
+        self.app.include_router(query_exec_router.router)
+        self.client = TestClient(self.app)
+
+    def test_mismatch_fingerprint_is_400(self):
+        response = self.client.post(
+            "/query_execute",
+            json={
+                "sql": "SELECT 1",
+                "fingerprint": "not-the-hash",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_fingerprint_field_is_optional(self):
+        from app.schemas import QueryExecuteRequest
+
+        req = QueryExecuteRequest(sql="SELECT 1")
+        self.assertIsNone(req.fingerprint)
 
 
 class MainAppRouteTests(unittest.TestCase):

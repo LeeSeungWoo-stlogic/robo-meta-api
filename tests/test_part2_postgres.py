@@ -182,7 +182,7 @@ class MindsDbNamespaceGuardTests(unittest.TestCase):
             "SELECT * FROM RWIS.rditag_tb LIMIT 5",
             execution_context=context,
         )
-        self.assertIn("`allowed_catalog`.`RDITAG_TB`", rewritten)
+        self.assertIn("`allowed_catalog`.`rditag_tb`", rewritten)
         _validate_namespaces(rewritten, context)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from sqlglot import exp, parse_one
@@ -17,8 +18,29 @@ class SqlTableRef:
     table_name: str
 
 
+_IDENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _ident(name: str, *, quoted: bool = True) -> exp.Identifier:
     return exp.Identifier(this=name, quoted=quoted)
+
+
+def _ident_from_literal(node: exp.Expression | None) -> exp.Identifier | None:
+    if not isinstance(node, exp.Literal) or not node.is_string:
+        return None
+    name = str(node.this or "")
+    if not _IDENT_NAME.match(name):
+        return None
+    return _ident(name, quoted=True)
+
+
+def promote_column_ident_literals(expression: exp.Expression) -> None:
+    """생성기가 alias.'COL' 문자 리터럴을 쓰면 식별자로 되돌린다."""
+
+    for column in list(expression.find_all(exp.Column)):
+        ident = _ident_from_literal(column.this)
+        if ident is not None:
+            column.set("this", ident)
 
 
 def _table_parts(table: exp.Table) -> tuple[str, str, str]:
@@ -200,8 +222,9 @@ def fold_quoted_idents_lower(
     """Lowercase quoted identifiers for Postgres, except keep_names.
 
     MindsDB forwards backtick-quoted names as case-preserving Postgres
-    identifiers. Store/Tibero metadata often has SUJ_NAME while Postgres
-    columns are suj_name. Table original_name must stay in keep_names.
+    identifiers. Unquoted Postgres folds to lowercase; quoted `TAGSN`
+    becomes "TAGSN" and misses tagsn. keep_names is the MindsDB catalog
+    / source_name, which must not be folded.
     """
 
     keep = {str(name).lower() for name in (keep_names or ()) if name}
@@ -265,6 +288,7 @@ def compact_public_sql(
         expression = parse_one(sql, read=parser_dialect)
     except Exception:
         return sql
+    promote_column_ident_literals(expression)
 
     cte_names = {
         str(cte.alias_or_name).lower()
@@ -381,6 +405,7 @@ def to_source_name_sql(
         expression = parse_one(sql, read=parser_dialect)
     except Exception:
         return sql
+    promote_column_ident_literals(expression)
     cte_names = {
         str(cte.alias_or_name).lower()
         for cte in expression.find_all(exp.CTE)
@@ -446,6 +471,10 @@ def _rewrite_column_quals(
                 column.set("catalog", None)
                 column.set("db", None)
             ident = column.this
+            promoted = _ident_from_literal(ident)
+            if promoted is not None:
+                column.set("this", promoted)
+                ident = promoted
             if isinstance(ident, exp.Identifier) and ident.this:
                 ident.set("this", str(ident.this))
                 ident.set("quoted", True)
@@ -486,6 +515,7 @@ def qualify_and_rewrite(
         expression = parse_one(sql, read=parser_dialect)
     except Exception as exc:
         raise GuardError(f"SQL parser validation failed: {exc}") from exc
+    promote_column_ident_literals(expression)
 
     cte_names = {
         str(cte.alias_or_name).lower()
@@ -552,4 +582,17 @@ def qualify_and_rewrite(
         aliases=aliases,
         cte_names=cte_names,
     )
-    return expression.sql(dialect=parser_dialect)
+    rewritten = expression.sql(dialect=parser_dialect)
+    if require_upper:
+        return rewritten
+    keep = {
+        str(mindsdb_catalog or ""),
+        str(execution_context.catalog or ""),
+        str(execution_context.integration or ""),
+        str(execution_context.source_name or ""),
+    }
+    return fold_quoted_idents_lower(
+        rewritten,
+        parser_dialect=parser_dialect,
+        keep_names=keep,
+    )

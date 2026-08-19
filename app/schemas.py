@@ -207,6 +207,7 @@ FilterOperator = Literal[
     "EQ",
     "NE",
     "IN",
+    "NOT_IN",
     "BETWEEN",
     "GT",
     "GTE",
@@ -269,6 +270,16 @@ class QueryAnalysis(BaseModel):
     search_keywords: QuerySearchKeywords = Field(
         default_factory=QuerySearchKeywords
     )
+    goal: str = ""
+    procedure: str = ""
+    procedure_why: str = ""
+    metric: str = ""
+    target: str = ""
+    period: str = ""
+    meaning_roles: List[SchemaRoleRequirement] = Field(default_factory=list)
+    primary_outputs: List[str] = Field(default_factory=list)
+    answer_must_include: List[str] = Field(default_factory=list)
+    meaning_status: str = ""
 
 
 class PlannedTable(TableKey):
@@ -307,6 +318,44 @@ class PlannedFilter(BaseModel):
     confidence: float = 0.0
 
 
+class PlanAggregation(BaseModel):
+    """Optional aggregation contract. Missing store facts stay null. LLM must not fill."""
+
+    function: Optional[str] = None
+    value_column: Optional[str] = None
+    weighted: Optional[bool] = None
+    weight_column: Optional[str] = None
+    null_outlier_policy: Optional[str] = None
+    time_scope: Optional[str] = None
+    data_as_of: Optional[str] = None
+    tag_combine: Optional[str] = None
+
+
+class CandidateEvidence(BaseModel):
+    """값매핑·카탈로그·팩트 후보의 적중·선정 근거. 사유는 비울 수 없다."""
+
+    kind: Literal["value_mapping", "catalog", "fact"]
+    mention: Optional[str] = None
+    match_type: Optional[str] = None
+    matched_field: Optional[str] = None
+    score: Optional[float] = None
+    selected: bool
+    reason: str = Field(..., min_length=1)
+    table_id: Optional[int] = None
+    table_name: Optional[str] = None
+    schema_name: Optional[str] = None
+    code_value: Optional[str] = None
+    column_fqn: Optional[str] = None
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("candidate evidence reason must not be blank")
+        return text
+
+
 class QueryPlan(BaseModel):
     completeness: PlanCompleteness
     strategy: Optional[RecommendedStrategy] = None
@@ -315,7 +364,10 @@ class QueryPlan(BaseModel):
     join_paths: List[PlannedJoinPath] = Field(default_factory=list)
     filters: List[PlannedFilter] = Field(default_factory=list)
     unresolved_requirements: List[str] = Field(default_factory=list)
-    time_role: Literal["latest", "extremum", "none"] = "latest"
+    time_role: Literal["latest", "extremum", "none"] = "none"
+    answer_axis: List[str] = Field(default_factory=list)
+    aggregation: Optional[PlanAggregation] = None
+    candidate_evidence: List[CandidateEvidence] = Field(default_factory=list)
 
 class MatchedColumn(BaseModel):
     """자연어 질의-컬럼 매칭 결과. 컬럼 RAG(`embedding_columns`) 활성화 후 채워짐.
@@ -521,21 +573,20 @@ class T2SqlRequest(BaseModel):
         default=True,
         description="False면 used_metadata.candidates[].matched_columns 를 비운다. 생성기 내부 매칭은 유지.",
     )
-    column_top_m: Optional[int] = Field(default=None, ge=1, le=50)
-    table_limit: Optional[int] = Field(default=None, ge=1, le=50)
-    auto_resolve_entities: bool = Field(
-        default=True,
-        description="True면 Store value mapping을 confirm 입력에 시드. false여도 probe+confirm은 실행.",
-    )
-    timeout_s: Optional[int] = Field(
+    table_limit: Optional[int] = Field(
         default=None,
         ge=1,
-        le=120,
+        le=50,
         description=(
-            "파이프라인 벽시계(초). 미지정 시 runtime total_timeout_seconds. "
-            "/query_execute.timeout_s(statement timeout)와 다름."
+            "계획에 올릴 표 수 상한. 미지정 시 runtime decision.table_top_k."
         ),
-        examples=[60],
+    )
+    auto_resolve_entities: bool = Field(
+        default=True,
+        description=(
+            "include_resolved_entities와 동일. True면 응답 "
+            "used_metadata.resolved_entities를 채운다. false여도 계획 필터·probe·confirm은 실행."
+        ),
     )
 
     @field_validator("query")
@@ -554,6 +605,7 @@ class T2SqlUsedMetadata(BaseModel):
     execution_context: Optional[ExecutionContext] = None
     query_analysis: Optional[QueryAnalysis] = None
     query_plan: Optional[QueryPlan] = None
+    candidate_evidence: List[CandidateEvidence] = Field(default_factory=list)
 
 
 class ProbeSummary(BaseModel):
@@ -566,16 +618,31 @@ class ProbeSummary(BaseModel):
     last_error: Optional[str] = None
 
 
+class PipelineStage(BaseModel):
+    name: str
+    elapsed_ms: float = 0.0
+    candidate_count: Optional[int] = None
+    model: Optional[str] = None
+    prompt: Optional[str] = None
+    snapshot_id: Optional[str] = None
+    validation_error: Optional[str] = None
+    detail: Optional[str] = None
+
+
 class T2SqlResponse(BaseModel):
     meta_version: str = META_VERSION
     generation_id: str
     sql: Optional[str] = None
+    draft_sql: Optional[str] = None
     sql_status: SqlStatus
     sql_reason: Optional[str] = None
     sql_reason_code: Optional[SqlReasonCode] = None
     elapsed_ms: float = 0.0
     used_metadata: T2SqlUsedMetadata = Field(default_factory=T2SqlUsedMetadata)
     probe_summary: ProbeSummary = Field(default_factory=ProbeSummary)
+    pipeline_stages: List[PipelineStage] = Field(default_factory=list)
+    metadata_snapshot_id: Optional[str] = None
+    sql_fingerprint: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +683,13 @@ class QueryExecuteRequest(BaseModel):
         default=None, ge=1, le=100000,
         description="반환 최대 행수 (기본 1000, 최대 10000)",
         examples=[100],
+    )
+    fingerprint: Optional[str] = Field(
+        default=None,
+        description=(
+            "/t2sql sql_fingerprint. 있으면 실행 SQL과 다시 비교한다. "
+            "없어도 기존 읽기 SQL 가드 후 실행한다. 필수가 아니다."
+        ),
     )
 
     model_config = {

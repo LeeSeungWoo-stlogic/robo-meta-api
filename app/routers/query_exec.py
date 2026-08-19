@@ -12,6 +12,7 @@ from ..services.execution_context_resolver import resolve_execution_context
 from ..services import query_runner_mindsdb as query_runner
 from ..services.sql_guard import GuardError
 from ..services.sql_source_qualify import assert_single_sql_source
+from ..services.t2sql.fingerprint import sql_fingerprint
 
 
 router = APIRouter(tags=["query"])
@@ -63,6 +64,13 @@ async def query_execute(req: QueryExecuteRequest, request: Request) -> QueryExec
     artifact_payload = None
     if req.artifact_id:
         artifact_payload = await _resolve_artifact_payload(request, req.artifact_id)
+    if req.fingerprint:
+        actual = sql_fingerprint(req.sql)
+        if actual != str(req.fingerprint).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="sql fingerprint does not match",
+            )
     try:
         # Pipeline: claim dual-accept → SQL 단일 소스 → resolve → execute(qualify)
         sql_source_key = assert_single_sql_source(req.sql, parser_dialect="mysql")

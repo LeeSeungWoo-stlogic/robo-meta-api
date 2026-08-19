@@ -12,6 +12,7 @@ from ...runtime_config import get_runtime
 from ...schemas import (
     DecisionResponse,
     ExecutionContext,
+    PipelineStage,
     ProbeSummary,
     QueryPlan,
     SqlReasonCode,
@@ -21,10 +22,19 @@ from ...schemas import (
     T2SqlUsedMetadata,
 )
 from ..decision_postgres.decide import decide as decide_postgres
-from ..decision_postgres.grain import TimeGrain, empty_result_fallback_grain
+from ..decision_postgres.grain import (
+    TimeGrain,
+    empty_result_fallback_grain,
+    grain_fallback_reason,
+    resolve_time_grain,
+)
 from ..decision_postgres.period import parse_korean_period
 from ..decision_postgres.store_first import (
     is_fact_unresolved_reason,
+    is_period_required_reason,
+    is_range_code_unresolved_reason,
+    join_path_left_unresolved,
+    period_required_unresolved,
     query_requests_fact,
 )
 from ..execution_context_resolver import (
@@ -38,11 +48,14 @@ from ..sql_source_qualify import compact_public_sql, extract_sql_table_refs
 from .confirm import (
     align_entities_to_plan,
     fact_left_unresolved,
+    range_code_left_unresolved,
     reconcile_confirm,
+    resolved_code_filter_values,
     resolved_plan_values,
     should_skip_confirm,
 )
-from .join_on import missing_approved_on_predicates
+from .fingerprint import sql_fingerprint as make_sql_fingerprint
+from .join_on import guard_generated_sql
 from .llm import confirm_intent, generate_sql
 from .probe import (
     assert_sql_in_allowlist,
@@ -51,7 +64,12 @@ from .probe import (
     probe_allowlist,
     with_limit,
 )
-from .used_meta import empty_used_metadata, filter_used_metadata, used_table_keys
+from .used_meta import (
+    empty_used_metadata,
+    filter_used_metadata,
+    used_metadata_for_plan,
+    used_table_keys,
+)
 
 ExecuteFn = Callable[..., Awaitable[dict[str, Any]]]
 DecideFn = Callable[..., Awaitable[DecisionResponse]]
@@ -91,6 +109,9 @@ def _empty(
     reason: str | None,
     used: T2SqlUsedMetadata | None = None,
     probe: ProbeSummary | None = None,
+        pipeline_stages: list[PipelineStage] | None = None,
+        metadata_snapshot_id: str | None = None,
+        sql_fingerprint: str | None = None,
 ) -> T2SqlResponse:
     return T2SqlResponse(
         generation_id=generation_id,
@@ -101,7 +122,47 @@ def _empty(
         elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
         used_metadata=used or empty_used_metadata(),
         probe_summary=probe or ProbeSummary(),
+        pipeline_stages=list(pipeline_stages or []),
+        metadata_snapshot_id=metadata_snapshot_id,
+        sql_fingerprint=sql_fingerprint,
     )
+
+
+def _record_stage(
+    stages: list[PipelineStage],
+    generation_id: str,
+    name: str,
+    started: float,
+    **fields: Any,
+) -> None:
+    elapsed = round((time.perf_counter() - started) * 1000.0, 1)
+    stage = PipelineStage(name=name, elapsed_ms=elapsed, **{
+        key: value for key, value in fields.items() if value is not None
+    })
+    stages.append(stage)
+    logger.warning(
+        "t2sql stage generation_id=%s name=%s elapsed_ms=%s candidate_count=%s model=%s prompt=%s snapshot_id=%s validation_error=%s detail=%s",
+        generation_id,
+        stage.name,
+        stage.elapsed_ms,
+        stage.candidate_count,
+        stage.model,
+        stage.prompt,
+        stage.snapshot_id,
+        stage.validation_error,
+        stage.detail,
+    )
+
+
+def _failed_sql_fields(
+    sql_text: str | None,
+    resolved: ResolvedExecutionContext | None,
+    settings: Any,
+) -> dict[str, str | None]:
+    draft = _public_sql(sql_text, resolved) if sql_text else None
+    if draft and bool(getattr(settings, "expose_draft_sql", False)):
+        return {"sql": None, "draft_sql": draft}
+    return {"sql": None, "draft_sql": None}
 
 
 def _public_sql(
@@ -141,7 +202,7 @@ def quote_resolved_code_literals(sql: str, plan: QueryPlan | None) -> str:
     for filt in plan.filters:
         if filt.resolution_status != "resolved":
             continue
-        if filt.operator not in {"EQ", "IN"}:
+        if filt.operator not in {"EQ", "IN", "NE", "NOT_IN"}:
             continue
         for part in str(filt.value or "").split(","):
             code = part.strip()
@@ -155,7 +216,17 @@ def quote_resolved_code_literals(sql: str, plan: QueryPlan | None) -> str:
             rewritten,
         )
         rewritten = re.sub(
+            rf"(<>\s*)(?!['\"]){re.escape(code)}\b",
+            rf"\1'{code}'",
+            rewritten,
+        )
+        rewritten = re.sub(
             rf"(\bIN\s*\((?:[^)]*?))(?<!['\d]){re.escape(code)}\b",
+            rf"\1'{code}'",
+            rewritten,
+        )
+        rewritten = re.sub(
+            rf"(\bNOT\s+IN\s*\((?:[^)]*?))(?<!['\d]){re.escape(code)}\b",
             rf"\1'{code}'",
             rewritten,
         )
@@ -184,14 +255,17 @@ async def _decide(
     repository: Any,
     req: T2SqlRequest,
     grain_override: TimeGrain | None = None,
+    analysis_timeout_s: float | None = None,
 ) -> DecisionResponse:
     fn = _decide_override or decide_postgres
+    remaining = analysis_timeout_s
     kwargs: dict[str, Any] = {
         "query": req.query,
         "include_matched_columns": True,
-        "column_top_m": req.column_top_m,
+        "column_top_m": None,
         "table_limit": req.table_limit,
         "auto_resolve_entities": req.auto_resolve_entities,
+        "analysis_timeout_s": remaining,
     }
     if grain_override is not None:
         kwargs["grain_override"] = grain_override
@@ -286,9 +360,12 @@ def _uses_unfiltered_fact(sql: str, probe_allowed: set[tuple[str, str]]) -> bool
 async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
     generation_id = str(uuid4())
     started = time.perf_counter()
+    stages: list[PipelineStage] = []
+    snapshot_id: str | None = None
     settings = _t2sql_settings()
     if settings is None or not settings.configured():
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
@@ -296,7 +373,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
             reason="T2SQL 모델이 설정되지 않았습니다",
         )
 
-    budget = _Budget(float(req.timeout_s or settings.total_timeout_seconds))
+    budget = _Budget(float(settings.total_timeout_seconds))
     runtime = get_runtime()
     max_stmt = runtime.execution.maximum_timeout_seconds
 
@@ -309,6 +386,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
 
     if budget.expired():
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
@@ -316,9 +394,32 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
             reason="파이프라인 시간 초과",
         )
 
-    decision = await _decide(repository, req)
+    decide_started = time.perf_counter()
+    decision = await _decide(
+        repository,
+        req,
+        analysis_timeout_s=max(0.0, budget.remaining()),
+    )
+    _record_stage(
+        stages,
+        generation_id,
+        "decide",
+        decide_started,
+        candidate_count=len(decision.candidates),
+        detail=(
+            None
+            if decision.query_plan is None
+            else ",".join(
+                item.reason
+                for item in decision.query_plan.candidate_evidence
+                if not item.selected
+            )[:300]
+            or None
+        ),
+    )
     if budget.expired():
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
@@ -332,14 +433,15 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
         plan.unresolved_requirements or []
     ):
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
             code="NO_METADATA",
             reason="맞는 메타데이터가 없다",
-            used=T2SqlUsedMetadata(
+            used=used_metadata_for_plan(
                 query_analysis=analysis,
-                query_plan=plan,
+                plan=plan,
             ),
         )
     mapping_hints = []
@@ -368,14 +470,90 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
             "팩트 표 미선정",
         )
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
             code="PLAN_INCOMPLETE",
             reason=reason,
-            used=T2SqlUsedMetadata(
+            used=used_metadata_for_plan(
                 query_analysis=analysis,
-                query_plan=plan,
+                plan=plan,
+                candidates=decision.candidates,
+                join_groups=decision.join_groups,
+                resolved_entities=decision.resolved_entities,
+                execution_context=decision.execution_context,
+            ),
+        )
+    if range_code_left_unresolved(plan):
+        reason = next(
+            (
+                str(item)
+                for item in (plan.unresolved_requirements or [])
+                if is_range_code_unresolved_reason(str(item))
+            ),
+            "범위 코드 미결합",
+        )
+        return _empty(
+            pipeline_stages=stages,
+            generation_id=generation_id,
+            started=started,
+            status="failed",
+            code="PLAN_INCOMPLETE",
+            reason=reason,
+            used=used_metadata_for_plan(
+                query_analysis=analysis,
+                plan=plan,
+                candidates=decision.candidates,
+                join_groups=decision.join_groups,
+                resolved_entities=decision.resolved_entities,
+                execution_context=decision.execution_context,
+            ),
+        )
+    if period_required_unresolved(plan):
+        reason = next(
+            (
+                str(item)
+                for item in (plan.unresolved_requirements or [])
+                if is_period_required_reason(str(item))
+            ),
+            "기간을 지정해 주세요",
+        )
+        return _empty(
+            pipeline_stages=stages,
+            generation_id=generation_id,
+            started=started,
+            status="failed",
+            code="PLAN_INCOMPLETE",
+            reason=reason,
+            used=used_metadata_for_plan(
+                query_analysis=analysis,
+                plan=plan,
+                candidates=decision.candidates,
+                join_groups=decision.join_groups,
+                resolved_entities=decision.resolved_entities,
+                execution_context=decision.execution_context,
+            ),
+        )
+    if needs_fact and join_path_left_unresolved(plan):
+        reason = next(
+            (
+                str(item)
+                for item in (plan.unresolved_requirements or [])
+                if "승인 JOIN 경로 없음" in str(item)
+            ),
+            "승인 JOIN 경로 없음",
+        )
+        return _empty(
+            pipeline_stages=stages,
+            generation_id=generation_id,
+            started=started,
+            status="failed",
+            code="PLAN_INCOMPLETE",
+            reason=reason,
+            used=used_metadata_for_plan(
+                query_analysis=analysis,
+                plan=plan,
                 candidates=decision.candidates,
                 join_groups=decision.join_groups,
                 resolved_entities=decision.resolved_entities,
@@ -396,14 +574,15 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
     has_resolved = bool(plan and resolved_plan_values(plan))
     if plan is None or not (has_tables or has_resolved):
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
             code="PLAN_INCOMPLETE",
             reason="query_plan에 생성할 표나 resolved 필터가 없습니다",
-            used=T2SqlUsedMetadata(
+            used=used_metadata_for_plan(
                 query_analysis=analysis,
-                query_plan=plan,
+                plan=plan,
                 candidates=decision.candidates,
                 join_groups=decision.join_groups,
                 resolved_entities=decision.resolved_entities,
@@ -412,14 +591,15 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
         )
     if any(group.cross_db for group in decision.join_groups):
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
             code="CROSS_DB",
             reason="이종 소스 JOIN은 허용되지 않습니다",
-            used=T2SqlUsedMetadata(
+            used=used_metadata_for_plan(
                 query_analysis=analysis,
-                query_plan=plan,
+                plan=plan,
                 candidates=decision.candidates,
                 join_groups=decision.join_groups,
                 resolved_entities=decision.resolved_entities,
@@ -429,6 +609,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
     source_id = await _source_id(repository, decision)
     if not source_id:
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
@@ -439,12 +620,14 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
     scope = await repository.execution_source_scope(source_id)
     if scope is None:
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
             code="PLAN_INCOMPLETE",
             reason="Metadata Store에 datasource가 없습니다",
         )
+    snapshot_id = str(scope.get("snapshot_id") or "").strip() or None
 
     probe_allowed = probe_allowlist(
         list(scope.get("allowed_object_refs") or []),
@@ -461,6 +644,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
         )
     except ExecutionBindingError as exc:
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
@@ -469,9 +653,9 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
             probe=probe,
         )
 
-    used_after_decide = T2SqlUsedMetadata(
+    used_after_decide = used_metadata_for_plan(
         query_analysis=analysis,
-        query_plan=plan,
+        plan=plan,
         candidates=decision.candidates,
         join_groups=decision.join_groups,
         resolved_entities=decision.resolved_entities,
@@ -482,6 +666,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
         if budget.expired():
             probe.elapsed_ms = round((time.perf_counter() - probe_started) * 1000.0, 1)
             return _empty(
+            pipeline_stages=stages,
                 generation_id=generation_id,
                 started=started,
                 status="failed",
@@ -519,6 +704,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
             probe.last_error = str(result.get("error") or "timeout")
             probe.elapsed_ms = round((time.perf_counter() - probe_started) * 1000.0, 1)
             return _empty(
+            pipeline_stages=stages,
                 generation_id=generation_id,
                 started=started,
                 status="failed",
@@ -548,6 +734,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
 
     if budget.expired():
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
@@ -557,7 +744,10 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
         )
 
     aligned_entities = align_entities_to_plan(decision.resolved_entities, plan)
-    if should_skip_confirm(plan):
+    confirm: dict[str, Any]
+    confirm_started = time.perf_counter()
+    confirm_model = str(getattr(settings, "model", "") or "") or None
+    if should_skip_confirm(plan, analysis=analysis):
         confirm = {"accept": True, "missing": []}
         logger.warning(
             "t2sql confirm skipped generation_id=%s plan=complete filters=%s",
@@ -582,24 +772,62 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                 llm_timeout(),
             )
         except Exception as exc:
-            return _empty(
-                generation_id=generation_id,
-                started=started,
-                status="failed",
-                code="UPSTREAM_UNAVAILABLE",
-                reason=f"confirm LLM 실패: {exc}",
-                probe=probe,
-                used=used_after_decide,
+            if resolved_code_filter_values(plan):
+                logger.warning(
+                    "t2sql confirm degraded generation_id=%s error=%s",
+                    generation_id,
+                    exc,
+                )
+                if not probe.last_error:
+                    probe.last_error = f"confirm degraded: {exc}"
+                confirm = {"accept": True, "missing": []}
+            else:
+                _record_stage(
+                    stages,
+                    generation_id,
+                    "confirm",
+                    confirm_started,
+                    model=confirm_model,
+                    prompt="CONFIRM_PROMPT",
+                    detail=str(exc),
+                )
+                return _empty(
+                    pipeline_stages=stages,
+                    generation_id=generation_id,
+                    started=started,
+                    status="failed",
+                    code="UPSTREAM_UNAVAILABLE",
+                    reason=f"confirm LLM 실패: {exc}",
+                    probe=probe,
+                    used=used_after_decide,
+                )
+        else:
+            confirm = reconcile_confirm(
+                raw_confirm,
+                plan=plan,
+                analysis=analysis,
+                entities=aligned_entities,
+                query=req.query,
             )
-        confirm = reconcile_confirm(raw_confirm, plan=plan, analysis=analysis)
-        logger.warning(
-            "t2sql confirm generation_id=%s raw=%s reconciled=%s",
-            generation_id,
-            raw_confirm,
-            confirm,
-        )
+            logger.warning(
+                "t2sql confirm generation_id=%s raw=%s reconciled=%s",
+                generation_id,
+                raw_confirm,
+                confirm,
+            )
+    _record_stage(
+        stages,
+        generation_id,
+        "confirm",
+        confirm_started,
+        model=confirm_model,
+        prompt="CONFIRM_PROMPT",
+        candidate_count=len(aligned_entities),
+        detail="degraded" if (probe.last_error or "").startswith("confirm degraded") else None,
+    )
     if not bool(confirm.get("accept")):
         return _empty(
+            pipeline_stages=stages,
             generation_id=generation_id,
             started=started,
             status="failed",
@@ -607,9 +835,9 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
             reason="의도 확인이 거부되었습니다: "
             + ",".join(str(item) for item in (confirm.get("missing") or [])),
             probe=probe,
-            used=T2SqlUsedMetadata(
+            used=used_metadata_for_plan(
                 query_analysis=analysis,
-                query_plan=plan,
+                plan=plan,
                 candidates=decision.candidates,
                 join_groups=decision.join_groups,
                 resolved_entities=aligned_entities,
@@ -630,7 +858,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
     }
     first_success: T2SqlResponse | None = None
     grain_retry_used = False
-    empty_month_reason = "월 팩트 0건으로 일 팩트를 재조회했습니다"
+    grain_retry_reason: str | None = None
     while True:
         success: T2SqlResponse | None = None
         empty_ok = False
@@ -639,6 +867,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
         for _ in range(attempts):
             if budget.expired():
                 return first_success or _empty(
+                    pipeline_stages=stages,
                     generation_id=generation_id,
                     started=started,
                     status="failed",
@@ -646,6 +875,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                     reason="파이프라인 시간 초과",
                     probe=probe,
                 )
+            generate_started = time.perf_counter()
             try:
                 sql_text = await generate_sql(
                     req.query,
@@ -665,9 +895,19 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                     llm_timeout(),
                 )
             except Exception as exc:
+                _record_stage(
+                    stages,
+                    generation_id,
+                    "generate",
+                    generate_started,
+                    model=str(getattr(settings, "model", "") or "") or None,
+                    prompt="GENERATE_PROMPT",
+                    detail=str(exc),
+                )
                 if first_success is not None:
                     return first_success
                 return _empty(
+                    pipeline_stages=stages,
                     generation_id=generation_id,
                     started=started,
                     status="failed",
@@ -675,35 +915,44 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                     reason=f"generate LLM 실패: {exc}",
                     probe=probe,
                 )
+            _record_stage(
+                stages,
+                generation_id,
+                "generate",
+                generate_started,
+                model=str(getattr(settings, "model", "") or "") or None,
+                prompt="GENERATE_PROMPT",
+            )
             sql_text = _strip_sql_fence(sql_text)
             sql_text = quote_resolved_code_literals(sql_text, plan)
             if sql_text.upper().startswith("NO_SQL"):
                 if first_success is not None:
                     return first_success
                 return _empty(
+                    pipeline_stages=stages,
                     generation_id=generation_id,
                     started=started,
                     status="failed",
                     code="GENERATION_FAILED",
                     reason=sql_text,
                     probe=probe,
+                    used=used_after_decide,
                 )
             if not sql_text:
                 last_guard = "빈 SQL"
                 continue
+            guard_started = time.perf_counter()
             try:
                 assert_sql_in_allowlist(sql_text, store_allowed)
                 if _uses_unfiltered_fact(sql_text, probe_allowed):
                     raise GuardError("fact 테이블은 WHERE 필터가 필요합니다")
-                missing_on = missing_approved_on_predicates(
-                    sql_text,
-                    plan.join_paths if plan else [],
-                )
-                if missing_on:
-                    raise GuardError("승인 JOIN ON이 빠짐: " + ",".join(missing_on))
+                ast_reason = guard_generated_sql(sql_text, plan, analysis)
+                if ast_reason:
+                    raise GuardError(ast_reason)
                 extra_tables = _unplanned_sql_tables(sql_text, plan)
                 if extra_tables:
                     raise GuardError("계획에 없는 표: " + ",".join(extra_tables))
+                _record_stage(stages, generation_id, "guard", guard_started)
                 used_keys = used_table_keys(sql_text)
                 validate_sql = with_limit(sql_text, settings.validate_max_rows)
                 requested = sorted({table for _, table in used_keys if table})
@@ -712,6 +961,7 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                     source_instance_id=source_id,
                     requested_objects=requested or None,
                 )
+                validate_started = time.perf_counter()
                 result = await _execute(
                     sql=validate_sql,
                     timeout_s=stmt_timeout(max_stmt),
@@ -719,22 +969,45 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                     caller="t2sql_validate",
                     execution_context=resolved_validate,
                 )
+                _record_stage(
+                    stages,
+                    generation_id,
+                    "validate",
+                    validate_started,
+                    validation_error=(
+                        None
+                        if result.get("status") in {None, "ok", "success"}
+                        else str(result.get("status") or result.get("error") or "")
+                    ),
+                )
             except GuardError as exc:
+                _record_stage(
+                    stages,
+                    generation_id,
+                    "guard",
+                    guard_started,
+                    validation_error=str(exc),
+                )
                 last_guard = str(exc)
                 continue
             except ExecutionBindingError as exc:
                 last_guard = str(exc)
                 continue
             if result.get("status") == "timeout":
+                failed_sql = _failed_sql_fields(sql_text, resolved, settings)
                 return first_success or T2SqlResponse(
                     generation_id=generation_id,
-                    sql=_public_sql(sql_text, resolved) if sql_text else None,
+                    sql=failed_sql["sql"],
+                    draft_sql=failed_sql["draft_sql"],
                     sql_status="failed",
                     sql_reason=str(result.get("error") or "validate timeout"),
                     sql_reason_code="TIMEOUT",
                     elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
                     used_metadata=used_after_decide,
                     probe_summary=probe,
+                    pipeline_stages=list(stages),
+                    metadata_snapshot_id=snapshot_id,
+                    sql_fingerprint=make_sql_fingerprint(failed_sql["sql"]),
                 )
             if result.get("status") == "rejected":
                 last_guard = str(result.get("error") or "rejected")
@@ -755,15 +1028,19 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                 include_matched_columns=req.include_matched_columns,
                 execution_context=public_ec,
             )
+            public_sql = _public_sql(sql_text, resolved)
             success = T2SqlResponse(
                 generation_id=generation_id,
-                sql=_public_sql(sql_text, resolved),
+                sql=public_sql,
                 sql_status="generated",
                 sql_reason=None,
                 sql_reason_code=None,
                 elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
                 used_metadata=used,
                 probe_summary=probe,
+                pipeline_stages=list(stages),
+                metadata_snapshot_id=snapshot_id,
+                sql_fingerprint=make_sql_fingerprint(public_sql),
             )
             empty_ok = _empty_ok_result(result)
             break
@@ -778,6 +1055,10 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                 retry_plan = retry_decision.query_plan
                 if retry_plan is not None and not fact_left_unresolved(retry_plan):
                     grain_retry_used = True
+                    grain_retry_reason = grain_fallback_reason(
+                        resolve_time_grain(req.query),
+                        fallback,
+                    )
                     first_success = success
                     decision = retry_decision
                     plan = retry_plan
@@ -786,9 +1067,9 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                         retry_decision.resolved_entities,
                         plan,
                     )
-                    used_after_decide = T2SqlUsedMetadata(
+                    used_after_decide = used_metadata_for_plan(
                         query_analysis=analysis,
-                        query_plan=plan,
+                        plan=plan,
                         candidates=retry_decision.candidates,
                         join_groups=retry_decision.join_groups,
                         resolved_entities=retry_decision.resolved_entities,
@@ -797,7 +1078,9 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
                     continue
         if success is not None:
             if grain_retry_used:
-                return success.model_copy(update={"sql_reason": empty_month_reason})
+                return success.model_copy(
+                    update={"sql_reason": grain_retry_reason}
+                )
             return success
         if first_success is not None:
             return first_success
@@ -808,13 +1091,18 @@ async def run_t2sql(repository: Any, req: T2SqlRequest) -> T2SqlResponse:
             last_guard,
             sql_text or None,
         )
+        failed_sql = _failed_sql_fields(sql_text, resolved, settings)
         return T2SqlResponse(
             generation_id=generation_id,
-            sql=_public_sql(sql_text, resolved) if sql_text else None,
+            sql=failed_sql["sql"],
+            draft_sql=failed_sql["draft_sql"],
             sql_status="validation_failed" if last_guard else "failed",
             sql_reason=last_guard or "SQL을 생성하지 못했습니다",
             sql_reason_code="GUARD_REJECTED" if last_guard else "GENERATION_FAILED",
             elapsed_ms=round((time.perf_counter() - started) * 1000.0, 1),
             used_metadata=used_after_decide,
             probe_summary=probe,
+            pipeline_stages=list(stages),
+            metadata_snapshot_id=snapshot_id,
+            sql_fingerprint=make_sql_fingerprint(failed_sql["sql"]),
         )

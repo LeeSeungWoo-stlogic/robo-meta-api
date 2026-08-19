@@ -135,8 +135,8 @@ class SqlSourceQualifyTests(unittest.TestCase):
             "SELECT * FROM RWIS.rditag_tb LIMIT 5",
             execution_context=context,
         )
-        self.assertIn("`kair_pg`.`RDITAG_TB`", rewritten)
-        self.assertNotIn("`rditag_tb`", rewritten)
+        self.assertIn("`kair_pg`.`rditag_tb`", rewritten)
+        self.assertNotIn("`RDITAG_TB`", rewritten)
 
     def test_tibero_quoted_lowercase_normalizes_to_store_upper(self) -> None:
         rewritten = qualify_and_rewrite(
@@ -215,7 +215,7 @@ class SqlSourceQualifyTests(unittest.TestCase):
         self.assertIn("`test_rwis`", folded)
         self.assertNotIn("`SUJ_NAME`", folded)
 
-    def test_postgres_rewrite_keeps_quoted_column_case(self) -> None:
+    def test_postgres_rewrite_folds_quoted_column_case(self) -> None:
         ctx = ResolvedExecutionContext(
             source_instance_id="source-pg",
             backend="mindsdb",
@@ -239,11 +239,11 @@ class SqlSourceQualifyTests(unittest.TestCase):
             "SELECT `SUJ_NAME` FROM `test_rwis`.`rwis`.`rdisaup_tb`",
             execution_context=ctx,
         )
-        self.assertIn("`SUJ_NAME`", rewritten)
-        self.assertNotIn("`suj_name`", rewritten)
+        self.assertIn("`suj_name`", rewritten)
+        self.assertNotIn("`SUJ_NAME`", rewritten)
         self.assertIn("`kair_fe598447_0aca_478b_bbc8_63db85c3fa85`.`rdisaup_tb`", rewritten)
 
-    def test_alias_column_is_quoted_preserving_case(self) -> None:
+    def test_alias_column_is_quoted_and_folded_lower(self) -> None:
         ctx = ResolvedExecutionContext(
             source_instance_id="source-pg",
             backend="mindsdb",
@@ -267,10 +267,11 @@ class SqlSourceQualifyTests(unittest.TestCase):
             "SELECT f.TAGSN FROM `test_rwis`.`rwis`.`rdisaup_tb` AS f",
             execution_context=ctx,
         )
-        self.assertIn("`TAGSN`", rewritten)
+        self.assertIn("`tagsn`", rewritten)
+        self.assertNotIn("`TAGSN`", rewritten)
         self.assertNotRegex(rewritten, r"(?i)(?<!`)TAGSN(?!`)")
 
-    def test_postgres_keeps_store_ident_case_and_strips_column_quals(self) -> None:
+    def test_postgres_folds_store_ident_case_and_strips_column_quals(self) -> None:
         ctx = ResolvedExecutionContext(
             source_instance_id="source-pg",
             backend="mindsdb",
@@ -293,9 +294,10 @@ class SqlSourceQualifyTests(unittest.TestCase):
             "FROM `RWIS`.`RWIS`.`rditag_tb`",
             execution_context=ctx,
         )
-        self.assertIn("`kair_pg`.`RDITAG_TB`.`SUJ_NAME`", rewritten)
-        self.assertIn("`kair_pg`.`RDITAG_TB`", rewritten)
-        self.assertNotIn("`rditag_tb`", rewritten)
+        self.assertIn("`kair_pg`.`rditag_tb`.`suj_name`", rewritten)
+        self.assertIn("`kair_pg`.`rditag_tb`", rewritten)
+        self.assertNotIn("`RDITAG_TB`", rewritten)
+        self.assertNotIn("`SUJ_NAME`", rewritten)
         self.assertNotIn("`RWIS`.`RWIS`.`RDITAG_TB`.`SUJ_NAME`", rewritten)
 
     def test_compact_public_sql_aliases_and_collapses_single_schema(self) -> None:
@@ -335,9 +337,49 @@ class SqlSourceQualifyTests(unittest.TestCase):
             "WHERE t2.`SUJ_CODE` = '354'",
         )
         rewritten = qualify_and_rewrite(compact, execution_context=ctx)
-        self.assertIn("`kair_pg`.`RDISAUP_TB` AS t1", rewritten)
-        self.assertIn("t1.`SUJ_NAME`", rewritten)
+        self.assertIn("`kair_pg`.`rdisaup_tb`", rewritten)
+        self.assertIn("`suj_name`", rewritten)
+        self.assertNotIn("`SUJ_NAME`", rewritten)
         self.assertNotIn("`RWIS`.`RWIS`", rewritten)
+
+    def test_alias_string_column_is_promoted_to_identifier(self) -> None:
+        ctx = ResolvedExecutionContext(
+            source_instance_id="source-pg",
+            backend="mindsdb",
+            integration="kair_pg",
+            catalog="kair_pg",
+            schema_name="RWIS",
+            source_engine="postgresql",
+            parser_dialect="mysql",
+            qualification_pattern="{catalog}.{table}",
+            identifier_quote="`",
+            require_quoted_uppercase_identifiers=False,
+            allowed_catalogs=frozenset({"kair_pg"}),
+            allowed_schemas=frozenset({"rwis"}),
+            allowed_objects=frozenset({"rdd01mm_tb", "rdisaup_tb"}),
+            source_name="RWIS_KT",
+            allowed_object_refs=frozenset(
+                {("rwis", "rdd01mm_tb"), ("rwis", "rdisaup_tb")}
+            ),
+        )
+        sql = (
+            "SELECT `p`.'SUJ_NAME', AVG(`f`.'VAL') AS `avg_val` "
+            "FROM `RWIS_KT`.`rdd01mm_tb` AS `f` "
+            "JOIN `RWIS_KT`.`rdisaup_tb` AS `p` "
+            "ON `p`.`SUJ_CODE` = `f`.`SUJ_CODE` "
+            "WHERE `p`.`SUJ_CODE` = '380'"
+        )
+        rewritten = qualify_and_rewrite(sql, execution_context=ctx)
+        self.assertNotIn("'suj_name'", rewritten)
+        self.assertNotIn("'val'", rewritten)
+        self.assertIn("`suj_name`", rewritten)
+        self.assertIn("`val`", rewritten)
+        compact = compact_public_sql(sql, execution_context=ctx)
+        self.assertNotIn("'SUJ_NAME'", compact)
+        self.assertNotIn("'VAL'", compact)
+        self.assertIn("`SUJ_NAME`", compact)
+        self.assertIn("`VAL`", compact)
+        self.assertIn("'380'", compact)
 
     def test_compact_public_sql_keeps_three_part_when_multiple_schemas(self) -> None:
         compact = compact_public_sql(

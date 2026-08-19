@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -21,7 +23,29 @@ from ..execution_context_resolver import (
 )
 from ..metadata_repository import PostgresMetadataRepository
 from ..metadata_repository._search import SearchMixin
-from ..query_analysis import get_query_analyzer
+from ..query_analysis import degraded_analysis, get_query_analyzer
+from .aliases import (
+    TypeGroup,
+    annotate_matched_mention,
+    expand_region_hq_aliases,
+    peel_type_suffix,
+    range_surface_has_instance,
+    type_product_surfaces,
+    unique_code_rows,
+)
+from ..meaning_slots import (
+    answer_axis_from_analysis,
+    axis_mention,
+    catalog_needles_from_analysis,
+    compact,
+    filter_needles_from_analysis,
+    glossary_synonyms_for_needles,
+    meaning_failed,
+    metric_needles_from_analysis,
+    range_slots_from_analysis,
+    unique_needles,
+    time_role_from_procedure,
+)
 from .filters import _propagate_filters_along_fk
 from .helpers import (
     _candidate,
@@ -39,9 +63,15 @@ from .plan_format import (
     _top_target,
     assemble_join_groups,
 )
-from .aliases import expand_region_hq_aliases
 from .grain import TimeGrain, resolve_time_grain, year_window_narrows_to_month
 from .period import parse_korean_period, week_mention
+from .select_store import (
+    apply_store_selection,
+    compact_store_recall,
+    select_from_store,
+)
+from .suffix_store import load_type_groups
+from .candidate_evidence import build_candidate_evidence
 from .store_first import (
     chosen_labels,
     catalog_group_dimensions,
@@ -50,34 +80,176 @@ from .store_first import (
     drop_unjoinable_catalog_ids,
     drop_unselected_fact_tables,
     facts_joinable_to_mappings,
+    list_stays_on_selected_tables,
     narrow_facts_by_query_clock,
     narrow_facts_for_week,
     prefer_unique_fact_type,
     empty_meta_response,
+    embedding_recall_mappings,
     fact_unresolved_response,
     dimension_identity_column_names,
     fact_time_column_names,
+    aggregation_contract,
+    approved_code_mappings,
     is_tag_master_table,
     measure_point_label_filters,
     promote_series_identity_tables,
     filter_mappings_to_labels,
-    glossary_extras,
     is_month_grain_table,
     value_mappings_for_plan,
-    is_dimension_list_query,
     location_group_tables,
     mapping_filters,
     mapping_labels,
     partition_mention_mappings,
+    period_required_response,
+    project_code_mappings_to_hub,
     measure_column_names,
     period_filter_for_fact,
     pick_fact_tables,
+    prefer_day_grain_facts,
     query_requests_fact,
-    resolve_time_role,
+    asks_aggregation,
+    RANGE_CODE_UNRESOLVED,
+    range_unresolved_response,
     seed_table_ids,
-    table_blob,
     unbound_period_filter,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _needle_covered_by_bound(needle: str, bound: list[dict[str, Any]]) -> bool:
+    key = SearchMixin._compact_natural_text(needle)
+    if not key:
+        return False
+    for row in bound:
+        for field in ("matched_mention", "natural_value"):
+            mention = SearchMixin._compact_natural_text(str(row.get(field) or ""))
+            if mention and (mention in key or key in mention):
+                return True
+    return False
+
+
+def _rows_matching_needle(rows: list[dict[str, Any]], needle: str) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if SearchMixin._label_matches_needle(str(row.get("natural_value") or ""), needle)
+    ]
+
+
+def _table_candidates(tables: list[dict[str, Any]]) -> list:
+    return [
+        _candidate(table, [], source="schema_rule")
+        for table in tables
+        if table.get("id") is not None
+    ]
+
+
+def _fact_choice_response(
+    analysis,
+    reason: str | None,
+    tables: list[dict[str, Any]],
+    grain: str | None = None,
+):
+    return fact_unresolved_response(
+        analysis,
+        reason,
+        candidates=_table_candidates(tables),
+        candidate_evidence=build_candidate_evidence(
+            fact_tables=tables,
+            query_requests_fact=True,
+            fact_unresolved=reason,
+            grain=grain,
+        ),
+    )
+
+
+def _merge_table_candidates(
+    existing: list,
+    tables: list[dict[str, Any]],
+) -> list:
+    seen = {
+        (str(item.schema_name or "").casefold(), str(item.table_name or "").casefold())
+        for item in existing
+    }
+    merged = list(existing)
+    for table in tables:
+        cand = _candidate(table, [], source="schema_rule")
+        key = (
+            str(cand.schema_name or "").casefold(),
+            str(cand.table_name or "").casefold(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(cand)
+    return merged
+
+
+async def project_range_mappings(
+    repository: PostgresMetadataRepository,
+    needles: list[str],
+    *,
+    source_instance_id: str | None = None,
+    type_groups: tuple[TypeGroup, ...] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Bind instance-bearing range slots by equality, then one S×T replay."""
+
+    instance_needles = [
+        item for item in needles if range_surface_has_instance(item, type_groups)
+    ]
+    if not instance_needles:
+        return [], False
+    first = await repository.find_value_mappings(
+        instance_needles,
+        source_instance_id=source_instance_id,
+    )
+    bound: list[dict[str, Any]] = []
+    unresolved = False
+    for needle in instance_needles:
+        stage1 = _rows_matching_needle(first, needle)
+        unique = unique_code_rows(stage1)
+        if unique:
+            bound.extend(annotate_matched_mention(unique, needle))
+            continue
+        if stage1:
+            if not _needle_covered_by_bound(needle, bound):
+                unresolved = True
+            continue
+        peeled = peel_type_suffix(needle, type_groups)
+        if peeled is None or not peeled[0]:
+            if not _needle_covered_by_bound(needle, bound):
+                unresolved = True
+            continue
+        instance, group = peeled
+        product = type_product_surfaces(instance, group)
+        if not product:
+            if not _needle_covered_by_bound(needle, bound):
+                unresolved = True
+            continue
+        stage2 = await repository.find_value_mappings(
+            product,
+            source_instance_id=source_instance_id,
+        )
+        stage2 = [
+            row
+            for row in stage2
+            if group.row_in_dictionary(row)
+            and any(
+                SearchMixin._label_matches_needle(
+                    str(row.get("natural_value") or ""),
+                    surface,
+                )
+                for surface in product
+            )
+        ]
+        unique2 = unique_code_rows(stage2)
+        if unique2:
+            bound.extend(annotate_matched_mention(unique2, needle))
+        elif not _needle_covered_by_bound(needle, bound):
+            unresolved = True
+    return bound, unresolved
 
 
 async def decide(
@@ -89,6 +261,7 @@ async def decide(
     auto_resolve_entities: bool,
     table_limit: int | None = None,
     grain_override: TimeGrain | None = None,
+    analysis_timeout_s: float | None = None,
 ) -> DecisionResponse:
     runtime = get_runtime()
     decision = runtime.decision
@@ -98,26 +271,159 @@ async def decide(
         else decision.table_top_k
     )
 
-    tokens = SearchMixin._question_mention_tokens(query)
-    glossary_rows = await repository.find_glossary_routes(query)
-    extras = [
-        *glossary_extras(glossary_rows),
-        *expand_region_hq_aliases(query, tokens),
+    timeout_raw = analysis_timeout_s
+    if timeout_raw is None:
+        timeout_raw = getattr(decision, "analysis_timeout_seconds", 15)
+    try:
+        timeout_s = float(timeout_raw)
+    except (TypeError, ValueError):
+        timeout_s = 15.0
+    started = time.perf_counter()
+    logger.warning("decide start")
+    if timeout_s < 1:
+        analysis = degraded_analysis("파이프라인 시간 부족")
+    else:
+        analysis = await get_query_analyzer().analyze(query, timeout_s=timeout_s)
+    logger.warning(
+        "decide analyzed elapsed=%.2f status=%s meaning=%s procedure=%s",
+        time.perf_counter() - started,
+        analysis.status,
+        analysis.meaning_status,
+        analysis.procedure,
+    )
+
+    if asks_aggregation(query, analysis):
+        period_source = str(analysis.period or "").strip() or query
+        if parse_korean_period(period_source) is None:
+            return period_required_response(analysis)
+
+    filter_needles = filter_needles_from_analysis(analysis, query)
+    range_slots = range_slots_from_analysis(analysis, query)
+    range_needles = [
+        slot.mention for slot in range_slots if slot.polarity == "include"
     ]
-    mappings = await repository.find_value_mappings(query, extra_mentions=extras)
-    prefixes = SearchMixin.prefixes_for_unmatched(tokens, mapping_labels(mappings))
-    if prefixes:
-        extras = [*extras, *prefixes]
-        mappings = await repository.find_value_mappings(
-            query,
-            extra_mentions=extras,
+    exclude_needles = [
+        slot.mention for slot in range_slots if slot.polarity == "exclude"
+    ]
+    metric_needles = metric_needles_from_analysis(analysis, query)
+    catalog_needles = catalog_needles_from_analysis(analysis, query)
+    type_groups = await load_type_groups(repository)
+    outputs = list(analysis.primary_outputs or [])
+    for slot in range_slots:
+        catalog_needles = unique_needles(
+            [
+                *catalog_needles,
+                *[
+                    item
+                    for item in expand_region_hq_aliases(
+                        slot.mention,
+                        [slot.mention],
+                        groups=type_groups,
+                    )
+                    if len(compact(item)) >= 4
+                ],
+            ]
         )
-    catalog = await repository.find_catalog_by_mentions(
-        [*tokens, *extras],
+    logger.warning(
+        "decide needles elapsed=%.2f filter=%s range=%s metric=%s catalog=%s",
+        time.perf_counter() - started,
+        filter_needles,
+        range_needles,
+        metric_needles,
+        catalog_needles,
+    )
+
+    glossary_rows = await repository.find_glossary_routes(
+        unique_needles(
+            [
+                *filter_needles,
+                *[axis_mention(item) for item in outputs],
+            ]
+        )
+    )
+    logger.warning(
+        "decide glossary elapsed=%.2f n=%s",
+        time.perf_counter() - started,
+        len(glossary_rows),
+    )
+    mapping_extras = glossary_synonyms_for_needles(glossary_rows, metric_needles)
+    range_unresolved = False
+    range_bound: list[dict[str, Any]] = []
+    if meaning_failed(analysis):
+        mappings = []
+    else:
+        include_bound, include_unresolved = await project_range_mappings(
+            repository,
+            range_needles,
+            type_groups=type_groups,
+        )
+        exclude_bound, exclude_unresolved = await project_range_mappings(
+            repository,
+            exclude_needles,
+            type_groups=type_groups,
+        )
+        for row in exclude_bound:
+            row["filter_polarity"] = "exclude"
+        range_bound = [*include_bound, *exclude_bound]
+        range_unresolved = include_unresolved or exclude_unresolved
+        measure_extras = [
+            *mapping_extras,
+            *metric_needles,
+        ]
+        mappings = await repository.find_value_mappings(
+            metric_needles,
+            extra_mentions=measure_extras,
+            trusted_mentions=measure_extras,
+        )
+        logger.warning(
+            "decide mappings elapsed=%.2f range=%s metric=%s extras=%s unresolved=%s",
+            time.perf_counter() - started,
+            len(range_bound),
+            len(mappings),
+            mapping_extras,
+            range_unresolved,
+        )
+        prefixes = SearchMixin.prefixes_for_unmatched(
+            metric_needles, mapping_labels(mappings)
+        )
+        if prefixes:
+            logger.warning("decide mapping prefixes n=%s", len(prefixes))
+            mappings = await repository.find_value_mappings(
+                metric_needles,
+                extra_mentions=[*measure_extras, *prefixes],
+                trusted_mentions=measure_extras,
+            )
+            logger.warning(
+                "decide mappings2 elapsed=%.2f n=%s",
+                time.perf_counter() - started,
+                len(mappings),
+            )
+    logger.warning("decide catalog start elapsed=%.2f", time.perf_counter() - started)
+    catalog = await repository.find_catalog_by_mentions(catalog_needles)
+    logger.warning(
+        "decide store elapsed=%.2f filter=%s catalog=%s mappings=%s tables=%s",
+        time.perf_counter() - started,
+        filter_needles,
+        catalog_needles,
+        len(mappings),
+        len(catalog),
     )
     catalog_mentions = list(catalog)
-    selected_source = _provisional_source_instance_id(catalog, mappings)
+    selected_source = _provisional_source_instance_id(
+        catalog, [*range_bound, *mappings]
+    )
+    source_dropped_mappings: list[dict[str, Any]] = []
     if selected_source:
+        source_dropped_mappings = [
+            mapping
+            for mapping in [*range_bound, *mappings]
+            if not _same_source(mapping, selected_source)
+        ]
+        range_bound = [
+            mapping
+            for mapping in range_bound
+            if _same_source(mapping, selected_source)
+        ]
         mappings = [
             mapping
             for mapping in mappings
@@ -129,8 +435,14 @@ async def decide(
             if _same_source(table, selected_source)
         ]
     unique_mappings, ambiguous_mappings = partition_mention_mappings(mappings)
+    unique_mappings = [*range_bound, *unique_mappings]
+    recall_mappings = embedding_recall_mappings(
+        [*unique_mappings, *ambiguous_mappings]
+    )
+    unique_mappings = approved_code_mappings(unique_mappings)
+    held_mappings = approved_code_mappings(ambiguous_mappings)
     seed_ids = seed_table_ids(unique_mappings, catalog)
-    group_needles = group_dimension_needles(query, tokens, extras)
+    group_needles = group_dimension_needles(catalog_needles)
     group_dims = catalog_group_dimensions(
         catalog_mentions,
         group_needles,
@@ -140,53 +452,14 @@ async def decide(
         for table in group_dims
         if table.get("id") is not None
     }
-    if not seed_ids and not group_ids:
-        return empty_meta_response()
-
-    store_hits = {
-        "glossary": [
-            {
-                "mention": row.get("mention") or row.get("surface"),
-                "standard_term": row.get("standard_term"),
-                "word_korean": row.get("word_korean"),
-                "definition": row.get("definition"),
-                "abbreviation": row.get("abbreviation"),
-                "english_name": row.get("english_name"),
-                "aliases": row.get("aliases"),
-                "surface": row.get("surface"),
-            }
-            for row in glossary_rows
-        ],
-        "value_mappings": [
-            {
-                "natural_value": row.get("natural_value"),
-                "code_value": row.get("code_value"),
-                "column_fqn": row.get("column_fqn"),
-                "logical_name": row.get("logical_name"),
-            }
-            for row in unique_mappings
-        ],
-        "prefix_candidates": [
-            {
-                "natural_value": row.get("natural_value"),
-                "code_value": row.get("code_value"),
-                "column_fqn": row.get("column_fqn"),
-            }
-            for row in ambiguous_mappings
-        ],
-        "catalog": [
-            {
-                "logical_name": _serving_logical_name(table),
-                "description": table.get("description"),
-                "subject_area": table.get("subject_area"),
-            }
-            for table in catalog
-        ],
-    }
-    analysis = await get_query_analyzer().analyze(query, store_hits)
-    labels = chosen_labels(analysis)
     mappings = unique_mappings
-    if labels:
+    labels = chosen_labels(analysis)
+    metric_keys = {
+        SearchMixin._compact_natural_text(item)
+        for item in metric_needles
+        if SearchMixin._compact_natural_text(item)
+    }
+    if labels and not meaning_failed(analysis):
         covered = {
             SearchMixin._compact_natural_text(str(row.get("matched_mention") or ""))
             for row in unique_mappings
@@ -199,7 +472,8 @@ async def decide(
         missing_labels = [
             label
             for label in labels
-            if SearchMixin._compact_natural_text(label)
+            if SearchMixin._compact_natural_text(label) in metric_keys
+            and SearchMixin._compact_natural_text(label)
             and not any(
                 SearchMixin._compact_natural_text(label) in item
                 or item in SearchMixin._compact_natural_text(label)
@@ -207,10 +481,15 @@ async def decide(
             )
         ]
         if missing_labels:
+            remap_extras = [
+                *glossary_synonyms_for_needles(glossary_rows, missing_labels),
+                *missing_labels,
+            ]
             remapped = await repository.find_value_mappings(
-                query,
+                missing_labels,
                 source_instance_id=selected_source or None,
-                extra_mentions=[*extras, *missing_labels],
+                extra_mentions=remap_extras,
+                trusted_mentions=remap_extras,
             )
             remapped = filter_mappings_to_labels(remapped, missing_labels)
             remapped, _ambiguous = partition_mention_mappings(remapped)
@@ -238,6 +517,25 @@ async def decide(
                         if _same_source(mapping, selected_source)
                     ]
                 seed_ids = seed_table_ids(mappings, catalog)
+                held_mappings = [
+                    row
+                    for row in held_mappings
+                    if SearchMixin._compact_natural_text(
+                        str(row.get("matched_mention") or "")
+                    )
+                    not in remapped_mentions
+                ]
+
+    extra_recall = embedding_recall_mappings([*mappings, *held_mappings])
+    if extra_recall:
+        recall_mappings = [*recall_mappings, *extra_recall]
+    mappings = approved_code_mappings(mappings)
+    held_mappings = approved_code_mappings(held_mappings)
+
+    if not seed_ids and not group_ids:
+        if range_unresolved and not range_bound:
+            return range_unresolved_response(analysis)
+        return empty_meta_response(analysis)
 
     if not seed_ids:
         seed_ids = set(group_ids)
@@ -281,7 +579,8 @@ async def decide(
             ]
         for table in extra_fetched:
             tables_by_id[int(table["id"])] = table
-    parsed_period = parse_korean_period(query)
+    period_source = str(analysis.period or "").strip() or query
+    parsed_period = parse_korean_period(period_source)
     week_parsed = parsed_period is not None and parsed_period.week_start is not None
     query_grain = resolve_time_grain(query)
     if grain_override in ("month", "day", "hour", "instant"):
@@ -306,7 +605,8 @@ async def decide(
         if month_pool:
             fact_pool = month_pool
             hint = "month"
-    if query_requests_fact(query, parsed_period, analysis, mappings):
+    needs_fact = query_requests_fact(query, parsed_period, analysis, mappings)
+    if needs_fact:
         facts, fact_unresolved = pick_fact_tables(
             fact_pool,
             hint,
@@ -322,7 +622,9 @@ async def decide(
     )
     edges = build_composite_edges(edge_rows)
     mapped_ids = seed_table_ids(mappings, [])
+    contested_facts: list[dict[str, Any]] = []
     if len(facts) > 1:
+        competing = list(facts)
         facts = facts_joinable_to_mappings(
             facts,
             mapped_ids=mapped_ids,
@@ -335,13 +637,17 @@ async def decide(
             facts = narrow_facts_by_query_clock(facts, query)
         if len(facts) > 1:
             facts = prefer_unique_fact_type(facts)
+        if len(facts) > 1 and query_grain is None:
+            facts = prefer_day_grain_facts(facts)
         if len(facts) > 1:
             fact_unresolved = fact_unresolved or "팩트 표 미선정"
+            contested_facts = list(facts)
             facts = []
         elif len(facts) == 1:
             fact_unresolved = None
         else:
             fact_unresolved = fact_unresolved or "팩트 표 미선정"
+            contested_facts = competing
             facts = []
     if mapped_ids or facts or group_ids:
         selected_ids = set(mapped_ids) | group_ids
@@ -350,28 +656,55 @@ async def decide(
     else:
         selected_ids = set(seed_ids)
     selected_ids &= set(tables_by_id)
-    if is_dimension_list_query(query) and not facts:
-        for table in tables_by_id.values():
-            if list_table_type(_resolve_subject_area(table)) != "Code":
-                continue
-            blob = SearchMixin._compact_natural_text(table_blob(table))
-            if any(word in blob for word in ("별량", "측정항목", "태그")):
-                table_id = table.get("id")
-                if table_id is not None:
-                    selected_ids.add(int(table_id))
-    for table in location_group_tables(list(tables_by_id.values()), query):
+    stay_on_selected = list_stays_on_selected_tables(
+        analysis, has_facts=bool(facts)
+    )
+    location_tables = location_group_tables(
+        list(tables_by_id.values()), query, analysis
+    )
+    location_ids: set[int] = set()
+    for table in location_tables:
         table_id = table.get("id")
         if table_id is not None:
             selected_ids.add(int(table_id))
+            location_ids.add(int(table_id))
     if not selected_ids:
+        if range_unresolved and not range_bound:
+            return range_unresolved_response(analysis)
         if fact_unresolved:
-            return fact_unresolved_response(analysis, fact_unresolved)
+            return _fact_choice_response(
+                analysis,
+                fact_unresolved,
+                contested_facts,
+                query_grain or hint,
+            )
         return empty_meta_response(analysis)
+    probe_ids = set(selected_ids)
+    if not stay_on_selected:
+        for table in tables_by_id.values():
+            table_id = table.get("id")
+            if table_id is not None and is_tag_master_table(table):
+                probe_ids.add(int(table_id))
+    columns = await repository.fetch_approved_columns(sorted(probe_ids))
+    mappings = project_code_mappings_to_hub(
+        mappings,
+        held_mappings,
+        query,
+        selected_ids=selected_ids,
+        tables_by_id=tables_by_id,
+        columns_by_id=columns,
+        edge_rows=edge_rows,
+        edges=edges,
+        max_hops=hops,
+    )
+    mapped_ids = seed_table_ids(mappings, [])
+    selected_ids |= mapped_ids & set(tables_by_id)
     catalog_ids = {
         int(table["id"])
         for table in [*catalog, *catalog_mentions]
         if table.get("id") is not None
     }
+    before_unjoinable = set(selected_ids)
     selected_ids = drop_unjoinable_catalog_ids(
         selected_ids,
         mapped_ids=mapped_ids,
@@ -381,6 +714,7 @@ async def decide(
         max_hops=hops,
         tables_by_id=tables_by_id,
     )
+    dropped_unjoinable_ids = before_unjoinable - selected_ids
     selected_ids = drop_unselected_fact_tables(
         selected_ids,
         chosen_fact_ids={int(fact["id"]) for fact in facts},
@@ -388,12 +722,22 @@ async def decide(
         mapped_ids=mapped_ids,
     )
     if not selected_ids:
+        if range_unresolved and not range_bound:
+            return range_unresolved_response(analysis)
         if fact_unresolved:
-            return fact_unresolved_response(analysis, fact_unresolved)
+            return _fact_choice_response(
+                analysis,
+                fact_unresolved,
+                contested_facts,
+                query_grain or hint,
+            )
         return empty_meta_response(analysis)
     unresolved: list[str] = []
+    if range_unresolved and not range_bound:
+        unresolved.append(RANGE_CODE_UNRESOLVED)
     if fact_unresolved:
         unresolved.append(fact_unresolved)
+    blocked_ids = set(tables_by_id) - selected_ids if stay_on_selected else None
     paths, origin, join_unresolved = assemble_anchor_join_paths(
         selected_ids,
         edges=edges,
@@ -401,18 +745,55 @@ async def decide(
         fact_ids={int(fact["id"]) for fact in facts},
         mapped_ids=mapped_ids,
         tables_by_id=tables_by_id,
+        blocked_ids=blocked_ids,
+        allow_disconnected=stay_on_selected,
     )
     unresolved.extend(join_unresolved)
-    bridge_ids = origin - selected_ids
-    selected_ids |= origin
-    bridge_ids = promote_series_identity_tables(
-        bridge_ids,
-        tables_by_id=tables_by_id,
-        query=query,
+    if stay_on_selected:
+        origin &= selected_ids
+        bridge_ids = set()
+    else:
+        bridge_ids = origin - selected_ids
+        selected_ids |= origin
+        bridge_ids = promote_series_identity_tables(
+            bridge_ids,
+            tables_by_id=tables_by_id,
+            query=query,
+            needs_fact=needs_fact,
+        )
+
+    try:
+        selection = await select_from_store(
+            query,
+            analysis,
+            compact_store_recall(
+                tables=[
+                    tables_by_id[table_id]
+                    for table_id in sorted(selected_ids)
+                    if table_id in tables_by_id
+                ],
+                mappings=mappings,
+                join_edges=edge_rows,
+            ),
+            timeout_s=min(15.0, timeout_s),
+        )
+    except Exception:
+        selection = None
+    if (
+        selection
+        and selection.get("accept") is False
+        and any("기간" in str(item) for item in (selection.get("missing") or []))
+    ):
+        return period_required_response(analysis)
+    mappings, selected_ids = apply_store_selection(
+        selection,
+        mappings=mappings,
+        selected_ids=selected_ids,
     )
+    mapped_ids = seed_table_ids(mappings, [])
 
     columns = await repository.fetch_approved_columns(sorted(selected_ids))
-    planned_filters = mapping_filters(mappings, query=query)
+    planned_filters = mapping_filters(mappings, query=query, analysis=analysis)
     planned_filters.extend(
         measure_point_label_filters(
             query,
@@ -420,6 +801,7 @@ async def decide(
             tables_by_id=tables_by_id,
             columns_by_id=columns,
             table_ids=selected_ids,
+            analysis=analysis,
         )
     )
     if facts:
@@ -428,6 +810,7 @@ async def decide(
                 query,
                 fact,
                 columns.get(int(fact["id"]), []),
+                period_text=str(analysis.period or "").strip() or None,
             )
             if period is not None:
                 planned_filters.append(period)
@@ -530,7 +913,34 @@ async def decide(
         join_paths=planned_paths,
         filters=planned_filters,
         unresolved_requirements=unresolved,
-        time_role=resolve_time_role(query, parsed_period),
+        time_role=time_role_from_procedure(analysis.procedure),
+        answer_axis=answer_axis_from_analysis(analysis),
+        aggregation=aggregation_contract(
+            analysis=analysis,
+            facts=facts,
+            columns_by_id=columns,
+            period=parsed_period,
+            glossary_rows=glossary_rows,
+            query=query,
+        ),
+        candidate_evidence=build_candidate_evidence(
+            selected_mappings=mappings,
+            held_mappings=held_mappings,
+            source_dropped_mappings=source_dropped_mappings,
+            recall_mappings=recall_mappings,
+            catalog_tables=catalog,
+            fact_tables=[*fact_pool, *tables_by_id.values()],
+            selected_ids=selected_ids,
+            mapped_ids=mapped_ids,
+            group_ids=group_ids,
+            location_ids=location_ids,
+            chosen_fact_ids={int(fact["id"]) for fact in facts},
+            dropped_unjoinable_ids=dropped_unjoinable_ids,
+            query_requests_fact=needs_fact,
+            stay_on_selected=stay_on_selected,
+            fact_unresolved=fact_unresolved,
+            grain=query_grain or hint,
+        ),
     )
     join_groups = assemble_join_groups(
         planned_paths=planned_paths,
@@ -554,8 +964,9 @@ async def decide(
         )
         for table in ordered_tables[:effective_top_k]
     ]
+    candidates = _merge_table_candidates(candidates, contested_facts)
     entities = (
-        _resolved_entities(value_mappings_for_plan(mappings, query))
+        _resolved_entities(value_mappings_for_plan(mappings, query, analysis))
         if auto_resolve_entities
         else []
     )

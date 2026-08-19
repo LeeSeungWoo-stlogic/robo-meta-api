@@ -16,6 +16,7 @@ _PARTICLE_SUFFIXES = (
     "처럼",
     "보다",
     "으로",
+    "이나",
     "로",
     "와",
     "과",
@@ -191,19 +192,44 @@ class SearchMixin:
             grouped.setdefault(int(row["table_id"]), []).append(dict(row))
         return grouped
 
+    @staticmethod
+    def _compact_needles(values: list[str] | None) -> list[str]:
+        needles: list[str] = []
+        seen: set[str] = set()
+        for item in values or []:
+            compact = SearchMixin._compact_natural_text(item)
+            if len(compact) < 2 or len(compact) > 32 or compact in seen:
+                continue
+            seen.add(compact)
+            needles.append(compact)
+        return needles
+
+    @staticmethod
+    def _label_matches_needle(natural: str, needle: str) -> bool:
+        compact_n = SearchMixin._compact_natural_text(needle)
+        if len(compact_n) < 2:
+            return False
+        compact_l = SearchMixin._compact_natural_text(natural)
+        head = SearchMixin._natural_label_head(natural)
+        return compact_l == compact_n or head == compact_n
+
     async def find_value_mappings(
         self,
-        question: str,
+        needles: list[str] | None = None,
         source_instance_id: str | None = None,
         extra_mentions: list[str] | None = None,
+        trusted_mentions: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        mention_tokens = self._question_mention_tokens(
-            question,
-            extra=extra_mentions,
+        compact_needles = self._compact_needles(needles)
+        extra_tokens = self._compact_needles(extra_mentions)
+        if not compact_needles and not extra_tokens:
+            return []
+        trusted_source = (
+            trusted_mentions if trusted_mentions is not None else extra_mentions
         )
         trusted_extras = {
             self._compact_natural_text(item)
-            for item in (extra_mentions or [])
+            for item in (trusted_source or [])
             if self._compact_natural_text(item)
         }
         query = """
@@ -226,10 +252,18 @@ class SearchMixin:
           AND t.review_status='approved'
           AND ($2::text IS NULL OR d.profile_id=$2)
           AND (
-                position(
-                  lower(regexp_replace(vm.natural_value, '\\s+', '', 'g'))
-                  in lower(regexp_replace($1, '\\s+', '', 'g'))
-                ) > 0
+                EXISTS (
+                  SELECT 1 FROM unnest($1::text[]) AS n(needle)
+                  WHERE length(needle) >= 2
+                    AND (
+                      lower(regexp_replace(vm.natural_value, '\\s+', '', 'g'))
+                        = needle
+                      OR lower(regexp_replace(
+                           split_part(split_part(vm.natural_value, '(', 1), '（', 1),
+                           '\\s+', '', 'g'
+                         )) = needle
+                    )
+                )
                 OR (
                   $3::text[] IS NOT NULL
                   AND (
@@ -239,7 +273,7 @@ class SearchMixin:
                         AND position(
                               tok
                               in lower(regexp_replace(vm.natural_value, '\\s+', '', 'g'))
-                            ) > 0
+                            ) = 1
                     )
                     OR lower(regexp_replace(COALESCE(vm.code_value, ''), '\\s+', '', 'g'))
                        = ANY($3::text[])
@@ -252,25 +286,27 @@ class SearchMixin:
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(
                 query,
-                question,
+                compact_needles or None,
                 source_instance_id,
-                mention_tokens or None,
+                extra_tokens or None,
             )
         return self._select_mentioned_mappings(
-            question,
+            compact_needles,
             [dict(row) for row in rows],
-            mention_tokens,
+            extra_tokens,
             trusted_extras=trusted_extras,
         )
 
-    async def find_glossary_routes(self, question: str) -> list[dict[str, Any]]:
+    async def find_glossary_routes(self, needles: list[str] | None = None) -> list[dict[str, Any]]:
         """Route question surfaces to approved glossary terms and standard words.
 
         Surfaces include term name, korean_name, abbreviation, english_name,
         and aliases on APPROVED current standard words. Does not read the
         unofficial short-alias table.
         """
-        mention_tokens = self._question_mention_tokens(question)
+        compact_needles = self._compact_needles(needles)
+        if not compact_needles:
+            return []
         query = """
         SELECT standard_term, definition, surface, word_korean, surface_len
         FROM (
@@ -289,10 +325,7 @@ class SearchMixin:
              AND t.is_current
              AND t.status = 'APPROVED'
             WHERE char_length(t.name) >= 2
-              AND position(
-                    lower(regexp_replace(t.name, '\\s+', '', 'g'))
-                    in lower(regexp_replace($1, '\\s+', '', 'g'))
-                  ) > 0
+              AND lower(regexp_replace(t.name, '\\s+', '', 'g')) = ANY($1::text[])
             UNION ALL
             SELECT t.name AS standard_term,
                    t.definition,
@@ -317,10 +350,7 @@ class SearchMixin:
              AND w.is_current
              AND w.status = 'APPROVED'
             WHERE char_length(w.korean_name) >= 2
-              AND position(
-                    lower(regexp_replace(w.korean_name, '\\s+', '', 'g'))
-                    in lower(regexp_replace($1, '\\s+', '', 'g'))
-                  ) > 0
+              AND lower(regexp_replace(w.korean_name, '\\s+', '', 'g')) = ANY($1::text[])
             UNION ALL
             SELECT w.korean_name AS standard_term,
                    w.definition,
@@ -337,29 +367,25 @@ class SearchMixin:
                 SELECT w.abbreviation AS surface
                 WHERE char_length(COALESCE(w.abbreviation, '')) >= 2
                   AND lower(regexp_replace(w.abbreviation, '\\s+', '', 'g'))
-                      = ANY($2::text[])
+                      = ANY($1::text[])
                 UNION ALL
                 SELECT w.english_name
                 WHERE char_length(COALESCE(w.english_name, '')) >= 2
                   AND lower(regexp_replace(w.english_name, '\\s+', '', 'g'))
-                      = ANY($2::text[])
+                      = ANY($1::text[])
                 UNION ALL
                 SELECT alias
                 FROM jsonb_array_elements_text(w.aliases) AS alias
                 WHERE char_length(alias) >= 2
                   AND lower(regexp_replace(alias, '\\s+', '', 'g'))
-                      = ANY($2::text[])
+                      = ANY($1::text[])
             ) surface
         ) routes
         ORDER BY surface_len DESC, standard_term
         LIMIT 80
         """
         async with self._pool.acquire() as connection:
-            rows = await connection.fetch(
-                query,
-                question,
-                mention_tokens or None,
-            )
+            rows = await connection.fetch(query, compact_needles)
         seen: set[tuple[str, str]] = set()
         routes: list[dict[str, Any]] = []
         for row in rows:
@@ -368,7 +394,10 @@ class SearchMixin:
             word_korean = str(row.get("word_korean") or "").strip()
             if not surface or not standard:
                 continue
-            if not self._surface_is_standalone_mention(question, surface):
+            if not any(
+                self._label_matches_needle(surface, needle)
+                for needle in compact_needles
+            ):
                 continue
             key = (surface.casefold(), standard)
             if key in seen:
@@ -437,6 +466,25 @@ class SearchMixin:
             grouped.setdefault(int(row["table_id"]), []).append(dict(row))
         return grouped
 
+    async def find_type_suffix_groups(self) -> list[dict[str, Any]]:
+        """Closed type-suffix dictionary. Empty when the store has no table or rows.
+
+        Expected columns: group_name (hq|plant), suffix, kind (hq|plant).
+        Missing relation is not an error — callers keep code constants.
+        """
+
+        query = """
+        SELECT group_name, suffix, kind
+        FROM kair_platform_type_suffix_groups
+        WHERE COALESCE(is_current, TRUE)
+        """
+        try:
+            async with self._pool.acquire() as connection:
+                rows = await connection.fetch(query)
+        except Exception:
+            return []
+        return [dict(row) for row in rows]
+
     async def find_catalog_by_mentions(
         self,
         mentions: list[str],
@@ -455,36 +503,76 @@ class SearchMixin:
         )
         hits: list[dict[str, Any]] = []
         for table in tables:
-            logical = self._compact_natural_text(
-                str(table.get("logical_name") or table.get("name") or "")
+            hit = self._catalog_mention_hit(
+                table,
+                columns.get(int(table["id"]), []),
+                tokens,
             )
-            if any(len(token) >= 2 and token in logical for token in tokens):
-                hits.append(table)
-                continue
-            surfaces = [
-                str(table.get("logical_name") or ""),
-                str(table.get("description") or ""),
-                str(table.get("analyzed_description") or ""),
-            ]
-            for column in columns.get(int(table["id"]), []):
-                metadata = column.get("metadata") or {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                surfaces.extend(
-                    [
-                        str(column.get("description") or ""),
-                        str(column.get("analyzed_description") or ""),
-                        str(metadata.get("column_name_kr") or ""),
-                        str(metadata.get("logical_name") or ""),
-                    ]
-                )
-            if any(
-                self._label_starts_with(surface, token)
-                for surface in surfaces
-                for token in tokens
-            ):
-                hits.append(table)
+            if hit is not None:
+                hits.append(hit)
         return hits
+
+    def _catalog_mention_hit(
+        self,
+        table: dict[str, Any],
+        columns: list[dict[str, Any]],
+        tokens: list[str],
+    ) -> dict[str, Any] | None:
+        logical = str(table.get("logical_name") or table.get("name") or "")
+        for token in tokens:
+            if len(token) >= 2 and self._label_matches_needle(logical, token):
+                return self._with_catalog_match(
+                    table, token, "exact", "logical_name", 1.0
+                )
+        surfaces: list[tuple[str, str]] = [
+            ("logical_name", str(table.get("logical_name") or "")),
+            ("description", str(table.get("description") or "")),
+            ("analyzed_description", str(table.get("analyzed_description") or "")),
+        ]
+        for column in columns:
+            metadata = column.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            surfaces.extend(
+                [
+                    ("column.description", str(column.get("description") or "")),
+                    (
+                        "column.analyzed_description",
+                        str(column.get("analyzed_description") or ""),
+                    ),
+                    ("column_name_kr", str(metadata.get("column_name_kr") or "")),
+                    ("column.logical_name", str(metadata.get("logical_name") or "")),
+                ]
+            )
+        for field, surface in surfaces:
+            for token in tokens:
+                if len(token) < 2:
+                    continue
+                if self._label_matches_needle(surface, token):
+                    score = 1.0 if field == "logical_name" else 0.85
+                    return self._with_catalog_match(
+                        table, token, "exact", field, score
+                    )
+                if self._label_starts_with(surface, token):
+                    return self._with_catalog_match(
+                        table, token, "prefix", field, 0.6
+                    )
+        return None
+
+    @staticmethod
+    def _with_catalog_match(
+        table: dict[str, Any],
+        mention: str,
+        match_type: str,
+        matched_field: str,
+        score: float,
+    ) -> dict[str, Any]:
+        hit = dict(table)
+        hit["matched_mention"] = mention
+        hit["match_type"] = match_type
+        hit["matched_field"] = matched_field
+        hit["score"] = score
+        return hit
 
     @staticmethod
     def _label_starts_with(label: str, prefix: str) -> bool:
@@ -518,6 +606,52 @@ class SearchMixin:
     def _compact_natural_text(value: str) -> str:
         """Drop whitespace so Store labels like '탁 도' match query '탁도'."""
         return re.sub(r"\s+", "", value or "").casefold()
+
+    @staticmethod
+    def _mapping_looks_like_measure_code(row: dict[str, Any]) -> bool:
+        """별량/측정항목 dictionaries. Location codes still allow prefix reverse."""
+
+        blob = SearchMixin._compact_natural_text(
+            " ".join(
+                [
+                    str(row.get("logical_name") or ""),
+                    str(row.get("column_fqn") or ""),
+                    str(row.get("column_name") or ""),
+                ]
+            )
+        )
+        if any(word in blob for word in ("사업장", "정수장", "sujcode")):
+            return False
+        return any(word in blob for word in ("별량", "측정항목"))
+
+    @staticmethod
+    def _natural_label_head(natural: str) -> str:
+        """Korean head of a store label. Parenthetical aliases are not the head."""
+
+        head = re.split(r"[\(（]", str(natural or ""), maxsplit=1)[0]
+        return SearchMixin._compact_natural_text(head)
+
+    @staticmethod
+    def _measure_prefix_unlicensed(
+        question: str,
+        token: str,
+        natural: str,
+    ) -> bool:
+        """True when a shorter mention is only a prefix of a longer measure label.
+
+        The leftover head must appear in the question, otherwise this is not a
+        licensed bind (설비 ⊂ 설비온도). Equal heads (강우량 ⊂ 강우량(Rainfall))
+        are licensed.
+        """
+
+        head = SearchMixin._natural_label_head(natural)
+        token_c = SearchMixin._compact_natural_text(token)
+        if not token_c or not head.startswith(token_c) or head == token_c:
+            return False
+        remainder = head[len(token_c) :]
+        if not remainder:
+            return False
+        return remainder not in SearchMixin._compact_natural_text(question)
 
     @staticmethod
     def _is_hangul_char(ch: str) -> bool:
@@ -565,68 +699,120 @@ class SearchMixin:
 
     @staticmethod
     def _select_mentioned_mappings(
-        question: str,
+        needles: list[str] | str,
         rows: list[dict[str, Any]],
         mention_tokens: list[str],
         trusted_extras: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Keep exact label⊂question hits; add reverse hits that are not prefixes of those.
+        """Keep equality/head hits per needle. Extra tokens are synonyms only."""
 
-        trusted_extras are Store expansions (standard-word korean names). They
-        may match a mapping label even when the expanded text is not in the
-        question, because the original surface was already standalone.
-        """
-
-        extras = trusted_extras or set()
+        needle_list = (
+            [needles]
+            if isinstance(needles, str)
+            else [str(item) for item in needles]
+        )
+        needle_list = SearchMixin._compact_needles(needle_list)
+        extras = {
+            SearchMixin._compact_natural_text(item)
+            for item in (trusted_extras or set())
+            if SearchMixin._compact_natural_text(item)
+        }
+        extra_tokens = SearchMixin._compact_needles(mention_tokens)
         exact: list[dict[str, Any]] = []
         reverse: list[dict[str, Any]] = []
         for row in rows:
             natural = str(row.get("natural_value") or "")
             code = SearchMixin._compact_natural_text(str(row.get("code_value") or ""))
-            if SearchMixin._natural_value_is_standalone_mention(question, natural):
+            matched_needle = next(
+                (
+                    needle
+                    for needle in needle_list
+                    if SearchMixin._label_matches_needle(natural, needle)
+                ),
+                "",
+            )
+            if matched_needle:
                 item = dict(row)
-                item["matched_mention"] = SearchMixin._compact_natural_text(natural)
+                item["matched_mention"] = matched_needle
+                item["match_type"] = "exact"
+                item["matched_field"] = "natural_value"
+                item["score"] = 1.0
                 exact.append(item)
                 continue
             matched = ""
-            for token in mention_tokens:
-                token_ok = SearchMixin._surface_is_standalone_mention(
-                    question, token
-                ) or token in extras
-                if SearchMixin._token_is_label_mention(token, natural) and token_ok:
+            match_type = ""
+            matched_field = ""
+            for token in extra_tokens:
+                if token not in extras:
+                    continue
+                if SearchMixin._token_is_label_mention(token, natural):
+                    if (
+                        SearchMixin._mapping_looks_like_measure_code(row)
+                        and SearchMixin._measure_prefix_unlicensed(
+                            token, token, natural
+                        )
+                    ):
+                        continue
                     matched = token
+                    match_type = "alias_prefix"
+                    matched_field = "natural_value"
                     break
-                if code and len(code) >= 2 and code == token and token_ok:
+                if code and len(code) >= 2 and code == token:
                     matched = token
+                    match_type = "code"
+                    matched_field = "code_value"
                     break
             if not matched:
                 continue
             item = dict(row)
             item["matched_mention"] = matched
+            item["match_type"] = match_type
+            item["matched_field"] = matched_field
+            item["score"] = 0.8 if match_type == "alias_prefix" else 0.9
             reverse.append(item)
-        exact_labels = {
-            SearchMixin._compact_natural_text(str(row.get("natural_value") or ""))
-            for row in exact
-        }
+        exact_by_label: dict[str, set[str]] = {}
+        for row in exact:
+            label = SearchMixin._compact_natural_text(
+                str(row.get("natural_value") or "")
+            )
+            code = str(row.get("code_value") or "").strip()
+            if label:
+                exact_by_label.setdefault(label, set()).add(code)
         kept_exact: list[dict[str, Any]] = []
         for row in exact:
             label = SearchMixin._compact_natural_text(
                 str(row.get("natural_value") or "")
             )
+            code = str(row.get("code_value") or "").strip()
             if label and any(
-                other.startswith(label) and other != label for other in exact_labels
+                other.startswith(label)
+                and other != label
+                and code
+                and code in exact_by_label.get(other, set())
+                for other in exact_by_label
             ):
                 continue
             kept_exact.append(row)
-        kept_labels = {
-            SearchMixin._compact_natural_text(str(row.get("natural_value") or ""))
-            for row in kept_exact
-        }
+        kept_by_label: dict[str, set[str]] = {}
+        for row in kept_exact:
+            label = SearchMixin._compact_natural_text(
+                str(row.get("natural_value") or "")
+            )
+            code = str(row.get("code_value") or "").strip()
+            if label:
+                kept_by_label.setdefault(label, set()).add(code)
         kept_reverse: list[dict[str, Any]] = []
         for row in reverse:
-            token = str(row.get("matched_mention") or "")
+            token = SearchMixin._compact_natural_text(
+                str(row.get("matched_mention") or "")
+            )
+            code = str(row.get("code_value") or "").strip()
             if token and any(
-                label.startswith(token) and label != token for label in kept_labels
+                label.startswith(token)
+                and label != token
+                and code
+                and code in kept_by_label.get(label, set())
+                for label in kept_by_label
             ):
                 continue
             kept_reverse.append(row)

@@ -17,6 +17,26 @@ def empty_used_metadata() -> T2SqlUsedMetadata:
     return T2SqlUsedMetadata()
 
 
+def used_metadata_for_plan(
+    *,
+    plan: QueryPlan | None = None,
+    query_analysis=None,
+    candidates: list[DecisionCandidate] | None = None,
+    join_groups: list[JoinGroup] | None = None,
+    resolved_entities=None,
+    execution_context: ExecutionContext | None = None,
+) -> T2SqlUsedMetadata:
+    return T2SqlUsedMetadata(
+        candidates=list(candidates or []),
+        join_groups=list(join_groups or []),
+        resolved_entities=list(resolved_entities or []),
+        execution_context=execution_context,
+        query_analysis=query_analysis,
+        query_plan=plan,
+        candidate_evidence=list(plan.candidate_evidence) if plan is not None else [],
+    )
+
+
 def _table_key(schema: str | None, table: str) -> tuple[str, str]:
     return (schema or "").lower(), table.lower()
 
@@ -75,4 +95,5 @@ def filter_used_metadata(
         execution_context=public_ec,
         query_analysis=decision.query_analysis,
         query_plan=plan,
+        candidate_evidence=list(plan.candidate_evidence) if plan is not None else [],
     )

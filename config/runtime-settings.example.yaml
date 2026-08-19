@@ -45,6 +45,8 @@ robo_meta_api:
     score_top_radius: 0.01
     fk_max_hops: 3
     fk_path_limit: 50
+    analysis_timeout_seconds: 15
+    analysis_reasoning_effort: false
 
   execution:
     backend: mindsdb
