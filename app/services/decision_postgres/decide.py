@@ -26,6 +26,7 @@ from ..metadata_repository._search import SearchMixin
 from ..query_analysis import degraded_analysis, get_query_analyzer
 from .aliases import (
     TypeGroup,
+    _active_groups,
     annotate_matched_mention,
     expand_region_hq_aliases,
     peel_type_suffix,
@@ -45,6 +46,7 @@ from ..meaning_slots import (
     range_slots_from_analysis,
     unique_needles,
     time_role_from_procedure,
+    synonym_members_for_needles,
 )
 from .filters import _propagate_filters_along_fk
 from .helpers import (
@@ -54,6 +56,7 @@ from .helpers import (
     _resolved_entities,
     _same_source,
     _serving_logical_name,
+    glossary_surfaces,
 )
 from .table_type import list_table_type
 from .plan_format import (
@@ -70,7 +73,7 @@ from .select_store import (
     compact_store_recall,
     select_from_store,
 )
-from .suffix_store import load_type_groups
+from .suffix_store import load_term_synonym_groups, load_type_groups
 from .candidate_evidence import build_candidate_evidence
 from .store_first import (
     chosen_labels,
@@ -108,7 +111,7 @@ from .store_first import (
     pick_fact_tables,
     prefer_day_grain_facts,
     query_requests_fact,
-    asks_aggregation,
+    measurement_needs_period,
     RANGE_CODE_UNRESOLVED,
     range_unresolved_response,
     seed_table_ids,
@@ -218,12 +221,26 @@ async def project_range_mappings(
                 unresolved = True
             continue
         peeled = peel_type_suffix(needle, type_groups)
-        if peeled is None or not peeled[0]:
+        instance = ""
+        groups: list[TypeGroup] = []
+        if peeled is not None and peeled[0]:
+            instance, group = peeled
+            groups = [group]
+        else:
+            instance = SearchMixin._compact_natural_text(needle)
+            groups = list(_active_groups(type_groups))
+        if not instance:
             if not _needle_covered_by_bound(needle, bound):
                 unresolved = True
             continue
-        instance, group = peeled
-        product = type_product_surfaces(instance, group)
+        product: list[str] = []
+        seen_product: set[str] = set()
+        for group in groups:
+            for surface in type_product_surfaces(instance, group):
+                if surface in seen_product:
+                    continue
+                seen_product.add(surface)
+                product.append(surface)
         if not product:
             if not _needle_covered_by_bound(needle, bound):
                 unresolved = True
@@ -235,7 +252,7 @@ async def project_range_mappings(
         stage2 = [
             row
             for row in stage2
-            if group.row_in_dictionary(row)
+            if any(group.row_in_dictionary(row) for group in groups)
             and any(
                 SearchMixin._label_matches_needle(
                     str(row.get("natural_value") or ""),
@@ -245,7 +262,9 @@ async def project_range_mappings(
             )
         ]
         unique2 = unique_code_rows(stage2)
-        if unique2:
+        codes = {str(row.get("code_value") or "").strip() for row in unique2}
+        codes.discard("")
+        if unique2 and (peeled is not None or len(codes) == 1):
             bound.extend(annotate_matched_mention(unique2, needle))
         elif not _needle_covered_by_bound(needle, bound):
             unresolved = True
@@ -292,10 +311,8 @@ async def decide(
         analysis.procedure,
     )
 
-    if asks_aggregation(query, analysis):
-        period_source = str(analysis.period or "").strip() or query
-        if parse_korean_period(period_source) is None:
-            return period_required_response(analysis)
+    if measurement_needs_period(query, analysis):
+        return period_required_response(analysis)
 
     filter_needles = filter_needles_from_analysis(analysis, query)
     range_slots = range_slots_from_analysis(analysis, query)
@@ -337,6 +354,7 @@ async def decide(
         unique_needles(
             [
                 *filter_needles,
+                *metric_needles,
                 *[axis_mention(item) for item in outputs],
             ]
         )
@@ -346,7 +364,13 @@ async def decide(
         time.perf_counter() - started,
         len(glossary_rows),
     )
-    mapping_extras = glossary_synonyms_for_needles(glossary_rows, metric_needles)
+    synonym_groups = await load_term_synonym_groups(
+        repository,
+        unique_needles([*filter_needles, *metric_needles], limit=80),
+    )
+    mapping_extras = synonym_members_for_needles(synonym_groups, metric_needles)
+    if not mapping_extras:
+        mapping_extras = glossary_synonyms_for_needles(glossary_rows, metric_needles)
     range_unresolved = False
     range_bound: list[dict[str, Any]] = []
     if meaning_failed(analysis):
@@ -481,7 +505,11 @@ async def decide(
             )
         ]
         if missing_labels:
+            remap_groups = await load_term_synonym_groups(
+                repository, missing_labels
+            )
             remap_extras = [
+                *synonym_members_for_needles(remap_groups, missing_labels),
                 *glossary_synonyms_for_needles(glossary_rows, missing_labels),
                 *missing_labels,
             ]
@@ -783,6 +811,7 @@ async def decide(
         selection
         and selection.get("accept") is False
         and any("기간" in str(item) for item in (selection.get("missing") or []))
+        and measurement_needs_period(query, analysis)
     ):
         return period_required_response(analysis)
     mappings, selected_ids = apply_store_selection(
@@ -856,8 +885,9 @@ async def decide(
                 required_columns_by_id[table_id].add(parts[-1])
     for fact in facts:
         fact_id = int(fact["id"])
+        join_keys = set(required_columns_by_id[fact_id])
         required_columns_by_id[fact_id].update(
-            measure_column_names(columns.get(fact_id, []))
+            measure_column_names(columns.get(fact_id, []), exclude=join_keys)
         )
         required_columns_by_id[fact_id].update(
             fact_time_column_names(columns.get(fact_id, []))
@@ -956,17 +986,31 @@ async def decide(
         for table_id in sorted(selected_ids)
         if table_id in tables_by_id
     ]
+    table_ids = [
+        int(table["id"])
+        for table in ordered_tables[:effective_top_k]
+        if table.get("id") is not None
+    ]
+    code_columns_by_table: dict[int, set[str]] = {}
+    if include_matched_columns and table_ids:
+        loaded = await repository.find_value_mapping_code_columns(table_ids)
+        if isinstance(loaded, dict):
+            code_columns_by_table = loaded
     candidates = [
         _candidate(
             table,
             columns.get(int(table["id"]), []) if include_matched_columns else [],
             source="name_rule" if int(table["id"]) in mapped_ids else "schema_rule",
+            code_columns=code_columns_by_table.get(int(table["id"]), set()),
         )
         for table in ordered_tables[:effective_top_k]
     ]
     candidates = _merge_table_candidates(candidates, contested_facts)
     entities = (
-        _resolved_entities(value_mappings_for_plan(mappings, query, analysis))
+        _resolved_entities(
+            value_mappings_for_plan(mappings, query, analysis),
+            glossary_surfaces=glossary_surfaces(synonym_groups, glossary_rows),
+        )
         if auto_resolve_entities
         else []
     )

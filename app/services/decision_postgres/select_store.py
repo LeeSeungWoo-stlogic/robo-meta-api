@@ -18,7 +18,7 @@ SELECT_STORE_PROMPT = """\
 store_recall에 있는 표·값매핑·조인만 써라. 없는 표·코드·컬럼을 창작하지 마라.
 질문이 요구하는 범위(시설 등), 측정 항목, 기간, 집계를 모두 충족하는 메타를 고른다.
 측정 항목이 답의 축이어도 버려서는 안 된다. 저장소에 측정 항목 코드나 측정점 카탈로그가 있으면 반드시 넣는다.
-집계·극값인데 질문에 기간이 없으면 accept=false 이고 missing에 기간을 넣는다.
+측정값을 묻는데 질문에 기간이 없으면 accept=false 이고 missing에 기간을 넣는다. 목록이면 기간을 missing에 넣지 마라.
 목록 질의는 팩트 표를 넣지 마라.
 출력은 JSON 객체 하나뿐이다.
 {"accept": true, "missing": [], "selected_table_ids": [], "selected_mapping_keys": [], "reason": ""}

@@ -15,6 +15,7 @@ from ..schemas import (
     QueryAnalysis,
     SchemaRoleRequirement,
 )
+from .decision_postgres.grain import _asks_series
 from .meaning_slots import (
     ALLOWED_PROCEDURES,
     extremum_function_from_text,
@@ -33,8 +34,9 @@ QUERY_ANALYSIS_PROMPT = """\
 질문에 없는 대상·기간은 빈 문자열이다. 빈 칸은 정상이다.
 
 procedure는 lookup, list, aggregate, extremum 중 하나만.
-- lookup: 특정 대상의 값을 조회
-- list: 대상 목록
+행이 많다고 list가 아니다. 답이 이름·코드·시설 나열인지, 측정값인지로 고른다.
+- lookup: 특정 대상의 측정값을 가져온다. 한 시점이든 기간 동안의 변화·추이·추세든 lookup이다.
+- list: 이름·코드·시설 등 대상이 무엇인지 나열한다. 측정 숫자가 답이 아니다.
 - aggregate: 합·평균·건수 등 집계
 - extremum: 가장 높/낮/많/적
 기간이 없다고 latest로 바꾸지 마라.
@@ -113,7 +115,30 @@ def _has_meaning_slots(analysis: QueryAnalysis) -> bool:
     )
 
 
-def _dual_write(analysis: QueryAnalysis) -> QueryAnalysis:
+def _correct_list_for_measured_series(
+    analysis: QueryAnalysis,
+    question: str = "",
+) -> None:
+    """변화·추이는 대상 목록이 아니다. 측정값이 있으면 list를 lookup으로 되돌린다."""
+
+    if str(analysis.procedure or "").strip() != "list":
+        return
+    metric = str(analysis.metric or analysis.measurement.metric or "").strip()
+    if not metric:
+        return
+    blob = " ".join(
+        [
+            question,
+            str(analysis.goal or ""),
+            str(analysis.intent or ""),
+            str(analysis.procedure_why or ""),
+        ]
+    )
+    if _asks_series(blob):
+        analysis.procedure = "lookup"
+
+
+def _dual_write(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
     if analysis.goal:
         analysis.intent = analysis.goal
     elif not analysis.intent and analysis.goal == "":
@@ -125,6 +150,7 @@ def _dual_write(analysis: QueryAnalysis) -> QueryAnalysis:
     if peeled:
         analysis.metric = peeled
         analysis.measurement.metric = peeled
+    _correct_list_for_measured_series(analysis, question)
     procedure = str(analysis.procedure or "").strip()
     if procedure in {"aggregate", "extremum"}:
         if procedure == "extremum":
@@ -182,7 +208,7 @@ def _dual_write(analysis: QueryAnalysis) -> QueryAnalysis:
     return analysis
 
 
-def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
+def _sanitize(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
     dropped_physical = False
     analysis.goal, hit = _blank_physical(analysis.goal)
     dropped_physical = dropped_physical or hit
@@ -383,7 +409,7 @@ def _sanitize(analysis: QueryAnalysis) -> QueryAnalysis:
             filters.append(requirement)
     analysis.filter_requirements = filters
     analysis.status = "complete"
-    return _dual_write(analysis)
+    return _dual_write(analysis, question)
 
 
 def degraded_analysis(reason: str) -> QueryAnalysis:
@@ -454,7 +480,7 @@ class QueryAnalyzer:
                 analysis.procedure,
                 analysis.meaning_status,
             )
-            return _sanitize(analysis)
+            return _sanitize(analysis, question)
         except TimeoutError:
             logger.warning("meaning analyze timeout")
             return degraded_analysis("HyDE 의미 분해 실패: timeout")

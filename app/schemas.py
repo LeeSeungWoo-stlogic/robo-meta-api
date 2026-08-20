@@ -36,8 +36,14 @@ class TableKey(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# /meta/batch
+# /meta/batch · 공통 enum
 # ---------------------------------------------------------------------------
+SubjectArea = Literal["agg", "raw", "code", "hist", "master", "link", "unknown"]
+YN = Literal["Y", "N"]
+ColumnConstraint = Literal["PK", "FK", "UNIQUE"]
+ListTableType = Literal["Raw", "Fact", "Code", "Dimension"]
+
+
 class BatchRequest(BaseModel):
     batch_date: Optional[str] = Field(
         default=None,
@@ -47,15 +53,19 @@ class BatchRequest(BaseModel):
 
 
 class BatchItem(TableKey):
-    pass
-
-
-# ---------------------------------------------------------------------------
-# /meta/table 공통 enum
-# ---------------------------------------------------------------------------
-SubjectArea = Literal["agg", "raw", "code", "hist", "master", "link", "unknown"]
-YN = Literal["Y", "N"]
-ColumnConstraint = Literal["PK", "FK", "UNIQUE"]
+    table_name_kr: Optional[str] = Field(
+        default=None,
+        description="승인 한글 논리명. SQL 식별자가 아님.",
+    )
+    table_comment: Optional[str] = Field(
+        default=None,
+        description="원본 카탈로그 테이블 설명",
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="분석 설명 우선, 없으면 table_comment",
+    )
+    subject_area: SubjectArea = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +125,33 @@ class TableInfo(BaseModel):
     db: str
     schema_name: str
     table_name: str
-    table_name_kr: Optional[str] = None
-    table_comment: Optional[str] = None
+    table_name_kr: Optional[str] = Field(
+        default=None,
+        description="승인 한글 논리명. SQL 식별자가 아님.",
+    )
+    table_comment: Optional[str] = Field(
+        default=None,
+        description="원본 카탈로그 테이블 설명",
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="분석 설명 우선, 없으면 table_comment",
+    )
     subject_area: SubjectArea = "unknown"
+    table_type: Optional[ListTableType] = Field(
+        default=None,
+        description=(
+            "목록 테이블 유형. subject_area 운반체의 대응값. "
+            "link/hist는 None. SQL 식별자가 아님."
+        ),
+    )
+    default_date_column: Optional[str] = Field(
+        default=None,
+        description=(
+            "모호한 질의의 기본 날짜 컬럼 후보. "
+            "날짜 format_pattern 또는 날짜 dtype. 검수 지정 아님."
+        ),
+    )
     table_is_active: YN = "Y"
     pk_columns: List[str] = Field(default_factory=list)
 
@@ -129,12 +163,31 @@ class TableInfo(BaseModel):
 
 class ColumnMeta(BaseModel):
     column_name: str
-    column_name_kr: Optional[str] = None
+    column_name_kr: Optional[str] = Field(
+        default=None,
+        description="짧은 한글 논리명. 설명 장문을 넣지 않는다.",
+    )
     data_type: Optional[str] = None
-    column_comment: Optional[str] = None
+    column_comment: Optional[str] = Field(
+        default=None,
+        description="원본 카탈로그 컬럼 설명",
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="분석 설명 우선, 없으면 column_comment",
+    )
     constraints: List[ColumnConstraint] = Field(default_factory=list)
     is_null: bool = True
     column_is_active: YN = "Y"
+    format_pattern: Optional[str] = None
+    unit: Optional[str] = None
+    facility_code: Optional[str] = None
+    system_code: Optional[str] = None
+    pk_ordinal: Optional[int] = None
+    has_code: YN = Field(
+        default="N",
+        description="승인 값사전의 code_column이면 Y. 코드 표의 모든 컬럼이 Y는 아니다.",
+    )
 
     # v0.6 신규 (빈 값 default)
     code_lookup: Optional[CodeLookup] = None
@@ -392,6 +445,10 @@ class MatchedColumn(BaseModel):
     facility_code: Optional[str] = None
     system_code: Optional[str] = None
     pk_ordinal: Optional[int] = None
+    has_code: YN = Field(
+        default="N",
+        description="승인 값사전의 code_column이면 Y. 코드 표의 모든 컬럼이 Y는 아니다.",
+    )
 
 
 class DecisionCandidate(TableKey):
@@ -416,7 +473,7 @@ class DecisionCandidate(TableKey):
         default=None,
         description="승인 한글 논리명. SQL 식별자가 아님. 자연어↔물리 객체 매핑 힌트.",
     )
-    table_type: Optional[Literal["Raw", "Fact", "Code", "Dimension"]] = Field(
+    table_type: Optional[ListTableType] = Field(
         default=None,
         description=(
             "목록 테이블 유형. subject_area 운반체의 대응값. "
@@ -499,8 +556,9 @@ class ResolvedEntity(BaseModel):
     table: str
     name_column: str
     code_column: Optional[str] = None
+    matched_mention: Optional[str] = None
     values: List[ResolvedValue] = Field(default_factory=list)
-    source: Literal["db_probe", "value_examples"] = "db_probe"
+    source: Literal["db_probe", "value_examples", "glossary"] = "db_probe"
 
 
 class SuggestedProbe(BaseModel):

@@ -27,6 +27,7 @@ from app.services.decision_planner import (
     select_minimal_tables,
 )
 from app.services.decision_postgres import _candidate, _resolved_entities, decide
+from app.services.decision_postgres.helpers import glossary_surfaces
 from app.services.embedding_provider import set_embedding_provider
 from app.services.query_analysis import _sanitize, set_query_analyzer
 
@@ -89,6 +90,105 @@ class DecisionPlannerTests(unittest.TestCase):
         self.assertEqual(entities[0].code_column, "FACILITY_CODE")
         self.assertEqual(entities[0].values[0].code, "CJJ")
         self.assertEqual(entities[0].values[0].label, "청주")
+        self.assertEqual(entities[0].source, "value_examples")
+        self.assertIsNone(entities[0].matched_mention)
+
+    def test_resolved_entity_uses_glossary_source_for_term_alias(self) -> None:
+        entities = _resolved_entities(
+            [
+                {
+                    "natural_value": "탁 도",
+                    "code_value": "TB",
+                    "db": "rwis",
+                    "schema_name": "RWIS",
+                    "table_name": "RDIBYUN_TB",
+                    "column_name": "BR_CODE",
+                    "matched_mention": "NTU",
+                    "match_type": "alias_prefix",
+                }
+            ],
+            glossary_surfaces={"ntu", "탁도"},
+        )
+        self.assertEqual(entities[0].source, "glossary")
+        self.assertEqual(entities[0].values[0].code, "TB")
+        self.assertEqual(entities[0].matched_mention, "NTU")
+        self.assertEqual(entities[0].mention, "탁 도")
+
+    def test_resolved_entity_uses_glossary_source_for_standard_term(self) -> None:
+        entities = _resolved_entities(
+            [
+                {
+                    "natural_value": "탁 도",
+                    "code_value": "TB",
+                    "db": "rwis",
+                    "schema_name": "RWIS",
+                    "table_name": "RDIBYUN_TB",
+                    "column_name": "BR_CODE",
+                    "matched_mention": "탁도",
+                    "match_type": "exact",
+                }
+            ],
+            glossary_surfaces={"탁도", "ntu"},
+        )
+        self.assertEqual(entities[0].source, "glossary")
+        self.assertEqual(entities[0].matched_mention, "탁도")
+
+    def test_resolved_entity_uses_glossary_source_for_suffix_peel(self) -> None:
+        entities = _resolved_entities(
+            [
+                {
+                    "natural_value": "금강유역본부",
+                    "code_value": "701",
+                    "db": "rwis",
+                    "schema_name": "RWIS",
+                    "table_name": "RDIBONBU_TB",
+                    "column_name": "BNB_CODE",
+                    "matched_mention": "금강유역",
+                    "match_type": "exact",
+                }
+            ]
+        )
+        self.assertEqual(entities[0].source, "glossary")
+        self.assertEqual(entities[0].matched_mention, "금강유역")
+
+    def test_resolved_entity_copies_query_surface_as_matched_mention(self) -> None:
+        entities = _resolved_entities(
+            [
+                {
+                    "natural_value": "탁 도",
+                    "code_value": "TB",
+                    "db": "rwis",
+                    "schema_name": "RWIS",
+                    "table_name": "rdibyun_tb",
+                    "column_name": "BR_CODE",
+                    "matched_mention": "탁도값",
+                    "match_type": "exact",
+                    "metadata": '{"label_column": "BR_NAME"}',
+                }
+            ],
+            glossary_surfaces={"탁도값", "탁도"},
+        )
+        self.assertEqual(entities[0].mention, "탁 도")
+        self.assertEqual(entities[0].matched_mention, "탁도값")
+        self.assertEqual(entities[0].table, "rdibyun_tb")
+        self.assertEqual(entities[0].name_column, "BR_NAME")
+        self.assertEqual(entities[0].code_column, "BR_CODE")
+        self.assertEqual(entities[0].values[0].code, "TB")
+        self.assertEqual(entities[0].values[0].label, "탁 도")
+        self.assertEqual(entities[0].source, "glossary")
+
+    def test_glossary_surfaces_uses_term_groups_not_type_suffix(self) -> None:
+        surfaces = glossary_surfaces(
+            [
+                {"kind": "term", "preferred_form": "탁 도", "members": ["NTU", "탁도"]},
+                {"kind": "type_suffix", "preferred_form": "유역", "members": ["권역"]},
+            ],
+            [{"mention": "탁도", "standard_term": "탁도", "word_korean": "탁도"}],
+        )
+        self.assertIn("탁도", surfaces)
+        self.assertIn("ntu", surfaces)
+        self.assertNotIn("유역", surfaces)
+        self.assertNotIn("권역", surfaces)
 
     def test_candidate_maps_column_metadata_to_value_examples(self) -> None:
         candidate = _candidate(
@@ -127,6 +227,23 @@ class DecisionPlannerTests(unittest.TestCase):
         self.assertEqual(matched.pk_ordinal, 2)
         self.assertIsNone(matched.facility_code)
         self.assertIsNone(matched.system_code)
+        self.assertEqual(matched.has_code, "N")
+
+    def test_candidate_marks_only_value_mapping_code_columns(self) -> None:
+        candidate = _candidate(
+            table(1, "RDIBYUN_TB", 0.9),
+            [
+                {"name": "BR_CODE", "score": 0.9, "metadata": {}},
+                {"name": "BR_NAME", "score": 0.8, "metadata": {}},
+                {"name": "BR_ORDER", "score": 0.1, "metadata": {}},
+            ],
+            source="name_rule",
+            code_columns={"BR_CODE"},
+        )
+        by_name = {item.column_name: item.has_code for item in candidate.matched_columns}
+        self.assertEqual(by_name["BR_CODE"], "Y")
+        self.assertEqual(by_name["BR_NAME"], "N")
+        self.assertEqual(by_name["BR_ORDER"], "N")
 
     def test_candidate_maps_logical_name_as_hint_not_identifier(self) -> None:
         row = table(1, "RDITAG_TB", 0.9)
@@ -428,6 +545,10 @@ class FakeRepository:
         del needles, source_instance_id, extra_mentions, trusted_mentions
         return []
 
+    async def find_value_mapping_code_columns(self, table_ids):
+        del table_ids
+        return {}
+
     async def find_glossary_routes(self, needles=None):
         del needles
         return []
@@ -561,6 +682,30 @@ class DecisionOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.query_analysis.status, "degraded")
         self.assertEqual(response.query_plan.completeness, "partial")
         self.assertTrue(response.candidates)
+
+    def test_sanitize_turns_series_list_into_lookup(self) -> None:
+        analysis = _sanitize(
+            QueryAnalysis(
+                status="complete",
+                procedure="list",
+                metric="탁도",
+                goal="충주정수장의 2025년 8월 탁도 측정값 변화를 확보한다",
+            ),
+            "충주정수장 2025년 8월 탁도변화 알려줘",
+        )
+        self.assertEqual(analysis.procedure, "lookup")
+
+    def test_sanitize_keeps_subject_list(self) -> None:
+        analysis = _sanitize(
+            QueryAnalysis(
+                status="complete",
+                procedure="list",
+                metric="",
+                goal="금강권역에 속하는 정수장 목록을 확보한다",
+            ),
+            "금강권역 정수장 목록",
+        )
+        self.assertEqual(analysis.procedure, "list")
 
 
 if __name__ == "__main__":

@@ -12,8 +12,10 @@ from ...schemas import (
     ResolvedValue,
 )
 from .. import subject_area as subject_area_service
+from .aliases import peel_type_suffix
 from .default_date import default_date_column
 from .table_type import list_table_type
+from ..metadata_repository._search import SearchMixin
 
 
 def _same_source(row: dict[str, Any], source_instance_id: str) -> bool:
@@ -236,11 +238,20 @@ def _merge_column_hits(
     return merged
 
 
+def _column_has_code(column_name: str, code_columns: set[str] | None) -> str:
+    name = str(column_name or "").strip().casefold()
+    if not name:
+        return "N"
+    licensed = {item.strip().casefold() for item in (code_columns or set()) if str(item).strip()}
+    return "Y" if name in licensed else "N"
+
+
 def _candidate(
     table: dict[str, Any],
     columns: list[dict[str, Any]],
     *,
     source: str,
+    code_columns: set[str] | None = None,
 ) -> DecisionCandidate:
     subject_area = _resolve_subject_area(table)
     matched: list[MatchedColumn] = []
@@ -272,6 +283,7 @@ def _candidate(
                 ),
                 system_code=_optional_string(metadata.get("system_code")),
                 pk_ordinal=_pk_ordinal(column, metadata),
+                has_code=_column_has_code(str(column["name"]), code_columns),
             )
         )
     return DecisionCandidate(
@@ -295,7 +307,64 @@ def _candidate(
     )
 
 
-def _resolved_entities(mappings: list[dict[str, Any]]) -> list[ResolvedEntity]:
+def _compact_surface(text: Any) -> str:
+    return SearchMixin._compact_natural_text(str(text or ""))
+
+
+def glossary_surfaces(
+    groups: list[dict[str, Any]] | None = None,
+    routes: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    """Compact term/word surfaces that licensed this decide() lookup."""
+
+    surfaces: set[str] = set()
+    for group in groups or []:
+        if str(group.get("kind") or "term") not in {"", "term"}:
+            continue
+        members = list(group.get("members") or [])
+        for item in (group.get("preferred_form"), *members):
+            key = _compact_surface(item)
+            if key:
+                surfaces.add(key)
+    for row in routes or []:
+        for field in ("mention", "standard_term", "word_korean"):
+            key = _compact_surface(row.get(field))
+            if key:
+                surfaces.add(key)
+    return surfaces
+
+
+def _matched_mention(rows: list[dict[str, Any]]) -> str | None:
+    for row in rows:
+        mention = _optional_string(row.get("matched_mention"))
+        if mention:
+            return mention
+    return None
+
+
+def _entity_source(
+    rows: list[dict[str, Any]],
+    surfaces: set[str] | None = None,
+) -> str:
+    licensed = surfaces or set()
+    for row in rows:
+        if str(row.get("match_type") or "") == "alias_prefix":
+            return "glossary"
+        mention = _compact_surface(row.get("matched_mention"))
+        natural = _compact_surface(row.get("natural_value"))
+        if mention and mention in licensed:
+            return "glossary"
+        if mention and natural and mention != natural:
+            peeled = peel_type_suffix(str(row.get("matched_mention") or ""))
+            if peeled is not None:
+                return "glossary"
+    return "value_examples"
+
+
+def _resolved_entities(
+    mappings: list[dict[str, Any]],
+    glossary_surfaces: set[str] | None = None,
+) -> list[ResolvedEntity]:
     grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for mapping in mappings:
         key = (
@@ -319,6 +388,7 @@ def _resolved_entities(mappings: list[dict[str, Any]]) -> list[ResolvedEntity]:
                 table=table_name,
                 name_column=label_column or column_name,
                 code_column=column_name,
+                matched_mention=_matched_mention(rows),
                 values=[
                     ResolvedValue(
                         code=str(row.get("code_value") or ""),
@@ -327,7 +397,7 @@ def _resolved_entities(mappings: list[dict[str, Any]]) -> list[ResolvedEntity]:
                     )
                     for row in rows
                 ],
-                source="value_examples",
+                source=_entity_source(rows, glossary_surfaces),
             )
         )
     return entities

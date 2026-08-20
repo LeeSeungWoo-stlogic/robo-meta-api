@@ -687,7 +687,54 @@ class ReverseMentionSelectTests(unittest.TestCase):
         )
         self.assertEqual([row["code_value"] for row in selected], ["RA"])
 
-    def test_full_measure_label_still_binds(self) -> None:
+    def test_measure_extra_does_not_seed_other_code_table(self) -> None:
+        selected = SearchMixin._select_mentioned_mappings(
+            ["탁도"],
+            [
+                {
+                    "natural_value": "탁 도",
+                    "code_value": "TB",
+                    "table_id": 10,
+                    "column_name": "BR_CODE",
+                    "logical_name": "별량코드 정보",
+                },
+                {
+                    "natural_value": "NTU",
+                    "code_value": "15",
+                    "table_id": 99,
+                    "column_name": "TAG_UNIT",
+                    "logical_name": "디지털/아날로그 구분정보",
+                },
+            ],
+            ["NTU", "탁도"],
+            trusted_extras={"ntu", "탁도"},
+        )
+        self.assertEqual([row["code_value"] for row in selected], ["TB"])
+
+    def test_measure_extra_stays_on_exact_table(self) -> None:
+        selected = SearchMixin._select_mentioned_mappings(
+            ["탁도"],
+            [
+                {
+                    "natural_value": "탁 도",
+                    "code_value": "TB",
+                    "table_id": 10,
+                    "column_name": "BR_CODE",
+                    "logical_name": "별량코드 정보",
+                },
+                {
+                    "natural_value": "NTU",
+                    "code_value": "TB",
+                    "table_id": 10,
+                    "column_name": "BR_CODE",
+                    "logical_name": "별량코드 정보",
+                },
+            ],
+            ["NTU", "탁도"],
+            trusted_extras={"ntu", "탁도"},
+        )
+        self.assertEqual({row["code_value"] for row in selected}, {"TB"})
+        self.assertEqual({row["matched_mention"] for row in selected}, {"탁도", "ntu"})
         selected = SearchMixin._select_mentioned_mappings(
             ["설비온도"],
             [

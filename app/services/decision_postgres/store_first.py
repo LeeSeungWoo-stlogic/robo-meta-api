@@ -15,7 +15,12 @@ from ...schemas import (
 from ..decision_planner import CompositeJoinEdge, shortest_path
 from ..metadata_repository._search import SearchMixin
 from .default_date import _dtype_looks_like_date, _format_looks_like_date
-from .filters import _column_looks_like_audit_date, _period_bind_value
+from .filters import (
+    _column_looks_like_audit_date,
+    _column_looks_like_code,
+    _column_looks_like_measure_value,
+    _period_bind_value,
+)
 from .grain import _asks_series, fallback_grains, resolve_time_grain
 from .helpers import _metadata_dict, _resolve_subject_area, _serving_logical_name
 from .aliases import is_displaced_plant_mapping, peel_type_suffix
@@ -1010,10 +1015,31 @@ def period_filter_for_fact(
     )
 
 
-def measure_column_names(columns: list[dict[str, Any]]) -> list[str]:
+def _column_is_identity_or_code(column: dict[str, Any] | None) -> bool:
+    """Join/PK/FK and code-like columns are identifiers, not measured values."""
+
+    if not column:
+        return False
+    if column.get("is_primary_key") or column.get("is_foreign_key"):
+        return True
+    if _column_looks_like_code(column):
+        return True
+    blob = _column_identity_blob(column)
+    return any(marker in blob for marker in ("코드", "식별"))
+
+
+def measure_column_names(
+    columns: list[dict[str, Any]],
+    exclude: Iterable[str] | None = None,
+) -> list[str]:
+    """Numeric value columns. Join keys, PK/FK, and code/identity columns are not measures."""
+
+    skipped = {str(item).strip() for item in (exclude or []) if str(item).strip()}
     names: list[str] = []
     for column in columns:
         if _column_is_store_date(column) or _column_looks_like_audit_date(column):
+            continue
+        if _column_is_identity_or_code(column):
             continue
         dtype = str(column.get("dtype") or column.get("data_type") or "").casefold()
         if not any(
@@ -1022,7 +1048,7 @@ def measure_column_names(columns: list[dict[str, Any]]) -> list[str]:
         ):
             continue
         name = str(column.get("name") or "").strip()
-        if name:
+        if name and name not in skipped:
             names.append(name)
     return names
 
@@ -1119,15 +1145,22 @@ def aggregation_contract(
         if weight_column is None and weights:
             weight_column = str(weights[0].get("name") or "").strip() or None
         if value_column is None and values:
-            def _rank(column: dict[str, Any]) -> tuple[int, int, int]:
+            def _rank(column: dict[str, Any]) -> tuple[int, int, int, int]:
                 blob = _column_identity_blob(column)
+                identity = int(_column_is_identity_or_code(column))
                 countish = int(
                     any(token in blob for token in ("건수", "횟수"))
                 )
                 valueish = int(
                     any(token in blob for token in ("측정값", "수치"))
+                    or _column_looks_like_measure_value(column)
                 )
-                return (countish, int(_column_is_integral(column)), 1 - valueish)
+                return (
+                    identity,
+                    countish,
+                    int(_column_is_integral(column)),
+                    1 - valueish,
+                )
 
             chosen = sorted(values, key=_rank)[0]
             value_column = str(chosen.get("name") or "").strip() or None
@@ -1563,38 +1596,61 @@ def asks_aggregation(query: str = "", analysis: QueryAnalysis | None = None) -> 
     return any(token in compact_q for token in _AGG_QUERY_TOKENS)
 
 
+def _analysis_metric(analysis: QueryAnalysis | None) -> str:
+    if analysis is None:
+        return ""
+    metric = str(analysis.metric or analysis.measurement.metric or "").strip()
+    if metric:
+        return metric
+    for role in analysis.meaning_roles or []:
+        role_name = SearchMixin._compact_natural_text(str(role.role or ""))
+        if "측정" not in role_name:
+            continue
+        return " ".join(str(term) for term in (role.search_terms or [])).strip()
+    return ""
+
+
+def is_catalog_list_query(query: str = "", analysis: QueryAnalysis | None = None) -> bool:
+    """Master/inventory listing. Not a time-scoped measured reading."""
+
+    if _asks_series(query):
+        return False
+    procedure = str(getattr(analysis, "procedure", "") or "").strip() if analysis else ""
+    if procedure == "list":
+        return True
+    return is_dimension_list_query(query)
+
+
+def asks_measured_reading(query: str = "", analysis: QueryAnalysis | None = None) -> bool:
+    """Answer is a fact reading. procedure=lookup does not make this a catalog lookup."""
+
+    if asks_aggregation(query, analysis) or _asks_series(query):
+        return True
+    if is_catalog_list_query(query, analysis):
+        return False
+    return bool(_analysis_metric(analysis))
+
+
+def measurement_needs_period(query: str = "", analysis: QueryAnalysis | None = None) -> bool:
+    """Measured reading with an empty period slot. Do not invent latest."""
+
+    source = str(getattr(analysis, "period", "") or "").strip() if analysis else ""
+    source = source or query
+    if parse_korean_period(source) is not None:
+        return False
+    return asks_measured_reading(query, analysis)
+
+
 def query_requests_fact(
     query: str = "",
     period: ParsedPeriod | None = None,
     analysis: QueryAnalysis | None = None,
     mappings: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """집계·극값·시계열, 또는 기간+측정 항목이면 팩트가 필요하다."""
+    """집계·극값·시계열, 또는 측정 항목이면 팩트가 필요하다. 목록은 제외."""
 
-    del mappings
-    if asks_aggregation(query, analysis):
-        return True
-    if _asks_series(query):
-        return True
-    metric = ""
-    if analysis is not None:
-        metric = str(analysis.metric or analysis.measurement.metric or "").strip()
-        if not metric:
-            for role in analysis.meaning_roles or []:
-                role_name = SearchMixin._compact_natural_text(str(role.role or ""))
-                if "측정" not in role_name:
-                    continue
-                metric = " ".join(str(term) for term in (role.search_terms or []))
-                break
-    has_period = period is not None
-    if not has_period and query:
-        has_period = parse_korean_period(query) is not None
-    if metric and has_period:
-        return True
-    procedure = str(getattr(analysis, "procedure", "") or "").strip() if analysis else ""
-    if procedure in {"list", "lookup", ""}:
-        return False
-    return bool(metric)
+    del mappings, period
+    return asks_measured_reading(query, analysis)
 
 
 def is_embedding_recall_row(row: dict[str, Any]) -> bool:

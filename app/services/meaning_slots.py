@@ -454,6 +454,36 @@ def glossary_synonyms_for_needles(
     return unique_needles(extras)
 
 
+def synonym_members_for_needles(
+    groups: list[dict[str, Any]] | None,
+    needles: list[str],
+    *,
+    limit: int = 80,
+) -> list[str]:
+    """Matching term-group members only. Do not cross groups."""
+
+    wanted = {compact(item) for item in needles if compact(item)}
+    if not wanted:
+        return []
+    extras: list[str] = []
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("kind") or "term") not in {"", "term"}:
+            continue
+        members = [
+            str(item).strip()
+            for item in (group.get("members") or [])
+            if str(item).strip()
+        ]
+        preferred = str(group.get("preferred_form") or "").strip()
+        surfaces = [preferred, *members] if preferred else members
+        if not any(compact(item) in wanted for item in surfaces):
+            continue
+        extras.extend(surfaces)
+    return unique_needles(extras, limit=limit)
+
+
 def answer_axis_from_analysis(analysis: QueryAnalysis | None) -> list[str]:
     if analysis is None:
         return []

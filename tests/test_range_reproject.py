@@ -157,7 +157,7 @@ class SuffixStoreMergeTests(unittest.TestCase):
         self.assertIn("권역", hq.suffixes)
         self.assertIsNotNone(peel_type_suffix("금강권역", groups))
 
-    def test_complete_hq_replaces_only_hq_group(self) -> None:
+    def test_incomplete_hq_with_partial_region_keeps_constants(self) -> None:
         from app.services.decision_postgres.suffix_store import merge_type_groups
 
         groups = merge_type_groups(
@@ -167,8 +167,27 @@ class SuffixStoreMergeTests(unittest.TestCase):
             ]
         )
         hq = next(item for item in groups if item.name == "hq")
+        self.assertIn("유역본부", hq.suffixes)
+        self.assertIsNotNone(peel_type_suffix("금강유역본부", groups))
+
+    def test_complete_hq_replaces_only_hq_group(self) -> None:
+        from app.services.decision_postgres.suffix_store import merge_type_groups
+
+        suffixes = ["지역본부", "유역본부", "권역본부", "유역", "권역"]
+        groups = merge_type_groups(
+            [
+                {
+                    "group_name": "hq",
+                    "suffix": suffix,
+                    "kind": "hq",
+                    "dictionary_markers": ["지역본부", "유역본부", "권역본부"],
+                }
+                for suffix in suffixes
+            ]
+        )
+        hq = next(item for item in groups if item.name == "hq")
         plant = next(item for item in groups if item.name == "plant")
-        self.assertEqual(set(hq.suffixes), {"권역", "권역본부"})
+        self.assertEqual(set(hq.suffixes), set(suffixes))
         self.assertIn("정수장", plant.suffixes)
         peeled = peel_type_suffix("금강권역", groups)
         self.assertIsNotNone(peeled)
@@ -176,8 +195,9 @@ class SuffixStoreMergeTests(unittest.TestCase):
         self.assertEqual(instance, "금강")
         self.assertEqual(
             set(type_product_surfaces(instance, group)),
-            {"금강권역", "금강권역본부"},
+            {f"금강{item}" for item in suffixes},
         )
+        self.assertIsNotNone(peel_type_suffix("금강유역본부", groups))
 
 
 class RangeProjectionTests(unittest.IsolatedAsyncioTestCase):
@@ -240,7 +260,33 @@ class RangeProjectionTests(unittest.IsolatedAsyncioTestCase):
         bound, unresolved = await project_range_mappings(repo, ["금강"])
         self.assertEqual(bound, [])
         self.assertTrue(unresolved)
-        self.assertEqual(len(repo.calls), 1)
+        self.assertGreaterEqual(len(repo.calls), 1)
+
+    async def test_typeless_plant_one_code_binds(self) -> None:
+        repo = RecordingRepository(
+            [
+                [],
+                [_plant_row("380", "충주정수장")],
+            ]
+        )
+        bound, unresolved = await project_range_mappings(repo, ["충주"])
+        self.assertFalse(unresolved)
+        self.assertEqual([row["code_value"] for row in bound], ["380"])
+        self.assertEqual(bound[0]["matched_mention"], "충주")
+
+    async def test_typeless_two_codes_stay_unresolved(self) -> None:
+        repo = RecordingRepository(
+            [
+                [],
+                [
+                    _plant_row("380", "충주정수장"),
+                    _plant_row("381", "충주사업장"),
+                ],
+            ]
+        )
+        bound, unresolved = await project_range_mappings(repo, ["충주"])
+        self.assertEqual(bound, [])
+        self.assertTrue(unresolved)
 
     async def test_two_codes_bind_all(self) -> None:
         repo = RecordingRepository(

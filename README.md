@@ -12,6 +12,24 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
 (Wave 0–3 적용 완료 기준, 2026-08-06)
 
+## 1.0 업데이트 (2026-08-20)
+
+`/meta`가 Metadata Store에서 꺼내는 테이블·컬럼 사실을 `/data_decision` 후보와
+같은 슬롯 규칙으로 채운다. 질의 전용 블록(`query_plan`, `join_groups`,
+`resolved_entities`)은 `/meta`에 넣지 않는다.
+
+| 항목 | 내용 |
+| --- | --- |
+| **`/meta` 슬롯** | 논리명 → `table_name_kr`/`column_name_kr`. 원본 설명 → `table_comment`/`column_comment`. 분석 설명 → `description` |
+| **`/meta` 보강** | `subject_area`, `table_type`, `default_date_column`, `value_examples`, 길이 포함 `data_type`, `unit`, `format_pattern`, `has_code`. 나가는 FK면 `code_lookup.via=fk` |
+| **`/meta/batch`** | 표 키만이 아니라 논리명·설명·`subject_area` 요약 |
+| **`/meta/ref`·`/fk`** | Store `t2s_fk_constraints`의 **from 테이블 = 요청 테이블**인 행만. 들어오는 FK는 상대 표로 조회 |
+| **list vs lookup** | 행이 많다고 list가 아님. 대상 나열만 list. 측정값·변화·추이·추세는 lookup |
+| **기간** | 측정값을 묻는데 기간이 없으면 SQL을 만들지 않음. 목록 질의는 기간을 요구하지 않음 |
+| **동의어** | 용어 그룹 멤버는 맞은 그룹 안에서만 확장. 유형 접미 그룹과 섞지 않음 |
+
+관련 테스트: `tests/test_meta_catalog.py` · `tests/test_decision_planner_postgres.py` · `tests/test_synonym_groups.py`
+
 ## 1.0 엔진 업데이트 (2026-08-19)
 
 자연어 → 저장소 메타 교차 → 계획 → SQL → `/query_execute`가 본 경로다.
@@ -164,6 +182,31 @@ T2SQL 키를 넣지 않습니다. `/data_decision` Request/Response 타입을 �
   projection metadata 노출 보강
 
 상세: [`docs/REPORT_260803_store_sourced_bindings.md`](docs/REPORT_260803_store_sourced_bindings.md)
+
+## `/meta`
+
+Metadata Store Serving 카탈로그를 질의 없이 조회합니다. 원천 DB를 직접 읽지 않습니다.
+`/data_decision`과 같은 Store 행·같은 슬롯 규칙을 쓰되, 점수·계획·엔티티 해소는 없습니다.
+
+| Method | Path | 역할 |
+|---|---|---|
+| `POST` | `/meta/batch` | Serving 테이블 목록(논리명·설명·`subject_area` 포함) |
+| `POST` | `/meta/table` | 테이블 정보 + 전체 컬럼 + **나가는** FK |
+| `POST` | `/meta/column` | 단일 컬럼. FK가 있으면 `code_lookup` |
+| `POST` | `/meta/ref` | 해당 테이블에서 나가는 FK |
+| `POST` | `/meta/fk` | `/meta/ref`와 동일 본문 |
+
+슬롯:
+
+- `table_name_kr` / `column_name_kr`: 승인 한글 논리명. 설명 장문을 넣지 않음
+- `table_comment` / `column_comment`: Store 원본 설명
+- `description`: 분석 설명 우선, 없으면 원본 설명
+- `subject_area` / `table_type` / `default_date_column`: `/data_decision` 후보와 동일 헬퍼
+- `value_examples` · `unit` · `format_pattern` · `has_code`: 컬럼 `metadata` 및 승인 값사전
+- `code_lookup`: 승인 FK가 있을 때만 `via=fk`
+
+`/meta/ref`는 `RDITAG_TB`처럼 마스터를 요청하면 그 표에서 **나가는** 관계만 줍니다.
+팩트 `TAGSN → RDITAG_TB` 같은 들어오는 관계는 팩트 표 이름으로 조회합니다.
 
 ## API
 

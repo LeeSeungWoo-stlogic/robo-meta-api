@@ -6,7 +6,12 @@ from typing import Any
 class CatalogMixin:
     async def list_tables(self) -> list[dict[str, Any]]:
         query = """
-        SELECT db, schema_name, original_name AS table_name
+        SELECT db,
+               schema_name,
+               original_name AS table_name,
+               description,
+               analyzed_description,
+               metadata
         FROM t2s_tables
         ORDER BY db, schema_name, original_name
         """

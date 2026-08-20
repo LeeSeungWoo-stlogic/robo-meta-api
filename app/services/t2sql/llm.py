@@ -46,8 +46,8 @@ query_plan.filters 중 resolution_status=resolved 인 항목은 이미 확정이
 질문의 권역·유역본부처럼 같은 유형 접미 동의어와, 그 코드가 이미 resolved IN이면 언급 불일치가 아니다.
 resolved_entities에 코드가 여러 개여도 query_plan.filters의 value가 SoT다. 계획에 없는 코드를 add_codes에 창작하지 마라.
 슬롯 유형과 다른 코드만 drop_codes에 넣어라.
-질의가 기간을 밝히지 않았고 절차가 집계·극값이 아니면 기간을 missing에 넣지 마라. 날짜를 창작하지 마라.
-집계·극값인데 query_plan.unresolved_requirements에 기간 재질의가 있으면 accept=false 이고 missing에 기간을 넣어라.
+측정값을 묻는데 질문에 기간이 없으면 missing에 기간을 넣어라. 목록이면 기간을 missing에 넣지 마라. 날짜를 창작하지 마라.
+query_plan.unresolved_requirements에 기간 재질의가 있으면 accept=false 이고 missing에 기간을 넣어라.
 probe_rows가 비어 있어도 위 SoT가 있으면 accept=true 다.
 query_analysis와 probe만 보고 재판하지 마라.
 의도를 다시 쓰지 마라. 출력은 JSON 객체 하나뿐이다.
@@ -76,7 +76,7 @@ query_plan.join_paths[].conditions는 ON SoT다. path의 condition을 빼지 마
 SQL 표는 query_plan.required_tables와 join_paths의 표만 써라.
 glossary_routes[].standard_term은 승인 용어집 표준명이다. mention을 그 이름으로 해석하라. SQL 식별자가 아니다. 용어만으로 테이블을 창작하지 마라.
 기간은 query_plan.filters의 resolved 기간만 써라. 날짜 컬럼을 창작하지 마라. 오늘·연도 접두 등 날짜 리터럴을 창작하지 마라.
-query_plan.aggregation이 있으면 function·value_column·weighted·time_scope가 SoT다. null 칸을 창작하지 마라. 가중 컬럼은 계획이 weighted=true 일 때만 쓴다. 전기간 날짜 구간을 창작하지 마라.
+query_plan.aggregation이 있으면 function·value_column·weighted·time_scope가 SoT다. null 칸을 창작하지 마라. AVG/SUM/MAX/MIN의 대상은 value_column뿐이다. JOIN 키·식별 컬럼에 집계 함수를 걸지 마라. 가중 컬럼은 계획이 weighted=true 일 때만 쓴다. 전기간 날짜 구간을 창작하지 마라.
 query_plan.unresolved_requirements에 기간 재질의가 있으면 SELECT를 만들지 마라. NO_SQL: 그 문구만 출력하라.
 SELECT 목록에 * 나 table.* 나 alias.`*` 를 쓰지 마라. required_columns에 있는 컬럼만 써라.
 query_plan.unresolved_requirements에 팩트 표 미선정이 있고 측정·기간이 필요하면 NO_SQL: 팩트 표 미선정 만 출력하라. 차원 표만으로 측정 SELECT를 만들지 마라. 목록 질의는 차원 required_tables로 SELECT를 출력하라. 목록·그룹 대상 차원은 required_columns의 명칭·코드를 SELECT에 넣어라. JOIN 키만 출력하지 마라.

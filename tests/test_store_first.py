@@ -36,7 +36,9 @@ from app.services.decision_postgres.store_first import (
     is_list_target_mention,
     is_tag_master_table,
     mapping_filters,
+    measure_column_names,
     measure_point_label_filters,
+    measurement_needs_period,
     partition_mention_mappings,
     period_filter_for_fact,
     pick_fact_tables,
@@ -208,6 +210,68 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertEqual(spec.weighted, False)
         self.assertIsNone(spec.weight_column)
         self.assertEqual(spec.time_scope, "2024-01-01/2024-12-31")
+
+    def test_measure_column_names_skips_identity_and_join_keys(self) -> None:
+        names = measure_column_names(
+            [
+                {
+                    "name": "TAGSN",
+                    "dtype": "int",
+                    "is_foreign_key": True,
+                    "metadata": {"column_name_kr": "태그 식별값"},
+                },
+                {
+                    "name": "SUJ_CODE",
+                    "dtype": "int",
+                    "metadata": {"column_name_kr": "사업장코드"},
+                },
+                {
+                    "name": "VAL",
+                    "dtype": "numeric",
+                    "metadata": {"column_name_kr": "측정값"},
+                },
+                {
+                    "name": "CNT",
+                    "dtype": "int",
+                    "metadata": {"column_name_kr": "기록 건수"},
+                },
+            ],
+            exclude={"TAGSN"},
+        )
+        self.assertEqual(names, ["VAL", "CNT"])
+
+    def test_aggregation_contract_skips_series_identity(self) -> None:
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(
+                status="complete",
+                procedure="aggregate",
+                measurement=MeasurementRequirement(aggregation="AVG"),
+            ),
+            facts=[{"id": 1, "original_name": "FACT_DD", "schema_name": "S"}],
+            columns_by_id={
+                1: [
+                    {
+                        "name": "TAGSN",
+                        "dtype": "int",
+                        "is_foreign_key": True,
+                        "metadata": {"column_name_kr": "태그 식별값"},
+                    },
+                    {
+                        "name": "VAL",
+                        "dtype": "numeric",
+                        "metadata": {"column_name_kr": "측정값"},
+                    },
+                    {
+                        "name": "CNT",
+                        "dtype": "int",
+                        "metadata": {"column_name_kr": "기록 건수"},
+                    },
+                ]
+            },
+            period=parse_korean_period("2024년"),
+        )
+        assert spec is not None
+        self.assertEqual(spec.value_column, "VAL")
 
     def test_countish_numeric_loses_to_measured_value(self) -> None:
         fact = {"id": 1, "original_name": "FACT_DD", "schema_name": "S"}
@@ -462,6 +526,23 @@ class StoreFirstUnitTests(unittest.TestCase):
         )
         self.assertEqual(resolve_time_role(procedure="extremum"), "extremum")
         self.assertEqual(resolve_time_role(procedure="list"), "none")
+        lookup_metric = QueryAnalysis(
+            status="complete",
+            procedure="lookup",
+            metric="공급량",
+            meaning_status="complete",
+        )
+        year = parse_korean_period("2024년")
+        self.assertTrue(
+            query_requests_fact("충주 2024년 공급량은?", year, lookup_metric)
+        )
+        self.assertTrue(
+            measurement_needs_period("충주 취수 공급량은?", lookup_metric)
+        )
+        self.assertFalse(measurement_needs_period("금강권역 정수장 목록", listed))
+        self.assertFalse(
+            measurement_needs_period("충주정수장 2024년 평균 탁도", lookup_metric)
+        )
 
     def test_series_or_period_metric_list_requests_fact(self) -> None:
         series = QueryAnalysis(
@@ -1851,6 +1932,45 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
             response = await decide(
                 repo,
                 query="화성정수장 평균 탁도",
+                include_matched_columns=False,
+                column_top_m=None,
+                auto_resolve_entities=True,
+            )
+        self.assertEqual(response.query_plan.completeness, "failed")
+        self.assertEqual(
+            response.query_plan.unresolved_requirements, [PERIOD_REQUIRED]
+        )
+        repo.find_value_mappings.assert_not_called()
+
+    async def test_decide_lookup_metric_without_period_asks_for_period(self) -> None:
+        repo = AsyncMock()
+
+        async def analyze(question: str, timeout_s=None, store_hits=None):
+            return QueryAnalysis(
+                status="complete",
+                intent="x",
+                procedure="lookup",
+                target="충주",
+                metric="공급량",
+                meaning_status="complete",
+                entities_include=["충주"],
+                measurement=MeasurementRequirement(metric="공급량"),
+                schema_roles=[],
+            )
+
+        with (
+            patch(
+                "app.services.decision_postgres.decide.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.decision_postgres.decide.get_query_analyzer"
+            ) as getter,
+        ):
+            getter.return_value.analyze = analyze
+            response = await decide(
+                repo,
+                query="충주 취수 공급량은?",
                 include_matched_columns=False,
                 column_top_m=None,
                 auto_resolve_entities=True,

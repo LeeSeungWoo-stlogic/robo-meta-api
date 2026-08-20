@@ -15,6 +15,9 @@ def test_find_glossary_routes_uses_approved_terms_not_short_aliases() -> None:
     assert "w.abbreviation" in source
     assert "w.english_name" in source
     assert "jsonb_array_elements_text(w.aliases)" in source
+    assert "kair_platform_synonym_groups" in source
+    assert "kair_platform_type_suffix_groups" not in source
+    assert "kair_platform_short_aliases" not in source
 
 
 def test_generate_prompt_uses_glossary_standard_term() -> None:

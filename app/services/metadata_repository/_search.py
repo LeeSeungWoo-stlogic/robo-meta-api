@@ -297,6 +297,41 @@ class SearchMixin:
             trusted_extras=trusted_extras,
         )
 
+    async def find_value_mapping_code_columns(
+        self,
+        table_ids: list[int],
+    ) -> dict[int, set[str]]:
+        """Approved serving value-mapping code columns, keyed by table id."""
+
+        ids = sorted({int(item) for item in table_ids if item is not None})
+        if not ids:
+            return {}
+        query = """
+        SELECT DISTINCT c.table_id, c.name AS column_name
+        FROM t2s_value_mappings vm
+        JOIN t2s_columns c ON c.id = vm.column_id
+        JOIN t2s_tables t ON t.id = c.table_id
+        JOIN t2s_datasources d ON d.id = t.datasource_id
+        JOIN t2s_snapshot_activations a
+          ON a.source_instance_id = d.profile_id
+         AND a.sink_name = 't2s_serving'
+         AND a.snapshot_id = t.metadata->>'snapshot_id'
+        WHERE vm.verified = true
+          AND t.text_to_sql_is_valid = true
+          AND t.review_status = 'approved'
+          AND t.id = ANY($1::int[])
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query, ids)
+        found: dict[int, set[str]] = {}
+        for row in rows:
+            table_id = int(row["table_id"])
+            name = str(row["column_name"] or "").strip()
+            if not name:
+                continue
+            found.setdefault(table_id, set()).add(name)
+        return found
+
     async def find_glossary_routes(self, needles: list[str] | None = None) -> list[dict[str, Any]]:
         """Route question surfaces to approved glossary terms and standard words.
 
@@ -466,17 +501,34 @@ class SearchMixin:
             grouped.setdefault(int(row["table_id"]), []).append(dict(row))
         return grouped
 
-    async def find_type_suffix_groups(self) -> list[dict[str, Any]]:
-        """Closed type-suffix dictionary. Empty when the store has no table or rows.
+    async def find_synonym_groups(
+        self,
+        needles: list[str] | None = None,
+        *,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Approved synonym groups on the active glossary head.
 
-        Expected columns: group_name (hq|plant), suffix, kind (hq|plant).
-        Missing relation is not an error — callers keep code constants.
+        kind=type_suffix returns peel rows. kind=term (default) returns matching
+        term groups for needles. Missing tables are not an error.
         """
 
+        if kind == "type_suffix":
+            return await self._find_type_suffix_synonym_groups()
+        return await self._find_term_synonym_groups(needles)
+
+    async def _find_type_suffix_synonym_groups(self) -> list[dict[str, Any]]:
         query = """
-        SELECT group_name, suffix, kind
-        FROM kair_platform_type_suffix_groups
-        WHERE COALESCE(is_current, TRUE)
+        SELECT g.group_name, m.synonym AS suffix, g.group_name AS kind,
+               g.dictionary_markers
+        FROM kair_platform_active_glossary_head h
+        JOIN kair_platform_synonym_groups g
+          ON g.glossary_id = h.glossary_id
+         AND g.version = h.version
+         AND g.kind = 'type_suffix'
+         AND g.status = 'APPROVED'
+        JOIN kair_platform_synonym_members m
+          ON m.group_id = g.group_id
         """
         try:
             async with self._pool.acquire() as connection:
@@ -484,6 +536,122 @@ class SearchMixin:
         except Exception:
             return []
         return [dict(row) for row in rows]
+
+    async def _find_term_synonym_groups(
+        self,
+        needles: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        compact_needles = self._compact_needles(needles)
+        if not compact_needles:
+            return []
+        count_query = """
+        SELECT COUNT(*)
+        FROM kair_platform_active_glossary_head h
+        JOIN kair_platform_synonym_groups g
+          ON g.glossary_id = h.glossary_id
+         AND g.version = h.version
+         AND g.kind = 'term'
+         AND g.status = 'APPROVED'
+        """
+        try:
+            async with self._pool.acquire() as connection:
+                count = int(await connection.fetchval(count_query) or 0)
+        except Exception:
+            return await self._term_synonyms_from_word_aliases(compact_needles)
+        if count <= 0:
+            return await self._term_synonyms_from_word_aliases(compact_needles)
+        query = """
+        SELECT g.group_id, g.preferred_form, g.role, m.synonym
+        FROM kair_platform_active_glossary_head h
+        JOIN kair_platform_synonym_groups g
+          ON g.glossary_id = h.glossary_id
+         AND g.version = h.version
+         AND g.kind = 'term'
+         AND g.status = 'APPROVED'
+        JOIN kair_platform_synonym_members m
+          ON m.group_id = g.group_id
+        WHERE EXISTS (
+            SELECT 1
+            FROM kair_platform_synonym_members hit
+            WHERE hit.group_id = g.group_id
+              AND lower(regexp_replace(hit.synonym, '\\s+', '', 'g'))
+                  = ANY($1::text[])
+        )
+        """
+        try:
+            async with self._pool.acquire() as connection:
+                rows = await connection.fetch(query, compact_needles)
+        except Exception:
+            return []
+        return self._group_term_synonym_rows(rows)
+
+    async def _term_synonyms_from_word_aliases(
+        self,
+        compact_needles: list[str],
+    ) -> list[dict[str, Any]]:
+        query = """
+        SELECT w.word_id AS group_id,
+               w.korean_name AS preferred_form,
+               '용어'::text AS role,
+               surface.surface AS synonym
+        FROM kair_platform_active_glossary_head h
+        JOIN kair_platform_standard_words w
+          ON w.glossary_id = h.glossary_id
+         AND w.glossary_version = h.version
+         AND w.is_current
+         AND w.status = 'APPROVED'
+        CROSS JOIN LATERAL (
+            SELECT w.korean_name AS surface
+            UNION ALL
+            SELECT w.abbreviation
+            WHERE char_length(COALESCE(w.abbreviation, '')) >= 2
+            UNION ALL
+            SELECT w.english_name
+            WHERE char_length(COALESCE(w.english_name, '')) >= 2
+            UNION ALL
+            SELECT alias
+            FROM jsonb_array_elements_text(w.aliases) AS alias
+            WHERE char_length(alias) >= 2
+        ) surface
+        WHERE char_length(COALESCE(surface.surface, '')) >= 2
+          AND (
+            lower(regexp_replace(surface.surface, '\\s+', '', 'g'))
+                = ANY($1::text[])
+            OR lower(regexp_replace(w.korean_name, '\\s+', '', 'g'))
+                = ANY($1::text[])
+          )
+        """
+        try:
+            async with self._pool.acquire() as connection:
+                rows = await connection.fetch(query, compact_needles)
+        except Exception:
+            return []
+        return self._group_term_synonym_rows(rows)
+
+    @staticmethod
+    def _group_term_synonym_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            group_id = str(row.get("group_id") or "")
+            preferred = str(row.get("preferred_form") or "").strip()
+            synonym = str(row.get("synonym") or "").strip()
+            if not group_id or not preferred:
+                continue
+            item = grouped.setdefault(
+                group_id,
+                {
+                    "kind": "term",
+                    "role": str(row.get("role") or "용어"),
+                    "preferred_form": preferred,
+                    "members": [],
+                },
+            )
+            members = item["members"]
+            if synonym and synonym not in members:
+                members.append(synonym)
+            if preferred not in members:
+                members.insert(0, preferred)
+        return list(grouped.values())
 
     async def find_catalog_by_mentions(
         self,
@@ -698,6 +866,28 @@ class SearchMixin:
         return SearchMixin._label_starts_with(label, token)
 
     @staticmethod
+    def _mapping_table_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        table_id = row.get("table_id")
+        if table_id is not None and str(table_id).strip() != "":
+            try:
+                return ("id", int(table_id))
+            except (TypeError, ValueError):
+                pass
+        table = str(row.get("table_name") or row.get("original_name") or "").strip()
+        if table:
+            return (
+                "name",
+                str(row.get("db") or "").casefold(),
+                str(row.get("schema_name") or "").casefold(),
+                table.casefold(),
+            )
+        fqn = str(row.get("column_fqn") or "").strip()
+        parts = [part for part in fqn.split(".") if part]
+        if len(parts) >= 2:
+            return ("fqn", ".".join(parts[:-1]).casefold())
+        return ("row", id(row))
+
+    @staticmethod
     def _select_mentioned_mappings(
         needles: list[str] | str,
         rows: list[dict[str, Any]],
@@ -801,8 +991,13 @@ class SearchMixin:
             code = str(row.get("code_value") or "").strip()
             if label:
                 kept_by_label.setdefault(label, set()).add(code)
+        exact_tables = {
+            SearchMixin._mapping_table_key(row) for row in kept_exact
+        }
         kept_reverse: list[dict[str, Any]] = []
         for row in reverse:
+            if exact_tables and SearchMixin._mapping_table_key(row) not in exact_tables:
+                continue
             token = SearchMixin._compact_natural_text(
                 str(row.get("matched_mention") or "")
             )

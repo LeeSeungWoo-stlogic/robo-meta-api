@@ -35,18 +35,26 @@ def _mapping_table_blob(row: dict[str, Any]) -> str:
     )
 
 
-def mapping_is_hq(row: dict[str, Any]) -> bool:
+def mapping_is_hq(
+    row: dict[str, Any],
+    markers: tuple[str, ...] | None = None,
+    plant_markers: tuple[str, ...] | None = None,
+) -> bool:
     blob = _mapping_table_blob(row)
-    if any(marker in blob for marker in _HQ_DICT_MARKERS):
+    hq_markers = markers if markers is not None else _HQ_DICT_MARKERS
+    plant = plant_markers if plant_markers is not None else _PLANT_TYPE_MARKERS
+    if any(marker in blob for marker in hq_markers):
         return True
-    return "본부" in blob and not any(
-        marker in blob for marker in _PLANT_TYPE_MARKERS
-    )
+    return "본부" in blob and not any(marker in blob for marker in plant)
 
 
-def mapping_is_plant(row: dict[str, Any]) -> bool:
+def mapping_is_plant(
+    row: dict[str, Any],
+    markers: tuple[str, ...] | None = None,
+) -> bool:
     blob = _mapping_table_blob(row)
-    return any(marker in blob for marker in _PLANT_TYPE_MARKERS)
+    plant = markers if markers is not None else _PLANT_TYPE_MARKERS
+    return any(marker in blob for marker in plant)
 
 
 @dataclass(frozen=True)
@@ -54,11 +62,15 @@ class TypeGroup:
     name: str
     suffixes: tuple[str, ...]
     kind: str
+    markers: tuple[str, ...] = ()
 
     def row_in_dictionary(self, mapping: dict[str, Any]) -> bool:
+        markers = self.markers or (
+            _HQ_DICT_MARKERS if self.kind == "hq" else _PLANT_TYPE_MARKERS
+        )
         if self.kind == "hq":
-            return mapping_is_hq(mapping)
-        return mapping_is_plant(mapping)
+            return mapping_is_hq(mapping, markers)
+        return mapping_is_plant(mapping, markers)
 
 
 TYPE_GROUPS: tuple[TypeGroup, ...] = (
@@ -66,11 +78,13 @@ TYPE_GROUPS: tuple[TypeGroup, ...] = (
         name="hq",
         suffixes=tuple(sorted(_REGION_HQ_TERMS, key=len, reverse=True)),
         kind="hq",
+        markers=_HQ_DICT_MARKERS,
     ),
     TypeGroup(
         name="plant",
         suffixes=tuple(sorted(_PLANT_TYPE_MARKERS, key=len, reverse=True)),
         kind="plant",
+        markers=_PLANT_TYPE_MARKERS,
     ),
 )
 

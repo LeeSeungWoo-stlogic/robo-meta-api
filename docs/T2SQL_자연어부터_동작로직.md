@@ -45,6 +45,8 @@
 Q1 `{"query":"금강권역 정수장 목록"}` (기본 true): 확정 SQL에 정수장 마스터가 있으면 그 표의 승인 컬럼이 `matched_columns`에 남는다.  
 같은 질문에 `"include_matched_columns": false`: SQL·필터·코드는 같고 `matched_columns`만 빈 배열이다.
 
+`matched_columns[].has_code`는 승인 값사전의 `code_column`이면 `Y`, 아니면 `N`이다. 코드 표라는 이유만으로 명칭·정렬 컬럼에 `Y`를 주지 않는다.
+
 #### `table_limit` 기본이 비어 보이는 이유
 
 요청 스키마에 숫자 10을 박지 않는다. 환경 YAML이 상한이다. 클라이언트가 안 내면 서버가 YAML을 쓴다. 질의창에서 다시 묻지 않는다.
@@ -197,12 +199,22 @@ procedure 값:
 
 ### 5.1 용어집
 
-`find_glossary_routes`에 범위·측정 합집합과 답 축 줄기를 넣는다. 승인 표준용어·표준단어 동등.
+`find_glossary_routes`는 필터·측정·답 축 줄기를 넣는다. 범위 원문은 넣지 않는다. 승인 표준용어·표준단어 동등. LLM 표시·가중 컬럼 판별용이다.
+
+값매핑 extra SoT는 `find_synonym_groups(필터+측정)`의 매칭 용어 그룹 멤버다. routes 전역 LIMIT에 extra를 묶지 않는다. 범위 슬롯은 접미 그룹 peel만 쓴다.
+
+`resolved_entities.source`는 그 멘션이 어떻게 값매핑에 들어왔는지를 표시한다. 코드 자체는 값사전이다.
+
+| `source` | 조건 | 예 |
+|---|---|---|
+| `glossary` | `match_type=alias_prefix`, 또는 compact 멘션이 용어 그룹·glossary route 표면에 있음, 또는 범위 peel로 원문과 사전 라벨이 다름 | `NTU`→탁도, `탁도` 표준용어, `금강유역`→금강유역본부 |
+| `value_examples` | 값사전 라벨을 질문 원문과 바로 맞춘 경우 | `충주정수장` 사업장 코드 |
+| `db_probe` | Serving decide가 아닌 레거시 probe 경로 | T2SQL 본선 미사용 |
 
 | 규칙 | Q1 | Q2 |
 |---|---|---|
-| 측정 조회 문자열이 용어집 표면에 있을 때만 동의어를 값매핑 extra로 씀 | 측정 조회 없음 → extra 없음 | `탁도`가 용어집에 있으면 그 동의어만 extra |
-| 범위에는 extra를 넣지 않음 | `금강권역` extra 없음 | `화성정수장` extra 없음 |
+| 측정 바늘이 용어 그룹 멤버에 있을 때만 그 그룹 동의어를 값매핑 extra로 씀 | 측정 조회 없음 → extra 없음 | `탁도`가 용어 그룹에 있으면 그 멤버만 extra |
+| 범위에는 용어 extra를 넣지 않음 | `금강권역` extra 없음 | `화성정수장` extra 없음 |
 
 ### 5.2 값매핑 조회
 
@@ -239,9 +251,9 @@ SQL:
 | 단 | 동작 | Q1 | Q2 |
 |---|---|---|---|
 | 1단 | 범위 원문만 동등. extra 없음. distinct `code_value`가 1개면 확정, `matched_mention`은 범위 원문. 행은 있는데 코드가 0개이거나 2개 이상이면 2단을 하지 않고 미결합. 0건이면 2단 | `금강권역` 동등 0건이면 2단 | `화성정수장`이 값사전에 있으면 1단에서 코드 1개로 확정될 수 있음 |
-| 2단 접미 | compact에서 닫힌 유형 접미를 가장 긴 것 하나, 한 번 벗김. 없으면 미결합. 글자를 더 깎지 않음 | `권역` → 사례 `금강`, 그룹 본부 | `정수장` → 사례 `화성`, 그룹 사업장 |
+| 2단 접미 | compact에서 닫힌 유형 접미를 가장 긴 것 하나, 한 번 벗김. 없으면 사례 원문 × 모든 유형 그룹 접미 곱. 글자를 더 깎지 않음 | `권역` → 사례 `금강`, 그룹 본부 | `정수장` → 사례 `화성`, 그룹 사업장. `충주`는 접미 없음 → `충주정수장`/`충주사업장` |
 | 2단 조회 | 사례 × 그 그룹 접미 곱만 동등. extra·접두 없음. 적중은 그룹 사전 표지만 | `금강지역본부`, `금강유역본부`, `금강권역본부`, `금강유역`, `금강권역` | `화성사업장`, `화성정수장` |
-| 확정 | 짧은 라벨 삭제 후 distinct `code_value`가 1개가 아니면 `범위 코드 미결합` | 라이브 스토어에서 `금강유역본부(충청)` → `902`로 1개 확정된 사례 | 사업장 코드 1개(시험 픽스처는 `358`) |
+| 확정 | 접미가 있으면 코드 있는 행을 남김. 접미가 없으면 distinct `code_value`가 1개일 때만 확정 | `금강권역`은 접미 경로 | `충주`→`충주정수장` 코드 1개 |
 
 본부 접미: `지역본부`, `유역본부`, `권역본부`, `유역`, `권역`.  
 사업장 접미: `정수장`, `사업장`.  
@@ -252,7 +264,7 @@ SQL:
 | 조건 | 동작 | Q1 | Q2 |
 |---|---|---|---|
 | 의미 실패 | 값매핑 안 함 | 해당 없으면 진행 | 동일 |
-| 1차 | 측정 조회 문자열 동등. extra·trusted는 용어집 동의어 | 측정 조회 없음 | `탁도` 동등 |
+| 1차 | 측정 조회 문자열 동등. extra·trusted는 용어집 동의어. extra 적중은 **바늘 동등이 난 같은 표**에서만 남김 | 측정 조회 없음 | `탁도` 동등. `NTU` extra는 변량표에만 |
 | 실패 시 | 측정 문자열을 앞에서부터 길이 2까지 잘라 extra에 넣고 한 번 더. trusted는 용어집뿐이라, 접두 extra로 SQL에 걸려도 trusted가 아니면 버림 | 해당 없음 | `탁` 등 접두 extra 재조회 가능 |
 | 범위 | 이 재조회 없음 | — | — |
 
@@ -354,7 +366,7 @@ Q1 `list` → 팩트 없음. Q2 `aggregate` → 팩트 선정.
 | `answer_axis` | `primary_outputs` | `["정수장"]` | `["탁도"]` 또는 공란 |
 | completeness | 표도 필터도 없으면 failed. unresolved가 있거나 의미가 degraded면 partial. 아니면 complete | `complete` | 팩트·코드가 모이면 `complete` |
 
-`resolved_entities`의 mention은 값사전 `natural_value`다. `auto_resolve_entities=false`면 빈 배열.  
+`resolved_entities`의 `mention`은 값사전 `natural_value`, `matched_mention`은 질문에 맞은 표면이다. `table`은 스토어 표기. `source`는 §5.1. `auto_resolve_entities=false`면 빈 배열.  
 `execution_context` 바인딩이 실패해도 계획은 반환한다.  
 `DecisionResponse`가 엔진으로 돌아간다. 이 시점에도 SQL은 없다.
 
