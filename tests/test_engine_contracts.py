@@ -419,6 +419,34 @@ class TimeRoleTests(unittest.TestCase):
         )
         self.assertEqual([int(item["id"]) for item in code_hq], [5])
 
+    def test_group_dimension_matches_plant_column_not_table_comment(self) -> None:
+        catalog = [
+            {
+                "id": 6,
+                "subject_area": "master",
+                "logical_name": "태그 마스터",
+                "description": "",
+                "original_name": "vw_tag_dim",
+                "name": "vw_tag_dim",
+            }
+        ]
+        columns = {
+            6: [
+                {
+                    "name": "suj_code",
+                    "metadata": {"column_name_kr": "사업장코드"},
+                },
+                {
+                    "name": "suj_name",
+                    "metadata": {"column_name_kr": "사업장이름"},
+                },
+            ]
+        }
+        kept = catalog_group_dimensions(catalog, ["정수장"], columns_by_id=columns)
+        self.assertEqual([int(item["id"]) for item in kept], [6])
+        missed = catalog_group_dimensions(catalog, ["정수장"])
+        self.assertEqual(missed, [])
+
     def test_location_query_keeps_store_place_masters(self) -> None:
         tables = [
             {
@@ -483,6 +511,8 @@ class TimeRoleTests(unittest.TestCase):
         self.assertIn("전일 대비 증감", GENERATE_PROMPT)
         self.assertIn("NOT_LIKE", GENERATE_PROMPT)
         self.assertIn("태그 마스터 SELECT는 측정점 식별", GENERATE_PROMPT)
+        self.assertIn("answer_axis가 태그·측정점", GENERATE_PROMPT)
+        self.assertIn("DISTINCT 또는 같은 축 GROUP BY", GENERATE_PROMPT)
 
     def test_quote_resolved_code_literals(self) -> None:
         plan = QueryPlan(
@@ -587,6 +617,66 @@ class WeekPeriodTests(unittest.TestCase):
             mapped_ids={1},
             edges=edges,
             max_hops=3,
+        )
+        self.assertEqual([int(item["id"]) for item in kept], [10])
+
+    def test_joinable_name_hit_without_fk_keeps_fact_columns_only(self) -> None:
+        facts = [
+            {"id": 21, "logical_name": "분 DATA", "description": "01mi"},
+            {"id": 22, "logical_name": "시간 DATA", "description": "01hh"},
+            {"id": 23, "logical_name": "일 DATA", "description": "01dd"},
+            {"id": 24, "logical_name": "월 DATA", "description": "01mm"},
+        ]
+        mappings = [
+            {"column_fqn": "S.TAG_DIM.suj_code", "column_name": "suj_code", "table_id": 9},
+        ]
+        columns = {
+            21: [{"name": "suj_code"}],
+            22: [{"name": "suj_code"}],
+            23: [{"name": "suj_code"}],
+            24: [{"name": "suj_code"}],
+            9: [{"name": "suj_code"}],
+        }
+        kept = facts_joinable_to_mappings(
+            facts,
+            mapped_ids={9},
+            edges=[],
+            max_hops=3,
+            mappings=mappings,
+            fact_columns_by_id=columns,
+        )
+        self.assertEqual({int(item["id"]) for item in kept}, {21, 22, 23, 24})
+        dim_only = facts_joinable_to_mappings(
+            facts,
+            mapped_ids={9},
+            edges=[],
+            max_hops=3,
+            mappings=mappings,
+            fact_columns_by_id={9: [{"name": "suj_code"}]},
+        )
+        self.assertEqual(dim_only, [])
+
+    def test_joinable_fk_fact_wins_over_name_only_mart(self) -> None:
+        edges = [
+            CompositeJoinEdge(left_table_id=1, right_table_id=10, confidence=1.0),
+        ]
+        facts = [
+            {"id": 10, "logical_name": "일 DATA 원천"},
+            {"id": 11, "logical_name": "일 DATA 마트", "description": "01dd"},
+        ]
+        mappings = [
+            {"column_fqn": "S.DIM.suj_code", "column_name": "suj_code", "table_id": 1},
+        ]
+        kept = facts_joinable_to_mappings(
+            facts,
+            mapped_ids={1},
+            edges=edges,
+            max_hops=3,
+            mappings=mappings,
+            fact_columns_by_id={
+                10: [{"name": "VAL"}],
+                11: [{"name": "suj_code"}],
+            },
         )
         self.assertEqual([int(item["id"]) for item in kept], [10])
 

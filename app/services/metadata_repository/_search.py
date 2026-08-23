@@ -106,6 +106,7 @@ class SearchMixin:
                NULLIF(t.metadata->>'logical_name', '') AS logical_name,
                d.profile_id AS source_instance_id, d.engine,
                d.mindsdb_integration, d.mindsdb_catalog,
+               NULLIF(d.database_name, '') AS database_name,
                s.name AS source_name,
                1 - (text_to_sql_vector <=> $1::vector) AS score
         FROM t2s_tables t
@@ -203,6 +204,20 @@ class SearchMixin:
             seen.add(compact)
             needles.append(compact)
         return needles
+
+    _PLANT_MENTION_ALIASES = ("정수장", "사업장")
+
+    @staticmethod
+    def expand_plant_mention_tokens(tokens: list[str]) -> list[str]:
+        compact = [SearchMixin._compact_natural_text(item) for item in tokens]
+        out = list(tokens)
+        if any(item in SearchMixin._PLANT_MENTION_ALIASES for item in compact):
+            seen = set(compact)
+            for alias in SearchMixin._PLANT_MENTION_ALIASES:
+                if alias not in seen:
+                    out.append(alias)
+                    seen.add(alias)
+        return out
 
     @staticmethod
     def _label_matches_needle(natural: str, needle: str) -> bool:
@@ -462,6 +477,7 @@ class SearchMixin:
                NULLIF(t.metadata->>'logical_name', '') AS logical_name,
                d.profile_id AS source_instance_id, d.engine,
                d.mindsdb_integration, d.mindsdb_catalog,
+               NULLIF(d.database_name, '') AS database_name,
                s.name AS source_name
         FROM t2s_tables t
         JOIN t2s_datasources d ON d.id=t.datasource_id
@@ -665,6 +681,7 @@ class SearchMixin:
         ]
         if not tokens:
             return []
+        tokens = self.expand_plant_mention_tokens(tokens)
         tables = await self.list_serving_tables(source_instance_id)
         columns = await self.fetch_approved_columns(
             [int(table["id"]) for table in tables]

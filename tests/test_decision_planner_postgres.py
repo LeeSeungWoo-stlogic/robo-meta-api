@@ -13,11 +13,9 @@ from app.runtime_config import (
 )
 from app.schemas import (
     FilterRequirement,
-    JoinRequirement,
     MeasurementRequirement,
     QueryAnalysis,
     QueryPlan,
-    QuerySearchKeywords,
     SchemaRoleRequirement,
 )
 from app.services.decision_planner import (
@@ -27,7 +25,7 @@ from app.services.decision_planner import (
     select_minimal_tables,
 )
 from app.services.decision_postgres import _candidate, _resolved_entities, decide
-from app.services.decision_postgres.helpers import glossary_surfaces
+from app.services.decision_postgres.helpers import glossary_surfaces, select_question_columns
 from app.services.embedding_provider import set_embedding_provider
 from app.services.query_analysis import _sanitize, set_query_analyzer
 
@@ -229,6 +227,42 @@ class DecisionPlannerTests(unittest.TestCase):
         self.assertIsNone(matched.system_code)
         self.assertEqual(matched.has_code, "N")
 
+    def test_select_question_columns_keeps_plan_then_cap(self) -> None:
+        columns = [
+            {"name": "data_process", "metadata": {"column_name_kr": "데이터처리방식"}},
+            {"name": "bnb_code", "metadata": {"column_name_kr": "유역본부코드"}},
+            {"name": "suj_code", "metadata": {"column_name_kr": "사업장코드"}},
+            {"name": "suj_name", "metadata": {"column_name_kr": "사업장이름"}},
+            {"name": "tag_desc", "metadata": {"column_name_kr": "태그 설명"}},
+        ]
+        picked = select_question_columns(
+            columns,
+            required_names=["bnb_code", "suj_code", "suj_name"],
+            bound_names=["rwis.rwis_mart.vw_tag_dim.bnb_code"],
+            needles=["사업장", "본부"],
+            limit=3,
+        )
+        self.assertEqual(
+            [row["name"] for row in picked],
+            ["bnb_code", "suj_code", "suj_name"],
+        )
+        self.assertTrue(all(float(row.get("score") or 0) >= 0.9 for row in picked))
+
+    def test_select_question_columns_uses_needles_when_plan_empty(self) -> None:
+        columns = [
+            {"name": "omit_use_yn", "metadata": {"column_name_kr": "사용여부"}},
+            {"name": "suj_name", "metadata": {"column_name_kr": "사업장이름"}},
+            {"name": "kn_name", "metadata": {"column_name_kr": "기능이름"}},
+        ]
+        picked = select_question_columns(
+            columns,
+            required_names=[],
+            bound_names=[],
+            needles=["사업장"],
+            limit=1,
+        )
+        self.assertEqual([row["name"] for row in picked], ["suj_name"])
+
     def test_candidate_marks_only_value_mapping_code_columns(self) -> None:
         candidate = _candidate(
             table(1, "RDIBYUN_TB", 0.9),
@@ -250,11 +284,11 @@ class DecisionPlannerTests(unittest.TestCase):
         row["logical_name"] = "태그 마스터"
         candidate = _candidate(row, [], source="vector")
         self.assertEqual(candidate.table_name, "RDITAG_TB")
-        self.assertEqual(candidate.logical_name, "태그 마스터")
+        self.assertEqual(candidate.table_name_kr, "태그 마스터")
 
         blank = table(2, "OTHER_TB", 0.5)
         blank["logical_name"] = "「미정」"
-        self.assertIsNone(_candidate(blank, [], source="vector").logical_name)
+        self.assertIsNone(_candidate(blank, [], source="vector").table_name_kr)
 
     def test_candidate_maps_facility_and_system_codes(self) -> None:
         candidate = _candidate(
@@ -395,7 +429,6 @@ class DecisionPlannerTests(unittest.TestCase):
         analysis = QueryAnalysis(
             status="degraded",
             reason="provider unavailable",
-            fallback="question_vector",
         )
         plan = QueryPlan(
             completeness="degraded",
@@ -408,7 +441,7 @@ class DecisionPlannerTests(unittest.TestCase):
         analysis = _sanitize(
             QueryAnalysis(
                 status="complete",
-                intent="연결 오류 조회",
+                goal="연결 오류 조회",
                 schema_roles=[
                     SchemaRoleRequirement(
                         role="사무소 연결 상태",
@@ -419,19 +452,12 @@ class DecisionPlannerTests(unittest.TestCase):
                         search_terms=["오류 설명"],
                     ),
                 ],
-                join_requirements=[
-                    JoinRequirement(
-                        from_role="사무소 연결 상태",
-                        to_role="오류 메시지",
-                    )
-                ],
             )
         )
         self.assertEqual(
             [role.role for role in analysis.schema_roles],
             ["사무소 연결 상태"],
         )
-        self.assertEqual(analysis.join_requirements, [])
 
 
 class FakeAnalyzer:
@@ -439,8 +465,8 @@ class FakeAnalyzer:
         del question, store_hits
         return QueryAnalysis(
             status="complete",
-            intent="사업장별 연결 오류 조회",
-            measurement=MeasurementRequirement(metric="연결 오류"),
+            goal="사업장별 연결 오류 조회",
+            measurement=MeasurementRequirement(),
             schema_roles=[
                 SchemaRoleRequirement(
                     role="사업장 마스터",
@@ -453,23 +479,12 @@ class FakeAnalyzer:
                     cardinality="many",
                 ),
             ],
-            join_requirements=[
-                JoinRequirement(
-                    from_role="사업장 마스터",
-                    to_role="사무소 연결 상태",
-                    key_meanings=["본부 코드", "사무소 코드"],
-                )
-            ],
             filter_requirements=[
                 FilterRequirement(
                     meaning="오류가 있는 항목",
                     operator_hint="IS_NOT_NULL",
                 )
             ],
-            search_keywords=QuerySearchKeywords(
-                tables=["사업장", "사무소"],
-                columns=["오류 메시지"],
-            ),
         )
 
 
@@ -493,7 +508,6 @@ class FakeDegradedAnalyzer:
         return QueryAnalysis(
             status="degraded",
             reason="provider unavailable",
-            fallback="question_vector",
         )
 
 

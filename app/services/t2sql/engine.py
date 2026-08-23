@@ -324,8 +324,8 @@ def _plan_table_notes(decision: DecisionResponse, plan: Any) -> list[dict[str, A
         notes.append(
             {
                 "table_name": candidate.table_name,
-                "logical_name": candidate.logical_name,
-                "description": candidate.description,
+                "table_name_kr": candidate.table_name_kr,
+                "description": candidate.table_description,
             }
         )
     return notes

@@ -161,6 +161,7 @@ def apply_store_selection(
     *,
     mappings: list[dict[str, Any]],
     selected_ids: set[int],
+    rewritten_mapping_ids: set[int] | None = None,
 ) -> tuple[list[dict[str, Any]], set[int]]:
     """Intersect LLM picks with Store recall. Empty pick keeps recall."""
 
@@ -177,9 +178,11 @@ def apply_store_selection(
     if allowed_ids:
         overlap = selected_ids & allowed_ids
         if overlap:
+            skipped = rewritten_mapping_ids or set()
             selected_ids = overlap | {
                 int(row["table_id"])
                 for row in mappings
                 if row.get("table_id") is not None
+                and int(row["table_id"]) not in skipped
             }
     return mappings, selected_ids

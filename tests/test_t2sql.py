@@ -205,7 +205,6 @@ def _decision(**overrides) -> DecisionResponse:
                 code_column="SUJ_CODE",
             )
         ],
-        suggested_probes=[],
         execution_context=ExecutionContext(
             backend="mindsdb",
             dialect="mysql",
@@ -215,11 +214,10 @@ def _decision(**overrides) -> DecisionResponse:
             qualification_pattern="{catalog}.{table}",
             identifier_quote="`",
             require_quoted_uppercase_identifiers=True,
-            source_instance_id=SOURCE_ID,
             source_name="RWIS",
             allowed_objects=["RDITAG_TB", "RDF01HH_TB"],
         ),
-        query_analysis=QueryAnalysis(status="complete", intent="avg turbidity"),
+        query_analysis=QueryAnalysis(status="complete", goal="avg turbidity"),
         query_plan=QueryPlan(
             completeness="complete",
             required_tables=[
@@ -630,7 +628,7 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_plan_incomplete(self):
         async def decide(repository, **kwargs):
             return _decision(
-                query_analysis=QueryAnalysis(status="degraded", intent="x"),
+                query_analysis=QueryAnalysis(status="degraded", goal="x"),
                 query_plan=QueryPlan(completeness="failed"),
             )
 
@@ -669,7 +667,7 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
                     meaning_status="complete",
                     metric="탁도",
                     period="2024년",
-                    intent="avg turbidity",
+                    goal="avg turbidity",
                 ),
                 query_plan=QueryPlan(
                     completeness="partial",
@@ -727,7 +725,7 @@ class T2SqlEngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_generates_when_analysis_degraded_if_plan_has_tables(self):
         async def decide(repository, **kwargs):
             return _decision(
-                query_analysis=QueryAnalysis(status="degraded", intent="x"),
+                query_analysis=QueryAnalysis(status="degraded", goal="x"),
                 query_plan=QueryPlan(
                     completeness="partial",
                     required_tables=[

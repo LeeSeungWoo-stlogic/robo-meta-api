@@ -302,7 +302,7 @@ async def _attach_matched_columns(
                 constraints=[],
                 column_name_kr=None,
                 data_type=c.dtype or None,
-                description=c.description or None,
+                column_description=c.description or None,
             )
         )
     return out
@@ -720,7 +720,7 @@ async def decide(
             table_name=t.name or "",
             datasource=t.datasource or "",
         )
-        table_comment, description = _table_description_text(t)
+        _, description = _table_description_text(t)
         cands.append(
             DecisionCandidate(
                 db=db_label,
@@ -730,9 +730,8 @@ async def decide(
                 source="vector",
                 target_class=_subject_area_to_target_class(area),
                 subject_area=area,
+                table_description=description,
                 matched_columns=[],
-                table_comment=table_comment,
-                description=description,
             )
         )
 
@@ -855,10 +854,9 @@ async def decide(
     }
 
     resolved_entities = []
-    suggested_probes = []
     resolution_status = "skipped"
     if auto_resolve_entities and settings.entity_resolution_enabled:
-        resolved_entities, suggested_probes, resolution_status = await resolve_entities(
+        resolved_entities, _, resolution_status = await resolve_entities(
             driver, query=query, hyde_out=hyde_out
         )
 
@@ -870,6 +868,5 @@ async def decide(
         join_groups=join_groups,
         threshold_used=threshold_used,
         resolved_entities=resolved_entities,
-        suggested_probes=suggested_probes,
         resolution_status=resolution_status,
     )

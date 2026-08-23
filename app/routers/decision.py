@@ -10,7 +10,11 @@ from ..services import decision_postgres
 router = APIRouter(tags=["decision"])
 
 
-@router.post("/data_decision", response_model=DecisionResponse)
+@router.post(
+    "/data_decision",
+    response_model=DecisionResponse,
+    response_model_exclude={"glossary_routes": True},
+)
 async def data_decision(req: DecisionRequest) -> DecisionResponse:
     repository = get_metadata_repository()
     return await decision_postgres.decide(

@@ -113,7 +113,6 @@ class ResolvedExecutionContext:
             "require_quoted_uppercase_identifiers": (
                 self.require_quoted_uppercase_identifiers
             ),
-            "source_instance_id": self.source_instance_id,
             "source_name": self.source_name,
             "allowed_objects": sorted(self.allowed_objects),
         }
@@ -204,7 +203,6 @@ def _validate_claim(
         "schema_name": binding.schema,
         "qualification_pattern": binding.qualification_pattern,
         "identifier_quote": binding.identifier_quote,
-        "source_instance_id": source_instance_id,
         "require_quoted_uppercase_identifiers": (
             binding.require_quoted_uppercase_identifiers
         ),

@@ -250,7 +250,6 @@ def _question_blob(query: str | None, analysis: QueryAnalysis | None) -> str:
             [
                 str(analysis.target or ""),
                 str(analysis.metric or ""),
-                *[str(item) for item in (analysis.entities_include or [])],
                 *[str(item) for item in (analysis.primary_outputs or [])],
             ]
         )

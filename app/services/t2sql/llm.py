@@ -63,7 +63,8 @@ Tibero면 식별자를 인용하라. 쓰기는 금지.
 fact 테이블은 WHERE 필터 없이 SELECT 하지 마라.
 목록·추이 질의에는 LIMIT를 넣지 마라 (검증용이 아님).
 시계열(추이·변화·추세·트렌드)이면 팩트의 측정점 키와 태그 마스터의 명칭·설명을 SELECT에 넣어라. 시각·측정값과 함께 출력하고 측정점 키를 빼지 마라. ORDER BY 측정점 키, 시각. 전일 대비 증감·LAG·차분 컬럼을 창작하지 마라. 원천 측정값만 출력하라.
-태그 마스터 SELECT는 측정점 식별과 명칭·설명만. JOIN에 쓰는 상위 코드·주소·경로·산출 컬럼은 SELECT하지 마라.
+procedure가 list 이고 answer_axis가 태그·측정점이면 태그 마스터 SELECT는 측정점 식별과 명칭·설명만. JOIN에 쓰는 상위 코드·주소·경로·산출 컬럼은 SELECT하지 마라.
+procedure가 list 이고 answer_axis가 정수장·사업장·본부·변량이면 required_columns의 축 코드·이름만 SELECT 하고 DISTINCT 또는 같은 축 GROUP BY 하라. tagsn 을 SELECT에 넣지 마라.
 NOT_LIKE는 column NOT LIKE value 이다. value의 % 패턴을 바꾸지 마라.
 time_role이 latest 이면 최신 한 건은 LIMIT 1이 아니라 MAX다. fact 전체를 ORDER BY 한 뒤 LIMIT 1 하지 마라.
 Postgres면 Store original_name 대소문자를 유지하고 대문자로 인용하지 마라.
@@ -76,7 +77,12 @@ query_plan.join_paths[].conditions는 ON SoT다. path의 condition을 빼지 마
 SQL 표는 query_plan.required_tables와 join_paths의 표만 써라.
 glossary_routes[].standard_term은 승인 용어집 표준명이다. mention을 그 이름으로 해석하라. SQL 식별자가 아니다. 용어만으로 테이블을 창작하지 마라.
 기간은 query_plan.filters의 resolved 기간만 써라. 날짜 컬럼을 창작하지 마라. 오늘·연도 접두 등 날짜 리터럴을 창작하지 마라.
-query_plan.aggregation이 있으면 function·value_column·weighted·time_scope가 SoT다. null 칸을 창작하지 마라. AVG/SUM/MAX/MIN의 대상은 value_column뿐이다. JOIN 키·식별 컬럼에 집계 함수를 걸지 마라. 가중 컬럼은 계획이 weighted=true 일 때만 쓴다. 전기간 날짜 구간을 창작하지 마라.
+query_plan.aggregation이 있으면 function·value_column·weighted·time_scope·tag_combine이 SoT다. null 칸을 창작하지 마라.
+function이 NO_SQL이면 SELECT를 만들지 마라. NO_SQL: 뒤에 tag_combine 문구만 출력하라.
+function이 DELTA이면 value_column의 해당 기간 마지막 값에서 이전 구간 값을 빼라. SUM(value_column) 하지 마라.
+function이 IDENTITY이면 value_column에 집계 함수를 걸지 말고 그 입자 값을 조회하라.
+function이 USAGE이면 하나의 SELECT만 써라. UNION 하지 마라. tag_combine의 tagsn:글자:처리만 따른다. A는 DELTA(기간 끝 값에서 이전 구간 값을 뺌), D는 IDENTITY(그 입자 값). tagsn별로 CASE로 값을 나누고 한 SUM으로 합치지 마라. tag_combine에 없는 tagsn은 쓰지 마라.
+AVG/SUM/MAX/MIN의 대상은 value_column뿐이다. JOIN 키·식별 컬럼에 집계 함수를 걸지 마라. 가중 컬럼은 계획이 weighted=true 일 때만 쓴다. 전기간 날짜 구간을 창작하지 마라.
 query_plan.unresolved_requirements에 기간 재질의가 있으면 SELECT를 만들지 마라. NO_SQL: 그 문구만 출력하라.
 SELECT 목록에 * 나 table.* 나 alias.`*` 를 쓰지 마라. required_columns에 있는 컬럼만 써라.
 query_plan.unresolved_requirements에 팩트 표 미선정이 있고 측정·기간이 필요하면 NO_SQL: 팩트 표 미선정 만 출력하라. 차원 표만으로 측정 SELECT를 만들지 마라. 목록 질의는 차원 required_tables로 SELECT를 출력하라. 목록·그룹 대상 차원은 required_columns의 명칭·코드를 SELECT에 넣어라. JOIN 키만 출력하지 마라.

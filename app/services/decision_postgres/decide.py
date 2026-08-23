@@ -51,12 +51,14 @@ from ..meaning_slots import (
 from .filters import _propagate_filters_along_fk
 from .helpers import (
     _candidate,
+    _column_tail,
     _provisional_source_instance_id,
     _resolve_subject_area,
     _resolved_entities,
     _same_source,
     _serving_logical_name,
     glossary_surfaces,
+    select_question_columns,
 )
 from .table_type import list_table_type
 from .plan_format import (
@@ -75,6 +77,16 @@ from .select_store import (
 )
 from .suffix_store import load_term_synonym_groups, load_type_groups
 from .candidate_evidence import build_candidate_evidence
+from .data_process import (
+    bound_tagsn,
+    load_process_rows,
+    probe_metric_tag_rows,
+    replace_tagsn_filter,
+    source_uses_process_rules,
+    tag_probe_needles,
+    tagsn_codes_from_rows,
+    usage_keep_rows,
+)
 from .store_first import (
     chosen_labels,
     catalog_group_dimensions,
@@ -94,7 +106,10 @@ from .store_first import (
     fact_time_column_names,
     aggregation_contract,
     approved_code_mappings,
+    is_catalog_list_query,
     is_tag_master_table,
+    list_axis_identity_column_names,
+    list_axis_skips_tag_identity,
     measure_point_label_filters,
     promote_series_identity_tables,
     filter_mappings_to_labels,
@@ -103,6 +118,7 @@ from .store_first import (
     location_group_tables,
     mapping_filters,
     mapping_labels,
+    _plan_column_fqn,
     partition_mention_mappings,
     period_required_response,
     project_code_mappings_to_hub,
@@ -111,6 +127,7 @@ from .store_first import (
     pick_fact_tables,
     prefer_day_grain_facts,
     query_requests_fact,
+    rewrite_mapping_filters_onto_facts,
     measurement_needs_period,
     RANGE_CODE_UNRESOLVED,
     range_unresolved_response,
@@ -139,6 +156,32 @@ def _rows_matching_needle(rows: list[dict[str, Any]], needle: str) -> list[dict[
         for row in rows
         if SearchMixin._label_matches_needle(str(row.get("natural_value") or ""), needle)
     ]
+
+
+def _tagsn_column_fqn(
+    facts: list[dict[str, Any]],
+    columns_by_id: dict[int, list[dict[str, Any]]],
+    tables_by_id: dict[int, dict[str, Any]],
+    selected_ids: set[int],
+    planned_filters: list[PlannedFilter] | None = None,
+) -> str | None:
+    for fact in facts:
+        cols = columns_by_id.get(int(fact["id"]), [])
+        if any(str(col.get("name") or "").casefold() == "tagsn" for col in cols):
+            return _plan_column_fqn(fact, "tagsn")
+    for table_id in selected_ids:
+        table = tables_by_id.get(int(table_id))
+        if table is None:
+            continue
+        cols = columns_by_id.get(int(table_id), [])
+        if any(str(col.get("name") or "").casefold() == "tagsn" for col in cols):
+            return _plan_column_fqn(table, "tagsn")
+    for item in planned_filters or []:
+        column = str(getattr(item, "column", "") or "")
+        tail = column.rsplit(".", 1)[-1].casefold()
+        if tail in {"suj_code", "suj_name", "br_code"} and "." in column:
+            return column.rsplit(".", 1)[0] + ".tagsn"
+    return None
 
 
 def _table_candidates(tables: list[dict[str, Any]]) -> list:
@@ -289,6 +332,11 @@ async def decide(
         if table_limit is not None
         else decision.table_top_k
     )
+    effective_col_m = (
+        max(1, min(50, int(column_top_m)))
+        if column_top_m is not None
+        else max(1, min(50, int(decision.column_top_m)))
+    )
 
     timeout_raw = analysis_timeout_s
     if timeout_raw is None:
@@ -303,6 +351,7 @@ async def decide(
         analysis = degraded_analysis("파이프라인 시간 부족")
     else:
         analysis = await get_query_analyzer().analyze(query, timeout_s=timeout_s)
+    analysis.query = query
     logger.warning(
         "decide analyzed elapsed=%.2f status=%s meaning=%s procedure=%s",
         time.perf_counter() - started,
@@ -467,9 +516,22 @@ async def decide(
     held_mappings = approved_code_mappings(ambiguous_mappings)
     seed_ids = seed_table_ids(unique_mappings, catalog)
     group_needles = group_dimension_needles(catalog_needles)
+    catalog_column_ids = sorted(
+        {
+            int(table["id"])
+            for table in catalog_mentions
+            if table.get("id") is not None
+        }
+    )
+    catalog_columns = (
+        await repository.fetch_approved_columns(catalog_column_ids)
+        if catalog_column_ids
+        else {}
+    )
     group_dims = catalog_group_dimensions(
         catalog_mentions,
         group_needles,
+        columns_by_id=catalog_columns,
     )
     group_ids = {
         int(table["id"])
@@ -589,6 +651,7 @@ async def decide(
     group_dims = catalog_group_dimensions(
         [*catalog, *fetched],
         group_needles,
+        columns_by_id=catalog_columns,
     )
     group_ids = {
         int(table["id"])
@@ -607,13 +670,30 @@ async def decide(
             ]
         for table in extra_fetched:
             tables_by_id[int(table["id"])] = table
+    if selected_source:
+        list_serving = getattr(repository, "list_serving_tables", None)
+        if callable(list_serving):
+            serving = await list_serving(selected_source)
+            if isinstance(serving, list):
+                for table in serving:
+                    table_id = table.get("id")
+                    if table_id is None:
+                        continue
+                    if not _same_source(table, selected_source):
+                        continue
+                    if list_table_type(_resolve_subject_area(table)) not in {
+                        "Fact",
+                        "Raw",
+                    }:
+                        continue
+                    tables_by_id.setdefault(int(table_id), table)
     period_source = str(analysis.period or "").strip() or query
     parsed_period = parse_korean_period(period_source)
     week_parsed = parsed_period is not None and parsed_period.week_start is not None
     query_grain = resolve_time_grain(query)
     if grain_override in ("month", "day", "hour", "instant"):
         query_grain = grain_override
-    hint = query_grain or str(analysis.measurement.storage_type_hint or "").strip() or None
+    hint = query_grain
     if not hint:
         hint = resolve_time_grain(query, analysis)
     fact_pool = list(tables_by_id.values())
@@ -651,6 +731,17 @@ async def decide(
     edges = build_composite_edges(edge_rows)
     mapped_ids = seed_table_ids(mappings, [])
     contested_facts: list[dict[str, Any]] = []
+    fact_columns_by_id: dict[int, list[dict[str, Any]]] = {}
+    if facts:
+        fact_columns_by_id = await repository.fetch_approved_columns(
+            sorted(
+                {
+                    int(table["id"])
+                    for table in facts
+                    if table.get("id") is not None
+                }
+            )
+        )
     if len(facts) > 1:
         competing = list(facts)
         facts = facts_joinable_to_mappings(
@@ -658,6 +749,8 @@ async def decide(
             mapped_ids=mapped_ids,
             edges=edges,
             max_hops=hops,
+            mappings=mappings,
+            fact_columns_by_id=fact_columns_by_id,
         )
         if week_parsed:
             facts = narrow_facts_for_week(facts, query)
@@ -760,6 +853,17 @@ async def decide(
                 query_grain or hint,
             )
         return empty_meta_response(analysis)
+    planned_filters = mapping_filters(mappings, query=query, analysis=analysis)
+    rewritten_mapping_ids: set[int] = set()
+    if facts:
+        planned_filters, rewritten_mapping_ids = rewrite_mapping_filters_onto_facts(
+            planned_filters,
+            facts=facts,
+            fact_columns_by_id=fact_columns_by_id,
+            mappings=mappings,
+        )
+        selected_ids -= rewritten_mapping_ids
+        mapped_ids -= rewritten_mapping_ids
     unresolved: list[str] = []
     if range_unresolved and not range_bound:
         unresolved.append(RANGE_CODE_UNRESOLVED)
@@ -818,11 +922,11 @@ async def decide(
         selection,
         mappings=mappings,
         selected_ids=selected_ids,
+        rewritten_mapping_ids=rewritten_mapping_ids,
     )
-    mapped_ids = seed_table_ids(mappings, [])
+    mapped_ids = seed_table_ids(mappings, []) - rewritten_mapping_ids
 
     columns = await repository.fetch_approved_columns(sorted(selected_ids))
-    planned_filters = mapping_filters(mappings, query=query, analysis=analysis)
     planned_filters.extend(
         measure_point_label_filters(
             query,
@@ -862,6 +966,36 @@ async def decide(
         anchor_table_ids=selected_ids,
         tables_by_id=tables_by_id,
     )
+    process_rows: list[dict[str, str]] = []
+    selected_tables = [
+        tables_by_id[table_id]
+        for table_id in selected_ids
+        if table_id in tables_by_id
+    ]
+    if (
+        source_uses_process_rules([*selected_tables, *facts])
+        and not is_catalog_list_query(query, analysis)
+        and not meaning_failed(analysis)
+        and not bound_tagsn(planned_filters)
+    ):
+        probe_needles = tag_probe_needles(metric_needles)
+        if probe_needles:
+            process_rows = await probe_metric_tag_rows(
+                filters=planned_filters,
+                needles=probe_needles,
+                repository=repository,
+                source_instance_id=selected_source or None,
+            )
+            codes = tagsn_codes_from_rows(process_rows)
+            column = _tagsn_column_fqn(
+                facts, columns, tables_by_id, selected_ids, planned_filters
+            )
+            if codes and column:
+                planned_filters = replace_tagsn_filter(
+                    planned_filters,
+                    column=column,
+                    codes=codes,
+                )
 
     planned_paths = _planned_paths(paths, tables_by_id)
     required_columns_by_id: dict[int, set[str]] = defaultdict(set)
@@ -892,6 +1026,12 @@ async def decide(
         required_columns_by_id[fact_id].update(
             fact_time_column_names(columns.get(fact_id, []))
         )
+    axis = answer_axis_from_analysis(analysis)
+    use_list_axis = (
+        not needs_fact
+        and str(getattr(analysis, "procedure", "") or "").strip() == "list"
+        and list_axis_skips_tag_identity(axis)
+    )
     for table_id, table in tables_by_id.items():
         if int(table_id) not in selected_ids:
             continue
@@ -900,12 +1040,21 @@ async def decide(
             continue
         if typed not in {"Dimension", "Code"} and not is_tag_master_table(table):
             continue
-        required_columns_by_id[int(table_id)].update(
-            dimension_identity_column_names(
-                columns.get(int(table_id), []),
-                table,
+        if use_list_axis:
+            required_columns_by_id[int(table_id)].update(
+                list_axis_identity_column_names(
+                    columns.get(int(table_id), []),
+                    table,
+                    axis,
+                )
             )
-        )
+        else:
+            required_columns_by_id[int(table_id)].update(
+                dimension_identity_column_names(
+                    columns.get(int(table_id), []),
+                    table,
+                )
+            )
 
     planned_tables = []
     for table_id in sorted(selected_ids - bridge_ids):
@@ -929,6 +1078,30 @@ async def decide(
         for table_id in sorted(bridge_ids)
         if table_id in tables_by_id
     ]
+    if (
+        source_uses_process_rules([*selected_tables, *facts])
+        and not is_catalog_list_query(query, analysis)
+    ):
+        if not process_rows and bound_tagsn(planned_filters):
+            process_rows = await load_process_rows(
+                filters=planned_filters,
+                repository=repository,
+                source_instance_id=selected_source or None,
+            )
+        asked = str(getattr(getattr(analysis, "measurement", None), "aggregation", "") or "")
+        kept = usage_keep_rows(process_rows, query=query, asked=asked)
+        if kept and kept != process_rows:
+            process_rows = kept
+            codes = tagsn_codes_from_rows(kept)
+            column = _tagsn_column_fqn(
+                facts, columns, tables_by_id, selected_ids, planned_filters
+            )
+            if codes and column:
+                planned_filters = replace_tagsn_filter(
+                    planned_filters,
+                    column=column,
+                    codes=codes,
+                )
     if not planned_tables and not planned_filters:
         completeness = "failed"
     elif unresolved or analysis.status == "degraded":
@@ -952,6 +1125,8 @@ async def decide(
             period=parsed_period,
             glossary_rows=glossary_rows,
             query=query,
+            process_rows=process_rows,
+            grain=query_grain or hint,
         ),
         candidate_evidence=build_candidate_evidence(
             selected_mappings=mappings,
@@ -996,10 +1171,36 @@ async def decide(
         loaded = await repository.find_value_mapping_code_columns(table_ids)
         if isinstance(loaded, dict):
             code_columns_by_table = loaded
+    bound_column_names = [
+        _column_tail(str(item.column or ""))
+        for item in planned_filters
+        if str(item.column or "").strip()
+    ]
+    bound_column_names.extend(
+        _column_tail(str(row.get("column_fqn") or row.get("column_name") or ""))
+        for row in mappings
+    )
+    column_needles = unique_needles(
+        [
+            *filter_needles,
+            *catalog_needles,
+            *metric_needles,
+            *list(analysis.primary_outputs or []),
+            *list(analysis.answer_must_include or []),
+        ]
+    )
     candidates = [
         _candidate(
             table,
-            columns.get(int(table["id"]), []) if include_matched_columns else [],
+            select_question_columns(
+                columns.get(int(table["id"]), []),
+                required_names=list(required_columns_by_id.get(int(table["id"]), set())),
+                bound_names=bound_column_names,
+                needles=column_needles,
+                limit=effective_col_m,
+            )
+            if include_matched_columns
+            else [],
             source="name_rule" if int(table["id"]) in mapped_ids else "schema_rule",
             code_columns=code_columns_by_table.get(int(table["id"]), set()),
         )
@@ -1048,11 +1249,10 @@ async def decide(
         join_groups=join_groups,
         threshold_used={
             "table_top_k": effective_top_k,
+            "column_top_m": effective_col_m,
             "fk_max_hops": hops,
-            "retrieval_axes": ["store"],
         },
         resolved_entities=entities,
-        suggested_probes=[],
         resolution_status="complete" if entities or planned_tables else "failed",
         execution_context=execution_context,
         query_analysis=analysis,

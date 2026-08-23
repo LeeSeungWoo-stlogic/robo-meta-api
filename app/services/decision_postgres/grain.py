@@ -144,6 +144,7 @@ def resolve_time_grain(
 ) -> TimeGrain | None:
     """Prefer explicit grain words, then period length. No table names."""
 
+    del analysis
     q = query or ""
     for grain, terms in _EXPLICIT:
         if any(term in q for term in terms):
@@ -174,11 +175,6 @@ def resolve_time_grain(
         return "month"
     if _DAY_PERIOD.search(q):
         return "day"
-    hint = ""
-    if analysis is not None:
-        hint = str(analysis.measurement.storage_type_hint or "").strip().lower()
-    if hint in GRAIN_SPECS:
-        return hint  # type: ignore[return-value]
     return None
 
 

@@ -44,7 +44,7 @@ def test_reconcile_drops_code_and_period_when_filter_resolved() -> None:
     result = reconcile_confirm(
         {"accept": False, "missing": ["사업장 코드", "기간"]},
         plan=_plan("354"),
-        analysis=QueryAnalysis(status="complete", intent="sum"),
+        analysis=QueryAnalysis(status="complete", goal="sum"),
     )
     assert result == {"accept": True, "missing": []}
 
@@ -55,7 +55,7 @@ def test_reconcile_drops_master_role_slots() -> None:
         plan=QueryPlan(completeness="partial"),
         analysis=QueryAnalysis(
             status="complete",
-            intent="max",
+            goal="max",
             schema_roles=[],
         ),
     )
@@ -69,7 +69,7 @@ def test_reconcile_drops_fact_slot_when_plan_left_unresolved() -> None:
             completeness="partial",
             unresolved_requirements=["팩트 표 미선정"],
         ),
-        analysis=QueryAnalysis(status="complete", intent="max"),
+        analysis=QueryAnalysis(status="complete", goal="max"),
     )
     assert result == {"accept": True, "missing": []}
 
@@ -81,7 +81,7 @@ def test_reconcile_drops_fact_slot_when_grain_unresolved() -> None:
             completeness="partial",
             unresolved_requirements=["팩트 입도를 스토어 설명과 맞출 수 없음"],
         ),
-        analysis=QueryAnalysis(status="complete", intent="sum"),
+        analysis=QueryAnalysis(status="complete", goal="sum"),
     )
     assert result == {"accept": True, "missing": []}
 
@@ -90,7 +90,7 @@ def test_reconcile_keeps_unrelated_status_slot() -> None:
     result = reconcile_confirm(
         {"accept": False, "missing": ["측정 상태가 현재 측정 중인 항목"]},
         plan=QueryPlan(completeness="partial"),
-        analysis=QueryAnalysis(status="complete", intent="list"),
+        analysis=QueryAnalysis(status="complete", goal="list"),
     )
     assert result["accept"] is False
     assert result["missing"] == ["측정 상태가 현재 측정 중인 항목"]
@@ -100,7 +100,7 @@ def test_reconcile_drops_year_slot_as_period() -> None:
     result = reconcile_confirm(
         {"accept": False, "missing": ["측정 연도"]},
         plan=QueryPlan(completeness="partial"),
-        analysis=QueryAnalysis(status="complete", intent="sum"),
+        analysis=QueryAnalysis(status="complete", goal="sum"),
     )
     assert result == {"accept": True, "missing": []}
 
@@ -109,7 +109,7 @@ def test_reconcile_keeps_code_when_no_resolved_filter() -> None:
     result = reconcile_confirm(
         {"accept": False, "missing": ["facility"]},
         plan=QueryPlan(completeness="complete"),
-        analysis=QueryAnalysis(status="complete", intent="x"),
+        analysis=QueryAnalysis(status="complete", goal="x"),
     )
     assert result["accept"] is False
     assert result["missing"] == ["facility"]
@@ -161,7 +161,7 @@ def test_reconcile_does_not_close_range_missing_by_table_role() -> None:
         ),
         analysis=QueryAnalysis(
             status="complete",
-            intent="list",
+            goal="list",
             schema_roles=[],
         ),
     )
@@ -186,7 +186,7 @@ def test_reconcile_keeps_code_when_only_period_resolved() -> None:
     result = reconcile_confirm(
         {"accept": False, "missing": ["facility"]},
         plan=period_only,
-        analysis=QueryAnalysis(status="complete", intent="x"),
+        analysis=QueryAnalysis(status="complete", goal="x"),
     )
     assert result["accept"] is False
     assert result["missing"] == ["facility"]
@@ -205,7 +205,7 @@ def test_reconcile_accepts_comma_string_missing() -> None:
     result = reconcile_confirm(
         {"accept": False, "missing": "사업장 코드,기간"},
         plan=_plan("354"),
-        analysis=QueryAnalysis(status="complete", intent="sum"),
+        analysis=QueryAnalysis(status="complete", goal="sum"),
     )
     assert result == {"accept": True, "missing": []}
 
@@ -247,7 +247,7 @@ def test_reconcile_keeps_same_column_in_codes() -> None:
             "drop_codes": ["701", "902"],
         },
         plan=plan,
-        analysis=QueryAnalysis(status="complete", intent="list"),
+        analysis=QueryAnalysis(status="complete", goal="list"),
     )
     assert result["accept"] is True
     assert result["missing"] == []
@@ -323,7 +323,7 @@ def test_reconcile_rejects_codes_not_in_plan() -> None:
     result = reconcile_confirm(
         {"accept": True, "missing": [], "add_codes": ["999"]},
         plan=_plan("354"),
-        analysis=QueryAnalysis(status="complete", intent="sum"),
+        analysis=QueryAnalysis(status="complete", goal="sum"),
     )
     assert result["accept"] is False
     assert any("계획에 없는 코드" in item for item in result["missing"])

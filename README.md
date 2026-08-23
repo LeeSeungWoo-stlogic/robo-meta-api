@@ -12,6 +12,25 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
 (Wave 0–3 적용 완료 기준, 2026-08-06)
 
+## 1.0 서빙 계약 (2026-08-24)
+
+`POST /meta/catalog`과 `POST /data_decision` HTTP 본문을 서빙 소비면으로 정리한다.
+HyDE 벡터 검색용 칸은 더 이상 채우지 않으므로 응답에서 뺀다. `/t2sql`은 용어집 라우트를
+내부에서 계속 쓴다.
+
+| 항목 | 내용 |
+| --- | --- |
+| **`/meta/catalog`** | 서빙 중 연결·표·컬럼 구조만. 논리명·설명·`subject_area` 없음. `character varying(n)` → `varchar(n)` |
+| **테이블 키** | `source_name` → `db`(원천 database) → `engine` → `schema_name` → `table_name`. `db`에 연결명을 넣지 않음 |
+| **후보 표 슬롯** | 한글 라벨 `table_name_kr`. 상세 `table_description`. 후보에서 `logical_name`/`table_comment` 없음 |
+| **후보 컬럼** | 설명 키는 `column_description`. 타입은 catalog와 같이 `varchar(n)` |
+| **분석** | `query_analysis.query`는 요청 원문. 역할은 `schema_roles`. 목표는 `goal`. `intent`/`meaning_roles` 없음 |
+| **제외 (`/data_decision`만)** | `glossary_routes`, `suggested_probes`, `search_keywords`, `entities_include`/`exclude`, `join_requirements`, `fallback`, `measurement.storage_type_hint` |
+| **실행 컨텍스트** | HTTP에 `source_instance_id` 없음. `threshold_used`에 `retrieval_axes` 없음 |
+| **값사전** | `has_code`는 유지. 코드 바인딩 SoT는 `query_plan.filters`와 `resolved_entities` |
+
+관련 테스트: `tests/test_meta_catalog.py` · `tests/test_description_consume.py` · `tests/test_dtype_consume.py` · `tests/test_glossary_routes.py`
+
 ## 1.0 업데이트 (2026-08-20)
 
 `/meta`가 Metadata Store에서 꺼내는 테이블·컬럼 사실을 `/data_decision` 후보와
@@ -22,8 +41,9 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 | --- | --- |
 | **`/meta` 슬롯** | 논리명 → `table_name_kr`/`column_name_kr`. 원본 설명 → `table_comment`/`column_comment`. 분석 설명 → `description` |
 | **`/meta` 보강** | `subject_area`, `table_type`, `default_date_column`, `value_examples`, 길이 포함 `data_type`, `unit`, `format_pattern`, `has_code`. 나가는 FK면 `code_lookup.via=fk` |
+| **`/meta/catalog`** | 서빙 중 연결·표·컬럼 구조만. 논리명·설명·`subject_area` 없음 |
 | **`/meta/batch`** | 표 키만이 아니라 논리명·설명·`subject_area` 요약 |
-| **`/meta/ref`·`/fk`** | Store `t2s_fk_constraints`의 **from 테이블 = 요청 테이블**인 행만. 들어오는 FK는 상대 표로 조회 |
+| **`/meta/ref`** | Store `t2s_fk_constraints`의 **from 테이블 = 요청 테이블**인 행만. 들어오는 FK는 상대 표로 조회 |
 | **list vs lookup** | 행이 많다고 list가 아님. 대상 나열만 list. 측정값·변화·추이·추세는 lookup |
 | **기간** | 측정값을 묻는데 기간이 없으면 SQL을 만들지 않음. 목록 질의는 기간을 요구하지 않음 |
 | **동의어** | 용어 그룹 멤버는 맞은 그룹 안에서만 확장. 유형 접미 그룹과 섞지 않음 |
@@ -110,14 +130,12 @@ Store 승인 메타만으로 decide/T2SQL을 조립한다. 질문 ID·물리 표
 
 ```text
 question
-  → intent·measurement·entity·schema role 분석 (LLM)
-  → JOIN·filter 요구사항 분해
-  → question·HyDE·role 다축 embedding 검색
-  → t2s_value_mappings로 용어→코드 (규칙; 코드 환각 금지)
-  → score-gap pruning · 역할별 테이블 후보
-  → 승인 t2s_fk_constraints 최단 path
-  → join_groups · filters · resolved_entities
-  → execution context 반환
+  → goal·measurement·schema_roles 분석 (LLM, 물리명 금지)
+  → Store 값사전·논리명으로 용어→코드 (규칙; 코드 환각 금지)
+  → 팩트 선정 · 승인 필터 바인딩
+  → 승인 t2s_fk_constraints 최단 path (뷰 마트는 경로가 비어 있을 수 있음)
+  → query_plan.filters · resolved_entities
+  → execution context 반환 (source_name, source_instance_id 비공개)
 ```
 
 **목표 제품 순서 (플랫폼 지도 + 본 서비스 조립; ADR-002 §5a-1):**  
@@ -127,15 +145,15 @@ resolve(코드) → anchor(키 표) → Fact 선택 → **승인 FK** path → `
 
 주요 응답:
 
-- `query_analysis`: 의도, 측정값, entity, schema role, JOIN·filter 요구사항
-- `candidates`: 관련 테이블과 선택 근거 및 관련 컬럼
-- `query_plan`: 필수 테이블, bridge 테이블, join path, filter 계획
+- `query_analysis`: 요청 원문, `goal`, 측정값, `schema_roles`, filter 요구사항
+- `candidates`: 테이블 키·`table_name_kr`·`table_description`과 관련 컬럼
+- `query_plan`: 필수 테이블, bridge, join path, filter, aggregation
 - `join_groups`: SQL 생성 시 사용할 join 조건 후보
 - `execution_context`: 실행 backend, dialect, catalog/schema 및 식별자 규칙
-- `resolved_entities`: metadata value mapping 또는 probe로 확인된 entity
+- `resolved_entities`: Store 값사전으로 확인된 entity
 
-LLM query analysis가 실패하면 `degraded` 상태, 사유와 `question_vector` fallback을
-반환하며 검색 결과를 근거 없이 확장하지 않습니다.
+LLM 의미 분해가 실패하면 `query_analysis.status=degraded`와 `reason`만 반환한다.
+검색 결과를 근거 없이 확장하지 않는다.
 
 ### 내용 품질 가드 (스키마 불변, 2026-07-31)
 
@@ -190,11 +208,11 @@ Metadata Store Serving 카탈로그를 질의 없이 조회합니다. 원천 DB�
 
 | Method | Path | 역할 |
 |---|---|---|
+| `POST` | `/meta/catalog` | 서빙 카탈로그 구조(연결·표·컬럼·PK/FK). 증강 메타 없음 |
 | `POST` | `/meta/batch` | Serving 테이블 목록(논리명·설명·`subject_area` 포함) |
 | `POST` | `/meta/table` | 테이블 정보 + 전체 컬럼 + **나가는** FK |
 | `POST` | `/meta/column` | 단일 컬럼. FK가 있으면 `code_lookup` |
 | `POST` | `/meta/ref` | 해당 테이블에서 나가는 FK |
-| `POST` | `/meta/fk` | `/meta/ref`와 동일 본문 |
 
 슬롯:
 
@@ -204,6 +222,10 @@ Metadata Store Serving 카탈로그를 질의 없이 조회합니다. 원천 DB�
 - `subject_area` / `table_type` / `default_date_column`: `/data_decision` 후보와 동일 헬퍼
 - `value_examples` · `unit` · `format_pattern` · `has_code`: 컬럼 `metadata` 및 승인 값사전
 - `code_lookup`: 승인 FK가 있을 때만 `via=fk`
+
+`/meta/catalog`는 질의 없이 Store Serving 행만 본다. `source_instance_id`·MindsDB 식별자·시크릿은 없다.
+컬럼은 `column_name` / `data_type` / `nullable` / `primary_key`이고, 나가는 FK가 있을 때만 `references`를 붙인다.
+`character varying(n)`은 Store에 길이가 있으면 `varchar(n)`으로 표기한다. 길이가 없으면 창작하지 않는다.
 
 `/meta/ref`는 `RDITAG_TB`처럼 마스터를 요청하면 그 표에서 **나가는** 관계만 줍니다.
 팩트 `TAGSN → RDITAG_TB` 같은 들어오는 관계는 팩트 표 이름으로 조회합니다.
@@ -216,10 +238,11 @@ Metadata Store Serving 카탈로그를 질의 없이 조회합니다. 원천 DB�
 | `POST` | `/data_decision` | 자연어 질의 분석과 Metadata Context 계획 |
 | `POST` | `/t2sql` | 자연어 → 확정 SQL + used 메타 (벽시계는 `t2sql.total_timeout_seconds`, 기본 60초) |
 | `POST` | `/query_execute` | 검증된 읽기 전용 SQL 실행 |
+| `POST` | `/meta/catalog` | Serving 카탈로그 구조 조회 |
 | `POST` | `/meta/batch` | metadata batch 조회 |
 | `POST` | `/meta/table` | table metadata 조회 |
 | `POST` | `/meta/column` | column metadata 조회 |
-| `POST` | `/meta/ref`, `/meta/fk` | FK·논리 관계 조회 |
+| `POST` | `/meta/ref` | FK·논리 관계 조회 |
 
 | 폐기 경로 | 응답 |
 |---|---|

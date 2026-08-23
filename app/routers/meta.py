@@ -1,4 +1,4 @@
-"""/meta/* 4 endpoint 라우터 — v0.6 RC body 정합."""
+"""/meta/* 라우터 — batch·table·column·ref·catalog. /meta/fk alias는 제거했다."""
 from __future__ import annotations
 
 from typing import List
@@ -10,6 +10,7 @@ from ..db import get_metadata_repository
 from ..schemas import (
     BatchItem,
     BatchRequest,
+    CatalogResponse,
     ColumnMeta,
     MetaTableResponse,
     META_VERSION,
@@ -101,7 +102,14 @@ async def meta_ref(req: TableKey) -> MetaRefResponse:
     return MetaRefResponse(fk=fks)
 
 
-@router.post("/meta/fk", response_model=MetaRefResponse)
-async def meta_fk(req: TableKey) -> MetaRefResponse:
-    """v0.7 문서 호환 alias. 내부 동작은 /meta/ref 와 동일."""
-    return await meta_ref(req)
+# ---------------------------------------------------------------------------
+# /meta/catalog
+# ---------------------------------------------------------------------------
+@router.post(
+    "/meta/catalog",
+    response_model=CatalogResponse,
+    response_model_exclude_none=True,
+)
+async def meta_catalog() -> CatalogResponse:
+    repository = get_metadata_repository()
+    return await meta_postgres.get_serving_catalog(repository)

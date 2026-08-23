@@ -11,6 +11,7 @@ from .used_meta import used_table_keys
 
 _PARSER = "mysql"
 _HUB_ROLE_MARKERS = ("태그", "변량", "측정항목")
+_LIST_AXIS_DEDUPE_MARKERS = ("정수장", "사업장", "본부", "변량")
 
 
 def _fqn_table_column(fqn: str) -> tuple[str, str] | None:
@@ -196,6 +197,48 @@ def _select_has_axis_table(sql: str, plan: QueryPlan, analysis: QueryAnalysis | 
     return True
 
 
+def _select_root(sql: str) -> exp.Select | None:
+    tree = _parse(sql)
+    if isinstance(tree, exp.Select):
+        return tree
+    if isinstance(tree, exp.With) and isinstance(tree.this, exp.Select):
+        return tree.this
+    return None
+
+
+def _list_has_axis_dedupe(sql: str, plan: QueryPlan, analysis: QueryAnalysis | None) -> bool:
+    if str(getattr(analysis, "procedure", "") or "").strip() != "list":
+        return True
+    axis = " ".join(str(item) for item in (plan.answer_axis or []) if str(item).strip())
+    if not any(marker in axis for marker in _LIST_AXIS_DEDUPE_MARKERS):
+        return True
+    try:
+        select = _select_root(sql)
+    except GuardError:
+        return True
+    if select is None:
+        return True
+    if select.args.get("distinct"):
+        return True
+    group = select.args.get("group")
+    if group is None:
+        return False
+    required = {
+        str(name).casefold()
+        for table in plan.required_tables
+        for name in (table.required_columns or [])
+        if str(name).strip()
+    }
+    grouped = {
+        str(column.name or "").casefold()
+        for column in group.find_all(exp.Column)
+        if str(column.name or "").strip()
+    }
+    if not required:
+        return True
+    return required <= grouped
+
+
 def guard_generated_sql(
     sql: str,
     plan: QueryPlan | None,
@@ -224,4 +267,6 @@ def guard_generated_sql(
             return "목록 질의에 측정 허브 JOIN: " + ",".join(hubs)
         if not _select_has_axis_table(sql, plan, analysis):
             return "목록 답 축 표가 SELECT에 없음"
+        if not _list_has_axis_dedupe(sql, plan, analysis):
+            return "목록 축은 DISTINCT 또는 GROUP BY"
     return None

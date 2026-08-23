@@ -196,6 +196,14 @@ def _parse_relative_period(source: str, *, today: date) -> ParsedPeriod | None:
             week_end=today,
         )
     compact = re.sub(r"\s+", "", source)
+    if "그저께" in compact or "그제" in compact:
+        target = today - timedelta(days=2)
+        return ParsedPeriod(year=target.year, month=target.month, day=target.day)
+    if "어제" in compact:
+        target = today - timedelta(days=1)
+        return ParsedPeriod(year=target.year, month=target.month, day=target.day)
+    if "오늘" in compact or "금일" in compact:
+        return ParsedPeriod(year=today.year, month=today.month, day=today.day)
     if "재작년" in compact:
         year = today.year - 2
         return ParsedPeriod(year=year)

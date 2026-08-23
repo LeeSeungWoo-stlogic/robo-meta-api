@@ -4,6 +4,11 @@ from typing import Any
 
 from ..schemas import (
     BatchItem,
+    CatalogColumn,
+    CatalogColumnReference,
+    CatalogResponse,
+    CatalogSource,
+    CatalogTable,
     CodeLookup,
     ColumnMeta,
     DataSourceInfo,
@@ -292,3 +297,102 @@ async def get_refs(
         table_name=table_name,
     )
     return [RefMeta(**row) for row in rows]
+
+
+def _catalog_data_type(column: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    raw = _serving_data_type(column, metadata)
+    if not raw:
+        return None
+    prefix = "character varying"
+    if raw.casefold().startswith(prefix):
+        return "varchar" + raw[len(prefix) :]
+    return raw
+
+
+def _catalog_column(row: dict[str, Any]) -> CatalogColumn:
+    metadata = _metadata_dict(row.get("metadata"))
+    column = {"dtype": row.get("dtype"), "metadata": metadata}
+    references = None
+    schema_name = _optional_string(row.get("ref_schema_name"))
+    table_name = _optional_string(row.get("ref_table_name"))
+    column_name = _optional_string(row.get("ref_column_name"))
+    if schema_name and table_name and column_name:
+        references = CatalogColumnReference(
+            schema_name=schema_name,
+            table_name=table_name,
+            column_name=column_name,
+        )
+    return CatalogColumn(
+        column_name=str(row.get("column_name") or ""),
+        data_type=_catalog_data_type(column, metadata),
+        nullable=bool(row.get("nullable")),
+        primary_key=bool(row.get("is_primary_key")),
+        references=references,
+    )
+
+
+def assemble_serving_catalog(
+    rows: list[dict[str, Any]],
+    *,
+    serving_active: bool,
+) -> CatalogResponse:
+    sources: dict[tuple[str, str, str, str], CatalogSource] = {}
+    tables: dict[tuple[str, str, str, str, str, str], CatalogTable] = {}
+    columns: dict[tuple[str, str, str, str, str, str, str], CatalogColumn] = {}
+    for row in rows:
+        source_key = (
+            str(row.get("source_name") or ""),
+            str(row.get("engine") or ""),
+            str(row.get("source_schema") or ""),
+            str(row.get("registered_at") or ""),
+        )
+        if source_key not in sources:
+            sources[source_key] = CatalogSource(
+                source_name=source_key[0],
+                engine=source_key[1],
+                source_schema=source_key[2] or None,
+                registered_at=source_key[3],
+                tables=[],
+            )
+        table_key = source_key + (
+            str(row.get("schema_name") or ""),
+            str(row.get("table_name") or ""),
+        )
+        if not table_key[4] or not table_key[5]:
+            continue
+        if table_key not in tables:
+            table = CatalogTable(
+                schema_name=table_key[4],
+                table_name=table_key[5],
+                columns=[],
+            )
+            tables[table_key] = table
+            sources[source_key].tables.append(table)
+        column_name = str(row.get("column_name") or "")
+        if not column_name:
+            continue
+        column_key = table_key + (column_name,)
+        if column_key not in columns:
+            column = _catalog_column(row)
+            columns[column_key] = column
+            tables[table_key].columns.append(column)
+            continue
+        existing = columns[column_key]
+        if existing.references is None:
+            extra = _catalog_column(row)
+            if extra.references is not None:
+                existing.references = extra.references
+    return CatalogResponse(
+        serving_status="active" if serving_active else "inactive",
+        sources=list(sources.values()),
+    )
+
+
+async def get_serving_catalog(
+    repository: PostgresMetadataRepository,
+) -> CatalogResponse:
+    payload = await repository.fetch_serving_catalog()
+    return assemble_serving_catalog(
+        payload.get("rows") or [],
+        serving_active=bool(payload.get("serving_active")),
+    )

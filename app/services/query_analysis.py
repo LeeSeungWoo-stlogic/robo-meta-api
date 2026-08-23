@@ -11,7 +11,6 @@ from openai import AsyncOpenAI
 from ..runtime_config import get_runtime
 from ..schemas import (
     FilterRequirement,
-    JoinRequirement,
     QueryAnalysis,
     SchemaRoleRequirement,
 )
@@ -41,13 +40,13 @@ procedure는 lookup, list, aggregate, extremum 중 하나만.
 - extremum: 가장 높/낮/많/적
 기간이 없다고 latest로 바꾸지 마라.
 
-역할(meaning_roles)은 연결 구조만. 물리명을 search_terms에 넣지 마라.
+역할(schema_roles)은 연결 구조만. 물리명을 search_terms에 넣지 마라.
 metric은 측정 항목만 쓴다. '평균 탁도'가 아니라 '탁도'다. 평균·합계·건수는 procedure/aggregation이다.
 집계면 measurement.aggregation에 AVG|SUM|COUNT|MIN|MAX 중 하나를 넣는다.
 정의 문장·절·설명('하는 시설', '해당하는 권역')을 넣지 마라.
 target은 범위만. primary_outputs 축 이름을 target에 반복하지 마라.
 primary_outputs는 답의 축 이름만. 목록·현황 같은 절차 단어를 붙이지 마라.
-측정 항목이 답의 축이어도 metric과 meaning_roles(측정항목)에서 빼지 마라.
+측정 항목이 답의 축이어도 metric과 schema_roles(측정항목)에서 빼지 마라.
 search_terms는 역할의 짧은 별칭만.
 
 출력은 아래 구조의 단일 JSON 객체만 반환하라.
@@ -59,7 +58,7 @@ search_terms는 역할의 짧은 별칭만.
   "metric": "확보할 측정 표현. 없으면 빈 문자열",
   "target": "범위 대상. 없으면 빈 문자열",
   "period": "기간 원문. 없으면 빈 문자열",
-  "meaning_roles": [
+  "schema_roles": [
     {
       "role": "확보 역할",
       "necessity": "required|optional",
@@ -76,6 +75,18 @@ search_terms는 역할의 짧은 별칭만.
 
 def _user_payload(question: str) -> str:
     return question.strip()
+
+
+def _ingest_analysis_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map leftover LLM keys onto the serving analysis fields."""
+
+    roles = payload.pop("meaning_roles", None)
+    if roles and not payload.get("schema_roles"):
+        payload["schema_roles"] = roles
+    intent = payload.pop("intent", None)
+    if intent and not payload.get("goal"):
+        payload["goal"] = intent
+    return payload
 
 
 def _unique(values: list[str], *, limit: int) -> list[str]:
@@ -110,7 +121,7 @@ def _has_meaning_slots(analysis: QueryAnalysis) -> bool:
             analysis.period,
             analysis.primary_outputs,
             analysis.answer_must_include,
-            analysis.meaning_roles,
+            analysis.schema_roles,
         ]
     )
 
@@ -130,7 +141,6 @@ def _correct_list_for_measured_series(
         [
             question,
             str(analysis.goal or ""),
-            str(analysis.intent or ""),
             str(analysis.procedure_why or ""),
         ]
     )
@@ -139,10 +149,8 @@ def _correct_list_for_measured_series(
 
 
 def _dual_write(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
-    if analysis.goal:
-        analysis.intent = analysis.goal
-    elif not analysis.intent and analysis.goal == "":
-        analysis.intent = analysis.intent
+    if question:
+        analysis.query = question
     raw_metric = str(analysis.metric or analysis.measurement.metric or "")
     if analysis.metric:
         analysis.measurement.metric = analysis.metric
@@ -157,7 +165,6 @@ def _dual_write(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
             asked = extremum_function_from_text(
                 " ".join(
                     [
-                        str(analysis.intent or ""),
                         str(analysis.goal or ""),
                         str(analysis.procedure_why or ""),
                         raw_metric,
@@ -172,15 +179,8 @@ def _dual_write(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
             analysis.measurement.aggregation = "AVG"
     if procedure in {"list", "lookup", ""}:
         analysis.measurement.aggregation = None
-    analysis.schema_roles = list(analysis.meaning_roles)
     axis = list(analysis.primary_outputs or [])
     target = str(analysis.target or "").strip()
-    analysis.entities_include = [
-        item
-        for item in analysis.entities_include
-        if not is_answer_axis_text(item, axis)
-        and item.strip() != target
-    ]
     kept_filters: list[FilterRequirement] = []
     list_axis = procedure == "list"
     for requirement in analysis.filter_requirements:
@@ -264,15 +264,7 @@ def _sanitize(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
     else:
         analysis.meaning_status = "partial"
 
-    analysis.intent = (analysis.intent or analysis.goal).strip()[:500]
-    analysis.entities_include = _unique(analysis.entities_include, limit=15)
-    analysis.entities_exclude = _unique(analysis.entities_exclude, limit=15)
-    analysis.search_keywords.tables = _unique(
-        analysis.search_keywords.tables, limit=12
-    )
-    analysis.search_keywords.columns = _unique(
-        analysis.search_keywords.columns, limit=12
-    )
+    analysis.goal = analysis.goal.strip()[:500]
     if str(analysis.measurement.aggregation or "").strip().lower() in {
         "",
         "null",
@@ -280,17 +272,10 @@ def _sanitize(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
         "없음",
     }:
         analysis.measurement.aggregation = None
-    if str(analysis.measurement.storage_type_hint or "").strip().lower() in {
-        "",
-        "null",
-        "none",
-        "없음",
-    }:
-        analysis.measurement.storage_type_hint = None
 
     roles: list[SchemaRoleRequirement] = []
     role_names: set[str] = set()
-    source_roles = analysis.meaning_roles or []
+    source_roles = analysis.schema_roles or []
     for role in source_roles[:10]:
         role.role, phys = _blank_physical(role.role)
         if phys:
@@ -310,39 +295,15 @@ def _sanitize(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
         if role.role and key not in role_names:
             role_names.add(key)
             roles.append(role)
-    analysis.meaning_roles = roles
-    if not roles and analysis.schema_roles:
-        for role in analysis.schema_roles[:10]:
-            role.role = role.role.strip()[:200]
-            role.search_terms = _unique(role.search_terms, limit=8)
-            key = role.role.lower()
-            if role.role and key not in role_names:
-                role_names.add(key)
-                roles.append(role)
-        analysis.meaning_roles = roles
+    analysis.schema_roles = roles
     if dropped_physical and analysis.meaning_status == "complete":
         analysis.meaning_status = "partial"
     if roles and not any(role.necessity == "required" for role in roles):
         roles[0].necessity = "required"
 
-    joins: list[JoinRequirement] = []
-    for join in analysis.join_requirements[:20]:
-        join.from_role = join.from_role.strip()[:200]
-        join.to_role = join.to_role.strip()[:200]
-        join.key_meanings = _unique(join.key_meanings, limit=10)
-        if (
-            join.from_role
-            and join.to_role
-            and join.from_role.lower() in role_names
-            and join.to_role.lower() in role_names
-            and join.from_role.lower() != join.to_role.lower()
-        ):
-            joins.append(join)
-    analysis.join_requirements = joins
-
     column_only_roles = {
         role.role
-        for role in analysis.meaning_roles
+        for role in analysis.schema_roles
         if (
             "메시지" in role.role
             or (
@@ -355,44 +316,11 @@ def _sanitize(analysis: QueryAnalysis, question: str = "") -> QueryAnalysis:
         )
     }
     if column_only_roles:
-        roles_by_name = {role.role: role for role in analysis.meaning_roles}
-        for column_role in column_only_roles:
-            parent_name = next(
-                (
-                    requirement.from_role
-                    if requirement.to_role == column_role
-                    else requirement.to_role
-                    for requirement in analysis.join_requirements
-                    if column_role
-                    in {requirement.from_role, requirement.to_role}
-                    and (
-                        requirement.from_role
-                        if requirement.to_role == column_role
-                        else requirement.to_role
-                    )
-                    not in column_only_roles
-                ),
-                None,
-            )
-            if parent_name and parent_name in roles_by_name:
-                parent = roles_by_name[parent_name]
-                child = roles_by_name[column_role]
-                parent.search_terms = _unique(
-                    [*parent.search_terms, column_role, *child.search_terms],
-                    limit=8,
-                )
-        analysis.meaning_roles = [
+        analysis.schema_roles = [
             role
-            for role in analysis.meaning_roles
+            for role in analysis.schema_roles
             if role.role not in column_only_roles
         ]
-        analysis.join_requirements = [
-            requirement
-            for requirement in analysis.join_requirements
-            if requirement.from_role not in column_only_roles
-            and requirement.to_role not in column_only_roles
-        ]
-        role_names = {role.role.lower() for role in analysis.meaning_roles}
 
     filters: list[FilterRequirement] = []
     for requirement in analysis.filter_requirements[:20]:
@@ -416,7 +344,6 @@ def degraded_analysis(reason: str) -> QueryAnalysis:
     return QueryAnalysis(
         status="degraded",
         reason=reason[:500],
-        fallback="question_vector",
         meaning_status="failed",
     )
 
@@ -474,7 +401,7 @@ class QueryAnalyzer:
             if not isinstance(payload, dict):
                 return degraded_analysis("HyDE 응답이 JSON 객체가 아닙니다.")
             payload["status"] = "complete"
-            analysis = QueryAnalysis.model_validate(payload)
+            analysis = QueryAnalysis.model_validate(_ingest_analysis_payload(payload))
             logger.warning(
                 "meaning analyze ok procedure=%s meaning=%s",
                 analysis.procedure,
@@ -497,22 +424,13 @@ class QueryAnalyzer:
 
 def analysis_embedding_text(analysis: QueryAnalysis) -> str:
     parts = [
-        analysis.goal or analysis.intent,
+        analysis.goal,
         analysis.metric or (analysis.measurement.metric or ""),
         analysis.measurement.aggregation or "",
-        analysis.measurement.storage_type_hint or "",
         analysis.target,
         analysis.period,
         *analysis.primary_outputs,
-        *analysis.entities_include,
-        *analysis.search_keywords.tables,
-        *analysis.search_keywords.columns,
-        *(role.role for role in analysis.meaning_roles or analysis.schema_roles),
-        *(
-            meaning
-            for requirement in analysis.join_requirements
-            for meaning in requirement.key_meanings
-        ),
+        *(role.role for role in analysis.schema_roles),
         *(requirement.meaning for requirement in analysis.filter_requirements),
     ]
     return "\n".join(value.strip() for value in parts if value and value.strip())
@@ -522,17 +440,10 @@ def role_embedding_text(
     analysis: QueryAnalysis,
     role: SchemaRoleRequirement,
 ) -> str:
-    related_keys = [
-        meaning
-        for requirement in analysis.join_requirements
-        if role.role in {requirement.from_role, requirement.to_role}
-        for meaning in requirement.key_meanings
-    ]
     parts = [
         role.role,
         role.role,
         *role.search_terms,
-        *related_keys,
     ]
     text = f"{role.role} {' '.join(role.search_terms)}".casefold()
     fact_seed = "마스터" not in text and (
@@ -541,9 +452,8 @@ def role_embedding_text(
     if not fact_seed:
         parts.extend(
             [
-                analysis.goal or analysis.intent,
+                analysis.goal,
                 analysis.metric or (analysis.measurement.metric or ""),
-                *analysis.search_keywords.tables,
             ]
         )
     return "\n".join(value.strip() for value in parts if value and value.strip())

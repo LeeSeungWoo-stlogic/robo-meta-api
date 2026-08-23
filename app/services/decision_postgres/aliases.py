@@ -23,13 +23,29 @@ def _compact(text: str) -> str:
     return SearchMixin._compact_natural_text(text)
 
 
-def _mapping_table_blob(row: dict[str, Any]) -> str:
+def _mapping_column_ident(row: dict[str, Any]) -> str:
+    name = str(row.get("column_name") or "").strip()
+    if name:
+        return name
+    fqn = str(row.get("column_fqn") or "").strip()
+    if "." in fqn:
+        return fqn.rsplit(".", 1)[-1]
+    return fqn
+
+
+def _mapping_column_blob(row: dict[str, Any]) -> str:
+    ident = _mapping_column_ident(row)
+    metadata = row.get("metadata")
+    kr = ""
+    if isinstance(metadata, dict):
+        kr = str(metadata.get("column_name_kr") or metadata.get("logical_name") or "")
     return _compact(
         " ".join(
             [
-                str(row.get("logical_name") or ""),
-                str(row.get("original_name") or ""),
-                str(row.get("name") or ""),
+                ident,
+                str(row.get("column_name_kr") or ""),
+                kr,
+                str(row.get("column_description") or ""),
             ]
         )
     )
@@ -40,7 +56,13 @@ def mapping_is_hq(
     markers: tuple[str, ...] | None = None,
     plant_markers: tuple[str, ...] | None = None,
 ) -> bool:
-    blob = _mapping_table_blob(row)
+    ident = _mapping_column_ident(row).casefold()
+    compact_ident = ident.replace("_", "")
+    if compact_ident.startswith("suj"):
+        return False
+    if compact_ident.startswith("bnb"):
+        return True
+    blob = _mapping_column_blob(row)
     hq_markers = markers if markers is not None else _HQ_DICT_MARKERS
     plant = plant_markers if plant_markers is not None else _PLANT_TYPE_MARKERS
     if any(marker in blob for marker in hq_markers):
@@ -52,7 +74,13 @@ def mapping_is_plant(
     row: dict[str, Any],
     markers: tuple[str, ...] | None = None,
 ) -> bool:
-    blob = _mapping_table_blob(row)
+    ident = _mapping_column_ident(row).casefold()
+    compact_ident = ident.replace("_", "")
+    if compact_ident.startswith("suj"):
+        return True
+    if compact_ident.startswith("bnb"):
+        return False
+    blob = _mapping_column_blob(row)
     plant = markers if markers is not None else _PLANT_TYPE_MARKERS
     return any(marker in blob for marker in plant)
 

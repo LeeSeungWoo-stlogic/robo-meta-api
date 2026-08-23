@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ...schemas import JoinRequirement, QueryAnalysis, SchemaRoleRequirement
+from ...schemas import QueryAnalysis, SchemaRoleRequirement
 from .grain import (
     fact_role_for_grain,
     grain_from_fact_role,
@@ -38,8 +38,8 @@ def _enrich_analysis_roles(query: str, analysis: QueryAnalysis) -> QueryAnalysis
 def _is_dimension_facility_query(query: str, analysis: QueryAnalysis) -> bool:
     """조직/시설 개수·목록 질의 — hist 시계열 단독 상위 억제 대상."""
     q = (query or "").casefold()
-    intent = (analysis.intent or "").casefold()
-    blob = f"{q} {intent}"
+    goal = (analysis.goal or "").casefold()
+    blob = f"{q} {goal}"
     dimension_hits = ("개수", "목록", "몇 개", "몇개", "리스트", "어디")
     measure_hits = ("계측", "측정", "평균", "합계", "값", "잔류", "수질", "태그값")
     if not any(term in blob for term in dimension_hits):

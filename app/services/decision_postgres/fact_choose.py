@@ -67,7 +67,6 @@ async def choose_fact_from_store(
     if not runtime.decision.hyde_enabled or not runtime.embedding.api_key:
         return None
     allowed = {int(table["id"]) for table in facts if table.get("id") is not None}
-    hint = str(analysis.measurement.storage_type_hint or "").strip() or None
     client = AsyncOpenAI(
         api_key=runtime.embedding.api_key,
         base_url=(
@@ -86,7 +85,6 @@ async def choose_fact_from_store(
                     "content": json.dumps(
                         {
                             "question": query,
-                            "storage_type_hint": hint,
                             "candidates": [_candidate_payload(table) for table in facts],
                         },
                         ensure_ascii=False,

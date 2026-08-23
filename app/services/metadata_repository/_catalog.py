@@ -112,3 +112,60 @@ class CatalogMixin:
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, db, schema_name, table_name)
         return [dict(row) for row in rows]
+
+    async def fetch_serving_catalog(self) -> dict[str, Any]:
+        active_query = """
+        SELECT EXISTS (
+          SELECT 1 FROM t2s_snapshot_activations
+          WHERE sink_name = 't2s_serving'
+        ) AS serving_active
+        """
+        rows_query = """
+        SELECT s.name AS source_name,
+               d.engine,
+               d.source_schema,
+               to_char(
+                 d.created_at AT TIME ZONE 'Asia/Seoul',
+                 'YYYY-MM-DD"T"HH24:MI:SS+09:00'
+               ) AS registered_at,
+               t.schema_name,
+               COALESCE(t.original_name, t.name) AS table_name,
+               c.name AS column_name,
+               c.dtype,
+               c.metadata,
+               c.nullable,
+               c.is_primary_key,
+               t_to.schema_name AS ref_schema_name,
+               COALESCE(t_to.original_name, t_to.name) AS ref_table_name,
+               c_to.name AS ref_column_name
+        FROM t2s_datasources d
+        LEFT JOIN kair_platform_sources s ON s.source_id = d.source_id
+        JOIN t2s_snapshot_activations act
+          ON act.source_instance_id = d.profile_id
+         AND act.sink_name = 't2s_serving'
+        JOIN t2s_tables t ON t.datasource_id = d.id
+        JOIN t2s_snapshot_activations a
+          ON a.source_instance_id = d.profile_id
+         AND a.sink_name = 't2s_serving'
+         AND a.snapshot_id = t.metadata->>'snapshot_id'
+        JOIN t2s_columns c
+          ON c.table_id = t.id
+         AND c.review_status = 'approved'
+        LEFT JOIN t2s_fk_constraints fk ON fk.from_column_id = c.id
+        LEFT JOIN t2s_columns c_to
+          ON c_to.id = fk.to_column_id
+         AND c_to.review_status = 'approved'
+        LEFT JOIN t2s_tables t_to ON t_to.id = c_to.table_id
+        WHERE t.text_to_sql_is_valid = true
+          AND t.review_status = 'approved'
+        ORDER BY s.name, d.engine, d.source_schema,
+                 t.schema_name, COALESCE(t.original_name, t.name), c.name,
+                 t_to.schema_name, COALESCE(t_to.original_name, t_to.name), c_to.name
+        """
+        async with self._pool.acquire() as connection:
+            active = await connection.fetchrow(active_query)
+            rows = await connection.fetch(rows_query)
+        return {
+            "serving_active": bool(active["serving_active"]) if active else False,
+            "rows": [dict(row) for row in rows],
+        }

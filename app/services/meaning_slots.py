@@ -314,8 +314,6 @@ def range_slots_from_analysis(
     )
     for body in _exclude_bodies(blob):
         add(body, "exclude")
-    for item in analysis.entities_exclude or []:
-        add(str(item), "exclude")
     exclude_keys = {compact(slot.mention) for slot in slots if slot.polarity == "exclude"}
 
     include_sources = [
@@ -329,7 +327,6 @@ def range_slots_from_analysis(
             outputs,
             allow_raw=False,
         ),
-        *[str(item) for item in (analysis.entities_include or [])],
     ]
     if "또는" in (query or "") and not _axis_remainder(
         _strip_exclude_clause(query), outputs, allow_raw=False
@@ -372,7 +369,7 @@ def metric_needles_from_analysis(
     )
     if metric:
         items.append(metric)
-    for role in analysis.meaning_roles or []:
+    for role in analysis.schema_roles or []:
         role_name = compact(str(role.role or ""))
         if "측정" not in role_name:
             continue
@@ -406,7 +403,7 @@ def catalog_needles_from_analysis(
         ],
         *filter_needles_from_analysis(analysis, query),
     ]
-    for role in analysis.meaning_roles or []:
+    for role in analysis.schema_roles or []:
         items.extend(str(term).strip() for term in (role.search_terms or []))
     return unique_needles(items)
 

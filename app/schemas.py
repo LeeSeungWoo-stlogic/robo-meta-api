@@ -25,11 +25,20 @@ APP_VERSION = "1.0.0"
 # 공통 키 (db, schema_name, table_name)
 # ---------------------------------------------------------------------------
 class TableKey(BaseModel):
+    source_name: Optional[str] = Field(
+        default=None,
+        description="데이터소스 연결명 (플랫폼 SourceName).",
+        examples=["rwis_mart_view"],
+    )
     db: Optional[str] = Field(
         default=None,
-        description="원천 라벨(t2s_tables.db). 미입력 시 schema+이름 동일 행 중 첫 행. "
-        "ERP_SIM·RWIS 등 다중 카탈로그 구분 시 지정.",
-        examples=["RWIS", "ERP_SIM"],
+        description="원천 database 이름. datasources.database_name, 없으면 t2s_tables.db.",
+        examples=["rwis"],
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="원천 DB 엔진. postgresql/oracle/tibero 등.",
+        examples=["postgresql"],
     )
     schema_name: str = Field(..., examples=["RWIS"])
     table_name: str = Field(..., examples=["RDF01HH_TB"])
@@ -211,6 +220,43 @@ class MetaTableResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# /meta/catalog — Serving 구조 덤프 (증강 메타 없음)
+# ---------------------------------------------------------------------------
+class CatalogColumnReference(BaseModel):
+    schema_name: str
+    table_name: str
+    column_name: str
+
+
+class CatalogColumn(BaseModel):
+    column_name: str
+    data_type: Optional[str] = None
+    nullable: bool = True
+    primary_key: bool = False
+    references: Optional[CatalogColumnReference] = None
+
+
+class CatalogTable(BaseModel):
+    schema_name: str
+    table_name: str
+    columns: List[CatalogColumn] = Field(default_factory=list)
+
+
+class CatalogSource(BaseModel):
+    source_name: str
+    engine: str
+    source_schema: Optional[str] = None
+    registered_at: str
+    tables: List[CatalogTable] = Field(default_factory=list)
+
+
+class CatalogResponse(BaseModel):
+    meta_version: str = META_VERSION
+    serving_status: Literal["active", "inactive"]
+    sources: List[CatalogSource] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # /data_decision
 # ---------------------------------------------------------------------------
 class DecisionRequest(BaseModel):
@@ -223,7 +269,10 @@ class DecisionRequest(BaseModel):
         default=None,
         ge=1,
         le=50,
-        description="테이블별 컬럼 벡터 매칭 상한. 미지정 시 서버 DECISION_COLUMN_TOP_M",
+        description=(
+            "테이블별 matched_columns 상한. 질문 분해·계획에 관련된 컬럼만 남긴 뒤 자른다. "
+            "미지정 시 서버 decision.column_top_m"
+        ),
     )
     table_limit: Optional[int] = Field(
         default=None,
@@ -278,7 +327,6 @@ PlanCompleteness = Literal["complete", "partial", "degraded", "failed"]
 class MeasurementRequirement(BaseModel):
     metric: Optional[str] = None
     aggregation: Optional[str] = None
-    storage_type_hint: Optional[str] = None
 
 
 class SchemaRoleRequirement(BaseModel):
@@ -288,13 +336,6 @@ class SchemaRoleRequirement(BaseModel):
     search_terms: List[str] = Field(default_factory=list)
 
 
-class JoinRequirement(BaseModel):
-    from_role: str
-    to_role: str
-    required: bool = True
-    key_meanings: List[str] = Field(default_factory=list)
-
-
 class FilterRequirement(BaseModel):
     meaning: str
     required: bool = True
@@ -302,34 +343,21 @@ class FilterRequirement(BaseModel):
     value_text: Optional[str] = None
 
 
-class QuerySearchKeywords(BaseModel):
-    tables: List[str] = Field(default_factory=list)
-    columns: List[str] = Field(default_factory=list)
-
-
 class QueryAnalysis(BaseModel):
     status: AnalysisStatus
+    query: str = ""
     reason: Optional[str] = None
-    fallback: Optional[Literal["question_vector"]] = None
-    intent: str = ""
-    entities_include: List[str] = Field(default_factory=list)
-    entities_exclude: List[str] = Field(default_factory=list)
     measurement: MeasurementRequirement = Field(
         default_factory=MeasurementRequirement
     )
     schema_roles: List[SchemaRoleRequirement] = Field(default_factory=list)
-    join_requirements: List[JoinRequirement] = Field(default_factory=list)
     filter_requirements: List[FilterRequirement] = Field(default_factory=list)
-    search_keywords: QuerySearchKeywords = Field(
-        default_factory=QuerySearchKeywords
-    )
     goal: str = ""
     procedure: str = ""
     procedure_why: str = ""
     metric: str = ""
     target: str = ""
     period: str = ""
-    meaning_roles: List[SchemaRoleRequirement] = Field(default_factory=list)
     primary_outputs: List[str] = Field(default_factory=list)
     answer_must_include: List[str] = Field(default_factory=list)
     meaning_status: str = ""
@@ -438,7 +466,7 @@ class MatchedColumn(BaseModel):
     constraints: List[ColumnConstraint] = Field(default_factory=list)
     column_name_kr: Optional[str] = None
     data_type: Optional[str] = None
-    description: Optional[str] = None
+    column_description: Optional[str] = None
     value_examples: List[str] = Field(default_factory=list)
     format_pattern: Optional[str] = None
     unit: Optional[str] = None
@@ -458,20 +486,15 @@ class DecisionCandidate(TableKey):
     # v0.6 신규 (빈 값 default)
     target_class: TargetClass = "unknown"
     subject_area: SubjectArea = "unknown"
-    matched_columns: List[MatchedColumn] = Field(default_factory=list)
-    table_comment: Optional[str] = Field(
+    table_name_kr: Optional[str] = Field(
         default=None,
-        description="원본 카탈로그 테이블 설명 (Neo4j Table.description)",
-        examples=["01분 원시"],
+        description="승인 한글 논리명. SQL 식별자가 아님. column_name_kr과 같은 층.",
+        examples=["일 DATA"],
     )
-    description: Optional[str] = Field(
+    table_description: Optional[str] = Field(
         default=None,
-        description="LLM 증강 설명 우선, 없으면 table_comment (Neo4j analyzed_description → description)",
+        description="분석 설명 우선, 없으면 원본 카탈로그 설명 (analyzed_description → description)",
         examples=["시간별 탁도·유량 등 계측 fact 테이블. tagsn으로 태그 마스터와 조인."],
-    )
-    logical_name: Optional[str] = Field(
-        default=None,
-        description="승인 한글 논리명. SQL 식별자가 아님. 자연어↔물리 객체 매핑 힌트.",
     )
     table_type: Optional[ListTableType] = Field(
         default=None,
@@ -487,21 +510,24 @@ class DecisionCandidate(TableKey):
             "날짜 format_pattern 또는 날짜 dtype. 검수 지정 아님."
         ),
     )
+    matched_columns: List[MatchedColumn] = Field(default_factory=list)
 
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
-                    "db": "rwis",
+                    "source_name": "rwis_mart_view",
+                    "db": "rwis_mart_view",
+                    "engine": "postgresql",
                     "schema_name": "rwis",
                     "table_name": "fct_measure_hour",
                     "score": 0.82,
                     "source": "vector",
                     "target_class": "unknown",
                     "subject_area": "unknown",
+                    "table_name_kr": "시간 DATA",
+                    "table_description": "시간별 계측값 fact. suj_code·tagsn으로 정수장·태그와 조인.",
                     "matched_columns": [],
-                    "table_comment": "시간별 집계 fact",
-                    "description": "시간별 계측값 fact. suj_code·tagsn으로 정수장·태그와 조인.",
                 }
             ]
         }
@@ -581,7 +607,7 @@ class ExecutionContext(BaseModel):
     qualification_pattern: str
     identifier_quote: str
     require_quoted_uppercase_identifiers: bool
-    source_instance_id: Optional[str] = None
+    source_instance_id: Optional[str] = Field(default=None, exclude=True)
     source_name: Optional[str] = None
     allowed_objects: List[str] = Field(default_factory=list)
 
@@ -601,7 +627,6 @@ class DecisionResponse(BaseModel):
     join_groups: List[JoinGroup] = Field(default_factory=list)
     threshold_used: dict
     resolved_entities: List[ResolvedEntity] = Field(default_factory=list)
-    suggested_probes: List[SuggestedProbe] = Field(default_factory=list)
     resolution_status: ResolutionStatus = "skipped"
     execution_context: Optional[ExecutionContext] = None
     query_analysis: Optional[QueryAnalysis] = None
@@ -778,7 +803,6 @@ class QueryExecuteRequest(BaseModel):
                         "qualification_pattern": "{catalog}.{table}",
                         "identifier_quote": "`",
                         "require_quoted_uppercase_identifiers": True,
-                        "source_instance_id": "SOURCE_INSTANCE_ID",
                         "source_name": "RWIS",
                         "allowed_objects": ["RDISAUP_TB"],
                     },

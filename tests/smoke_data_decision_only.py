@@ -2,7 +2,7 @@
 
 검증 범위(최소):
 - HTTP 200
-- meta_version / resolved_entities / suggested_probes / resolution_status 필드 존재
+- meta_version / resolved_entities / resolution_status 필드 존재
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         return _fail(f"/data_decision invalid json: {type(exc).__name__}: {exc}", r.text)
 
-    required = ("meta_version", "resolved_entities", "suggested_probes", "resolution_status")
+    required = ("meta_version", "resolved_entities", "resolution_status")
     missing = [k for k in required if k not in body]
     if missing:
         return _fail(f"missing fields: {', '.join(missing)}", body)

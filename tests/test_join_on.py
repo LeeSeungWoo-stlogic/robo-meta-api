@@ -100,7 +100,7 @@ def test_engine_guards_missing_approved_on() -> None:
 
 def test_list_rejects_tag_hub_join() -> None:
     sql = (
-        "SELECT t.SUJ_NAME FROM src.S.PLANT_TB t "
+        "SELECT DISTINCT t.SUJ_NAME FROM src.S.PLANT_TB t "
         "JOIN src.S.TAG_TB g ON t.BNB_CODE = g.BNB_CODE"
     )
     plan = QueryPlan(
@@ -139,7 +139,7 @@ def test_tag_list_allows_tag_table() -> None:
 
 
 def test_type_only_list_does_not_require_code_filter() -> None:
-    sql = "SELECT t.SUJ_NAME FROM src.S.PLANT_TB t"
+    sql = "SELECT DISTINCT t.SUJ_NAME FROM src.S.PLANT_TB t"
     plan = QueryPlan(
         completeness="complete",
         required_tables=[
@@ -186,3 +186,52 @@ def test_resolved_code_must_appear_quoted() -> None:
         QueryAnalysis(status="complete", procedure="list"),
     )
     assert ok is None
+
+
+def test_plant_list_accepts_group_by_without_distinct_keyword() -> None:
+    sql = (
+        "SELECT t.SUJ_CODE, t.SUJ_NAME FROM src.S.TAG_DIM t "
+        "GROUP BY t.SUJ_CODE, t.SUJ_NAME"
+    )
+    plan = QueryPlan(
+        completeness="complete",
+        required_tables=[
+            PlannedTable(
+                schema_name="S",
+                table_name="TAG_DIM",
+                role="태그 마스터",
+                required_columns=["SUJ_CODE", "SUJ_NAME"],
+            ),
+        ],
+        answer_axis=["정수장"],
+    )
+    analysis = QueryAnalysis(
+        status="complete",
+        procedure="list",
+        primary_outputs=["정수장"],
+    )
+    assert guard_generated_sql(sql, plan, analysis) is None
+
+
+def test_plant_list_rejects_tag_grain_select() -> None:
+    sql = "SELECT t.TAGSN, t.SUJ_NAME FROM src.S.TAG_DIM t"
+    plan = QueryPlan(
+        completeness="complete",
+        required_tables=[
+            PlannedTable(
+                schema_name="S",
+                table_name="TAG_DIM",
+                role="태그 마스터",
+                required_columns=["SUJ_CODE", "SUJ_NAME"],
+            ),
+        ],
+        answer_axis=["정수장"],
+    )
+    analysis = QueryAnalysis(
+        status="complete",
+        procedure="list",
+        primary_outputs=["정수장"],
+    )
+    reason = guard_generated_sql(sql, plan, analysis)
+    assert reason is not None
+    assert "DISTINCT 또는 GROUP BY" in reason

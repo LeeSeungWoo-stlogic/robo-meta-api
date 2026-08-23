@@ -168,20 +168,20 @@ def _pk_ordinal(column: dict[str, Any], metadata: dict[str, Any]) -> int | None:
 def _serving_data_type(column: dict[str, Any], metadata: dict[str, Any]) -> str | None:
     explicit = _optional_string(metadata.get("data_type_with_length"))
     if explicit:
-        return explicit
+        return _display_data_type(explicit)
     raw = _optional_string(column.get("dtype"))
     if not raw:
         return None
     if "(" in raw:
-        return raw
+        return _display_data_type(raw)
     folded = raw.casefold()
     if folded in _CHAR_LENGTH_TYPES:
         length = _optional_int(
             metadata.get("character_maximum_length") or metadata.get("data_length")
         )
         if length is not None and length > 0:
-            return f"{raw}({length})"
-        return raw
+            return _display_data_type(f"{raw}({length})")
+        return _display_data_type(raw)
     if folded in _NUMERIC_LENGTH_TYPES:
         precision = _optional_int(
             metadata.get("numeric_precision") or metadata.get("data_precision")
@@ -191,8 +191,15 @@ def _serving_data_type(column: dict[str, Any], metadata: dict[str, Any]) -> str 
         )
         if precision is not None and precision > 0:
             if scale is not None and scale >= 0:
-                return f"{raw}({precision},{scale})"
-            return f"{raw}({precision})"
+                return _display_data_type(f"{raw}({precision},{scale})")
+            return _display_data_type(f"{raw}({precision})")
+    return _display_data_type(raw)
+
+
+def _display_data_type(raw: str) -> str:
+    prefix = "character varying"
+    if raw.casefold().startswith(prefix):
+        return "varchar" + raw[len(prefix) :]
     return raw
 
 
@@ -246,6 +253,92 @@ def _column_has_code(column_name: str, code_columns: set[str] | None) -> str:
     return "Y" if name in licensed else "N"
 
 
+def _column_tail(name: str) -> str:
+    return str(name or "").strip().rsplit(".", 1)[-1]
+
+
+def select_question_columns(
+    columns: list[dict[str, Any]],
+    *,
+    required_names: list[str] | tuple[str, ...] | set[str],
+    bound_names: list[str] | tuple[str, ...] | set[str],
+    needles: list[str] | tuple[str, ...] | set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Keep columns the question/plan already bound. Cap at column_top_m."""
+
+    cap = max(1, min(50, int(limit)))
+    required = [
+        _column_tail(name).casefold()
+        for name in required_names
+        if str(name or "").strip()
+    ]
+    bound = {
+        _column_tail(name).casefold()
+        for name in bound_names
+        if str(name or "").strip()
+    }
+    compact_needles = [
+        SearchMixin._compact_natural_text(str(needle))
+        for needle in needles
+        if SearchMixin._compact_natural_text(str(needle))
+    ]
+    by_key: dict[str, dict[str, Any]] = {}
+    for column in columns:
+        name = str(column.get("name") or "").strip()
+        if name:
+            by_key.setdefault(name.casefold(), column)
+    picked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _add(column: dict[str, Any], score: float) -> None:
+        key = str(column.get("name") or "").strip().casefold()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        row = dict(column)
+        row["score"] = score
+        picked.append(row)
+
+    for name in required:
+        column = by_key.get(name)
+        if column is not None:
+            _add(column, 1.0)
+        if len(picked) >= cap:
+            return picked[:cap]
+    for name in bound:
+        column = by_key.get(name)
+        if column is not None:
+            _add(column, 0.9)
+        if len(picked) >= cap:
+            return picked[:cap]
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for column in columns:
+        key = str(column.get("name") or "").strip().casefold()
+        if not key or key in seen:
+            continue
+        metadata = _metadata_dict(column.get("metadata"))
+        blob = SearchMixin._compact_natural_text(
+            " ".join(
+                [
+                    str(column.get("name") or ""),
+                    str(_column_name_kr(column, metadata) or ""),
+                    str(column.get("analyzed_description") or ""),
+                    str(column.get("description") or ""),
+                ]
+            )
+        )
+        hits = sum(1 for needle in compact_needles if needle and needle in blob)
+        if hits:
+            ranked.append((hits, column))
+    ranked.sort(key=lambda item: (-item[0], str(item[1].get("name") or "")))
+    for hits, column in ranked:
+        _add(column, min(0.85, 0.5 + 0.1 * hits))
+        if len(picked) >= cap:
+            break
+    return picked[:cap]
+
+
 def _candidate(
     table: dict[str, Any],
     columns: list[dict[str, Any]],
@@ -270,7 +363,7 @@ def _candidate(
                 constraints=constraints,
                 column_name_kr=_column_name_kr(column, metadata),
                 data_type=_serving_data_type(column, metadata),
-                description=(
+                column_description=(
                     column.get("analyzed_description")
                     or column.get("description")
                     or None
@@ -287,23 +380,24 @@ def _candidate(
             )
         )
     return DecisionCandidate(
-        db=str(table.get("source_name") or table.get("db") or ""),
+        source_name=str(table.get("source_name") or "") or None,
+        db=str(table.get("database_name") or table.get("db") or "") or None,
+        engine=str(table.get("engine") or "") or None,
         schema_name=str(table.get("schema_name") or ""),
         table_name=str(table.get("original_name") or table.get("name") or ""),
         score=float(table.get("score") or 0.0),
         source=source,
         target_class=_target_class(subject_area),
         subject_area=subject_area,
-        matched_columns=matched,
-        table_comment=(table.get("description") or None),
-        description=(
+        table_name_kr=_serving_logical_name(table),
+        table_description=(
             table.get("analyzed_description")
             or table.get("description")
             or None
         ),
-        logical_name=_serving_logical_name(table),
         table_type=list_table_type(subject_area),
         default_date_column=default_date_column(columns),
+        matched_columns=matched,
     )
 
 

@@ -114,6 +114,33 @@ class TypeGroupProtocolTests(unittest.TestCase):
         self.assertTrue(mapping_is_hq(_hq_row("701", "금강유역본부")))
         self.assertTrue(mapping_is_plant(_plant_row("354", "아산정수장")))
 
+    def test_dictionary_uses_mapping_column_not_tag_table_name(self) -> None:
+        hq = next(item for item in TYPE_GROUPS if item.name == "hq")
+        tag_bnb = {
+            "logical_name": "태그 마스터",
+            "original_name": "vw_tag_dim",
+            "name": "vw_tag_dim",
+            "column_fqn": "rwis_mart.vw_tag_dim.bnb_code",
+            "column_name": "bnb_code",
+            "code_value": "701",
+            "natural_value": "금강유역본부",
+        }
+        tag_suj = {
+            "logical_name": "태그 마스터",
+            "original_name": "vw_tag_dim",
+            "name": "vw_tag_dim",
+            "column_fqn": "rwis_mart.vw_tag_dim.suj_code",
+            "column_name": "suj_code",
+            "code_value": "380",
+            "natural_value": "충주정수장",
+        }
+        self.assertTrue(mapping_is_hq(tag_bnb))
+        self.assertTrue(hq.row_in_dictionary(tag_bnb))
+        self.assertFalse(mapping_is_hq(tag_suj))
+        self.assertFalse(hq.row_in_dictionary(tag_suj))
+        self.assertTrue(mapping_is_plant(tag_suj))
+        self.assertFalse(mapping_is_plant(tag_bnb))
+
     def test_unique_code_keeps_two_labels_one_code(self) -> None:
         rows = [
             _hq_row("701", "금강유역본부"),

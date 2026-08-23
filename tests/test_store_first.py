@@ -25,6 +25,7 @@ from app.services.decision_postgres.fact_choose import (
 )
 from app.services.decision_postgres.period import parse_korean_period
 from app.services.decision_planner import build_composite_edges
+from app.services.decision_postgres.select_store import apply_store_selection
 from app.services.decision_postgres.store_first import (
     PERIOD_REQUIRED,
     aggregation_contract,
@@ -35,6 +36,8 @@ from app.services.decision_postgres.store_first import (
     is_groupby_mention,
     is_list_target_mention,
     is_tag_master_table,
+    list_axis_identity_column_names,
+    list_axis_skips_tag_identity,
     mapping_filters,
     measure_column_names,
     measure_point_label_filters,
@@ -47,6 +50,7 @@ from app.services.decision_postgres.store_first import (
     promote_series_identity_tables,
     query_requests_fact,
     resolve_time_role,
+    rewrite_mapping_filters_onto_facts,
     approved_code_mappings,
 )
 from app.services.metadata_repository._search import SearchMixin
@@ -210,6 +214,67 @@ class StoreFirstUnitTests(unittest.TestCase):
         self.assertEqual(spec.weighted, False)
         self.assertIsNone(spec.weight_column)
         self.assertEqual(spec.time_scope, "2024-01-01/2024-12-31")
+
+    def test_aggregation_contract_gauge_sum_becomes_delta(self) -> None:
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(
+                status="complete",
+                procedure="aggregate",
+                measurement=MeasurementRequirement(aggregation="SUM"),
+            ),
+            facts=[{"id": 1, "original_name": "FACT_DD", "schema_name": "S"}],
+            columns_by_id={
+                1: [
+                    {
+                        "name": "VAL",
+                        "dtype": "numeric",
+                        "metadata": {"column_name_kr": "측정값"},
+                    }
+                ]
+            },
+            period=parse_korean_period("어제"),
+            process_rows=[{"letter": "A", "unit_desc": "㎥"}],
+            grain="day",
+        )
+        assert spec is not None
+        self.assertEqual(spec.function, "DELTA")
+        self.assertEqual(spec.tag_combine, "period_end_minus_prev")
+
+    def test_aggregation_contract_instant_sum_is_no_sql(self) -> None:
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(
+                status="complete",
+                procedure="aggregate",
+                measurement=MeasurementRequirement(aggregation="SUM"),
+            ),
+            facts=[{"id": 1, "original_name": "FACT_DD", "schema_name": "S"}],
+            columns_by_id={
+                1: [
+                    {
+                        "name": "VAL",
+                        "dtype": "numeric",
+                        "metadata": {"column_name_kr": "측정값"},
+                    }
+                ]
+            },
+            period=None,
+            query="어제 합계",
+            process_rows=[{"letter": "M", "unit_desc": "%"}],
+            grain="day",
+        )
+        assert spec is not None
+        self.assertEqual(spec.function, "NO_SQL")
+
+    def test_aggregation_contract_list_stays_empty(self) -> None:
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(status="complete", procedure="list"),
+            facts=[],
+            columns_by_id={},
+            period=None,
+            query="금강유역본부 사업장 목록",
+            process_rows=[{"letter": "M", "unit_desc": "%"}],
+        )
+        self.assertIsNone(spec)
 
     def test_measure_column_names_skips_identity_and_join_keys(self) -> None:
         names = measure_column_names(
@@ -551,7 +616,7 @@ class StoreFirstUnitTests(unittest.TestCase):
             metric="탁도",
             meaning_status="complete",
             primary_outputs=["측정시점", "탁도"],
-            meaning_roles=[
+            schema_roles=[
                 SchemaRoleRequirement(
                     role="측정항목",
                     necessity="required",
@@ -979,6 +1044,103 @@ class StoreFirstUnitTests(unittest.TestCase):
         )
         self.assertEqual(set(names), {"TAGSN", "TAG_DESC"})
 
+    def test_plant_list_axis_drops_tagsn(self) -> None:
+        table = {
+            "subject_area": "master",
+            "logical_name": "태그 마스터",
+        }
+        columns = [
+            {
+                "name": "tagsn",
+                "is_primary_key": True,
+                "metadata": {"column_name_kr": "태그일련번호"},
+            },
+            {
+                "name": "suj_code",
+                "metadata": {"column_name_kr": "사업장코드"},
+            },
+            {
+                "name": "suj_name",
+                "metadata": {"column_name_kr": "사업장이름"},
+            },
+            {
+                "name": "bnb_code",
+                "metadata": {"column_name_kr": "유역본부코드"},
+            },
+            {
+                "name": "tag_desc",
+                "metadata": {"column_name_kr": "태그설명"},
+            },
+        ]
+        self.assertTrue(list_axis_skips_tag_identity(["정수장"]))
+        names = list_axis_identity_column_names(columns, table, ["정수장"])
+        self.assertEqual(set(names), {"suj_code", "suj_name"})
+        self.assertNotIn("tagsn", names)
+        tag_names = dimension_identity_column_names(columns, table)
+        self.assertIn("tagsn", tag_names)
+
+    def test_rewrite_mapping_filters_onto_fact_columns(self) -> None:
+        from app.schemas import PlannedFilter
+
+        facts = [
+            {
+                "id": 2,
+                "schema_name": "rwis_mart",
+                "original_name": "vw_measure_day",
+                "name": "vw_measure_day",
+            }
+        ]
+        planned = [
+            PlannedFilter(
+                meaning="코드매핑:충주정수장",
+                column="rwis_mart.vw_tag_dim.suj_code",
+                operator="EQ",
+                value="380",
+                resolution_status="resolved",
+            )
+        ]
+        mappings = [
+            {
+                "table_id": 1,
+                "column_fqn": "rwis_mart.vw_tag_dim.suj_code",
+                "column_name": "suj_code",
+            }
+        ]
+        out, rewritten = rewrite_mapping_filters_onto_facts(
+            planned,
+            facts=facts,
+            fact_columns_by_id={2: [{"name": "suj_code"}, {"name": "br_code"}]},
+            mappings=mappings,
+        )
+        self.assertEqual(rewritten, {1})
+        self.assertEqual(out[0].column, "rwis_mart.vw_measure_day.suj_code")
+        kept, none = rewrite_mapping_filters_onto_facts(
+            planned,
+            facts=facts,
+            fact_columns_by_id={2: [{"name": "VAL"}]},
+            mappings=mappings,
+        )
+        self.assertEqual(none, set())
+        self.assertEqual(kept[0].column, "rwis_mart.vw_tag_dim.suj_code")
+
+    def test_apply_store_selection_skips_rewritten_dim(self) -> None:
+        mappings = [{"table_id": 1, "column_fqn": "S.DIM.suj_code"}]
+        selected, ids = apply_store_selection(
+            {"selected_table_ids": [2], "selected_mapping_keys": []},
+            mappings=mappings,
+            selected_ids={2},
+            rewritten_mapping_ids={1},
+        )
+        self.assertEqual(selected, mappings)
+        self.assertEqual(ids, {2})
+        _, with_failed = apply_store_selection(
+            {"selected_table_ids": [2], "selected_mapping_keys": []},
+            mappings=mappings,
+            selected_ids={2},
+            rewritten_mapping_ids=set(),
+        )
+        self.assertEqual(with_failed, {2, 1})
+
     def test_series_promotes_tag_master_off_bridge(self) -> None:
         tables = {
             3: {
@@ -1206,7 +1368,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         analyze = AsyncMock(
             return_value=QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="lookup",
                 meaning_status="complete",
                 measurement=MeasurementRequirement(),
@@ -1286,7 +1448,6 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(store_hits)
             return QueryAnalysis(
                 status="complete",
-                intent="x",
                 goal="x",
                 procedure="lookup",
                 meaning_status="complete",
@@ -1389,8 +1550,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
-                entities_include=["AA장"],
+                goal="x",
                 measurement=MeasurementRequirement(),
                 schema_roles=[],
             )
@@ -1463,12 +1623,11 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="aggregate",
                 period="2024년",
                 metric="항목",
                 meaning_status="complete",
-                entities_include=["QQ항목"],
                 measurement=MeasurementRequirement(metric="항목"),
                 schema_roles=[],
             )
@@ -1560,12 +1719,11 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="aggregate",
                 period="2024년 5월 10일",
                 metric="항목",
                 meaning_status="complete",
-                entities_include=["QQ항목"],
                 measurement=MeasurementRequirement(metric="항목"),
                 schema_roles=[],
             )
@@ -1659,12 +1817,11 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="aggregate",
                 period="2024년",
                 metric="항목",
                 meaning_status="complete",
-                entities_include=["QQ항목"],
                 measurement=MeasurementRequirement(metric="항목"),
                 schema_roles=[],
             )
@@ -1726,8 +1883,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
-                entities_include=[],
+                goal="x",
                 measurement=MeasurementRequirement(),
                 schema_roles=[],
             )
@@ -1817,12 +1973,11 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="list",
                 target="금강권역",
                 primary_outputs=["정수장"],
                 meaning_status="complete",
-                entities_include=[],
                 measurement=MeasurementRequirement(),
                 schema_roles=[],
             )
@@ -1874,7 +2029,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="aggregate",
                 metric="탁도",
                 meaning_status="complete",
@@ -1911,7 +2066,7 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="lookup",
                 metric="평균 탁도",
                 meaning_status="complete",
@@ -1948,12 +2103,11 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
         async def analyze(question: str, timeout_s=None, store_hits=None):
             return QueryAnalysis(
                 status="complete",
-                intent="x",
+                goal="x",
                 procedure="lookup",
                 target="충주",
                 metric="공급량",
                 meaning_status="complete",
-                entities_include=["충주"],
                 measurement=MeasurementRequirement(metric="공급량"),
                 schema_roles=[],
             )
@@ -1980,6 +2134,308 @@ class StoreFirstDecideTests(unittest.IsolatedAsyncioTestCase):
             response.query_plan.unresolved_requirements, [PERIOD_REQUIRED]
         )
         repo.find_value_mappings.assert_not_called()
+
+    async def test_decide_rewrites_mapping_filters_onto_wide_fact(self) -> None:
+        dim = {
+            "id": 1,
+            "table_id": 1,
+            "original_name": "vw_tag_dim",
+            "name": "vw_tag_dim",
+            "logical_name": "태그 마스터",
+            "subject_area": "master",
+            "schema_name": "rwis_mart",
+            "natural_value": "충주정수장",
+            "code_value": "380",
+            "column_fqn": "rwis_mart.vw_tag_dim.suj_code",
+            "column_name": "suj_code",
+            "matched_mention": "충주정수장",
+        }
+        metric = {
+            "id": 1,
+            "table_id": 1,
+            "original_name": "vw_tag_dim",
+            "name": "vw_tag_dim",
+            "logical_name": "태그 마스터",
+            "subject_area": "master",
+            "schema_name": "rwis_mart",
+            "natural_value": "탁도",
+            "code_value": "TB",
+            "column_fqn": "rwis_mart.vw_tag_dim.br_code",
+            "column_name": "br_code",
+            "matched_mention": "탁도",
+        }
+        day = {
+            "id": 2,
+            "original_name": "vw_measure_day",
+            "name": "vw_measure_day",
+            "logical_name": "일 DATA",
+            "description": "일별 01dd",
+            "subject_area": "agg",
+            "schema_name": "rwis_mart",
+        }
+        repo = AsyncMock()
+        repo.find_glossary_routes = AsyncMock(return_value=[])
+        repo.find_value_mappings = AsyncMock(return_value=[dim, metric])
+        repo.find_catalog_by_mentions = AsyncMock(return_value=[])
+        repo.fk_neighbor_table_ids = AsyncMock(return_value={2})
+        repo.fetch_tables_by_ids = AsyncMock(return_value=[dim, day])
+        repo.list_serving_tables = AsyncMock(return_value=[day])
+        repo.fetch_join_edges = AsyncMock(return_value=[])
+        repo.fetch_approved_columns = AsyncMock(
+            return_value={
+                1: [
+                    {"name": "suj_code"},
+                    {"name": "br_code"},
+                    {"name": "tagsn", "is_primary_key": True},
+                ],
+                2: [
+                    {"name": "suj_code"},
+                    {"name": "br_code"},
+                    {
+                        "name": "meas_tm",
+                        "dtype": "varchar",
+                        "metadata": {"format_pattern": "YYYYMMDD"},
+                    },
+                    {"name": "val"},
+                ],
+            }
+        )
+        repo.execution_source_scope = AsyncMock(return_value=None)
+
+        async def analyze(question: str, timeout_s=None, store_hits=None):
+            return QueryAnalysis(
+                status="complete",
+                goal="x",
+                procedure="lookup",
+                period="2025년 8월",
+                metric="탁도",
+                target="충주정수장",
+                primary_outputs=["탁도"],
+                meaning_status="complete",
+                measurement=MeasurementRequirement(metric="탁도"),
+                schema_roles=[],
+            )
+
+        with (
+            patch(
+                "app.services.decision_postgres.decide.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.decision_postgres.decide.get_query_analyzer"
+            ) as getter,
+        ):
+            getter.return_value.analyze = analyze
+            response = await decide(
+                repo,
+                query="충주정수장 2025년 8월 탁도변화",
+                include_matched_columns=False,
+                column_top_m=None,
+                auto_resolve_entities=True,
+            )
+        names = {table.table_name for table in response.query_plan.required_tables}
+        self.assertEqual(names, {"vw_measure_day"})
+        self.assertFalse(response.query_plan.join_paths)
+        self.assertFalse(
+            any(
+                "승인 JOIN 경로 없음" in str(item)
+                for item in (response.query_plan.unresolved_requirements or [])
+            )
+        )
+        columns = {
+            item.column
+            for item in response.query_plan.filters
+            if item.resolution_status == "resolved" and item.column
+        }
+        self.assertIn("rwis_mart.vw_measure_day.suj_code", columns)
+        self.assertIn("rwis_mart.vw_measure_day.br_code", columns)
+
+    async def test_decide_keeps_mapping_table_when_fact_lacks_code_column(self) -> None:
+        dim = {
+            "id": 1,
+            "table_id": 1,
+            "original_name": "RDISAUP_TB",
+            "name": "RDISAUP_TB",
+            "logical_name": "사업장",
+            "subject_area": "master",
+            "schema_name": "S",
+            "source_instance_id": "rwis-pg",
+            "natural_value": "충주정수장",
+            "code_value": "380",
+            "column_fqn": "S.RDISAUP_TB.SUJ_CODE",
+            "column_name": "SUJ_CODE",
+            "matched_mention": "충주정수장",
+        }
+        fact = {
+            "id": 2,
+            "original_name": "RDD01DD_TB",
+            "name": "RDD01DD_TB",
+            "logical_name": "일 DATA",
+            "description": "일별 01dd",
+            "subject_area": "agg",
+            "schema_name": "S",
+            "source_instance_id": "rwis-pg",
+        }
+        repo = AsyncMock()
+        repo.find_glossary_routes = AsyncMock(return_value=[])
+        repo.find_value_mappings = AsyncMock(return_value=[dim])
+        repo.find_catalog_by_mentions = AsyncMock(return_value=[])
+        repo.fk_neighbor_table_ids = AsyncMock(return_value={2})
+        repo.fetch_tables_by_ids = AsyncMock(return_value=[dim, fact])
+        repo.list_serving_tables = AsyncMock(return_value=[fact])
+        repo.fetch_join_edges = AsyncMock(
+            return_value=[
+                _fk_edge(1, 2, "RDISAUP_TB", "RDD01DD_TB", "SUJ_CODE", "SUJ_CODE"),
+            ]
+        )
+        repo.fetch_approved_columns = AsyncMock(
+            return_value={
+                1: [{"name": "SUJ_CODE", "metadata": {"column_name_kr": "사업장코드"}}],
+                2: [
+                    {"name": "VAL"},
+                    {
+                        "name": "LOG_TIME",
+                        "dtype": "varchar",
+                        "metadata": {"format_pattern": "YYYYMMDD"},
+                    },
+                ],
+            }
+        )
+        repo.execution_source_scope = AsyncMock(return_value=None)
+
+        async def analyze(question: str, timeout_s=None, store_hits=None):
+            return QueryAnalysis(
+                status="complete",
+                goal="x",
+                procedure="lookup",
+                period="2025년 8월",
+                metric="탁도",
+                meaning_status="complete",
+                measurement=MeasurementRequirement(metric="탁도"),
+                schema_roles=[],
+            )
+
+        with (
+            patch(
+                "app.services.decision_postgres.decide.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.execution_context_resolver.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.decision_postgres.decide.get_query_analyzer"
+            ) as getter,
+        ):
+            getter.return_value.analyze = analyze
+            response = await decide(
+                repo,
+                query="충주정수장 2025년 8월 탁도",
+                include_matched_columns=False,
+                column_top_m=None,
+                auto_resolve_entities=True,
+            )
+        names = {table.table_name for table in response.query_plan.required_tables}
+        self.assertEqual(names, {"RDISAUP_TB", "RDD01DD_TB"})
+        self.assertTrue(response.query_plan.join_paths)
+        self.assertFalse(
+            any(
+                "승인 JOIN 경로 없음" in str(item)
+                for item in (response.query_plan.unresolved_requirements or [])
+            )
+        )
+        columns = {
+            item.column
+            for item in response.query_plan.filters
+            if item.resolution_status == "resolved" and item.column
+        }
+        self.assertTrue(any(str(col).endswith("RDISAUP_TB.SUJ_CODE") for col in columns))
+
+    async def test_decide_plant_list_omits_tagsn(self) -> None:
+        dim = {
+            "id": 1,
+            "table_id": 1,
+            "original_name": "vw_tag_dim",
+            "name": "vw_tag_dim",
+            "logical_name": "태그 마스터",
+            "subject_area": "master",
+            "schema_name": "rwis_mart",
+            "natural_value": "금강유역본부",
+            "code_value": "701",
+            "column_fqn": "rwis_mart.vw_tag_dim.bnb_code",
+            "column_name": "bnb_code",
+            "matched_mention": "금강권역",
+        }
+        repo = AsyncMock()
+        repo.find_glossary_routes = AsyncMock(return_value=[])
+        repo.find_value_mappings = AsyncMock(return_value=[dim])
+        repo.find_catalog_by_mentions = AsyncMock(return_value=[dim])
+        repo.fk_neighbor_table_ids = AsyncMock(return_value=set())
+        repo.fetch_tables_by_ids = AsyncMock(return_value=[dim])
+        repo.list_serving_tables = AsyncMock(return_value=[])
+        repo.fetch_join_edges = AsyncMock(return_value=[])
+        repo.fetch_approved_columns = AsyncMock(
+            return_value={
+                1: [
+                    {
+                        "name": "tagsn",
+                        "is_primary_key": True,
+                        "metadata": {"column_name_kr": "태그일련번호"},
+                    },
+                    {
+                        "name": "suj_code",
+                        "metadata": {"column_name_kr": "사업장코드"},
+                    },
+                    {
+                        "name": "suj_name",
+                        "metadata": {"column_name_kr": "사업장이름"},
+                    },
+                    {
+                        "name": "bnb_code",
+                        "metadata": {"column_name_kr": "유역본부코드"},
+                    },
+                ]
+            }
+        )
+        repo.execution_source_scope = AsyncMock(return_value=None)
+
+        async def analyze(question: str, timeout_s=None, store_hits=None):
+            return QueryAnalysis(
+                status="complete",
+                goal="x",
+                procedure="list",
+                target="금강권역",
+                primary_outputs=["정수장"],
+                meaning_status="complete",
+                measurement=MeasurementRequirement(),
+                schema_roles=[],
+            )
+
+        with (
+            patch(
+                "app.services.decision_postgres.decide.get_runtime",
+                return_value=_runtime(),
+            ),
+            patch(
+                "app.services.decision_postgres.decide.get_query_analyzer"
+            ) as getter,
+        ):
+            getter.return_value.analyze = analyze
+            response = await decide(
+                repo,
+                query="금강권역 정수장 목록",
+                include_matched_columns=False,
+                column_top_m=None,
+                auto_resolve_entities=True,
+            )
+        tables = response.query_plan.required_tables
+        self.assertEqual({table.table_name for table in tables}, {"vw_tag_dim"})
+        columns = set(tables[0].required_columns)
+        self.assertIn("suj_code", columns)
+        self.assertIn("suj_name", columns)
+        self.assertNotIn("tagsn", columns)
+        self.assertFalse(response.query_plan.join_paths)
 
 
 if __name__ == "__main__":

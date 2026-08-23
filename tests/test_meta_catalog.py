@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 import unittest
 
-from app.services.meta_postgres import _batch_item, _column_meta, _table_info
+from app.services.meta_postgres import (
+    _batch_item,
+    _catalog_column,
+    _column_meta,
+    _table_info,
+    assemble_serving_catalog,
+)
 
 
 def _table(**overrides: object) -> dict:
@@ -203,6 +209,96 @@ class MetaCatalogMappingTests(unittest.TestCase):
         self.assertEqual(item.table_comment, "태그")
         self.assertEqual(item.description, "태그 마스터")
         self.assertEqual(item.subject_area, "master")
+
+
+class ServingCatalogTests(unittest.TestCase):
+    def test_varchar_display_and_constraints(self) -> None:
+        column = _catalog_column(
+            {
+                "column_name": "suj_code",
+                "dtype": "character varying",
+                "nullable": True,
+                "is_primary_key": False,
+                "metadata": {"data_type_with_length": "character varying(10)"},
+            }
+        )
+        self.assertEqual(column.column_name, "suj_code")
+        self.assertEqual(column.data_type, "varchar(10)")
+        self.assertTrue(column.nullable)
+        self.assertFalse(column.primary_key)
+        self.assertIsNone(column.references)
+
+    def test_outbound_fk_becomes_references(self) -> None:
+        column = _catalog_column(
+            {
+                "column_name": "tagsn",
+                "dtype": "numeric",
+                "nullable": False,
+                "is_primary_key": True,
+                "metadata": {"data_type_with_length": "numeric(6)"},
+                "ref_schema_name": "rwis_mart",
+                "ref_table_name": "vw_tag_dim",
+                "ref_column_name": "tagsn",
+            }
+        )
+        self.assertEqual(column.data_type, "numeric(6)")
+        self.assertFalse(column.nullable)
+        self.assertTrue(column.primary_key)
+        self.assertIsNotNone(column.references)
+        assert column.references is not None
+        self.assertEqual(column.references.schema_name, "rwis_mart")
+        self.assertEqual(column.references.table_name, "vw_tag_dim")
+        self.assertEqual(column.references.column_name, "tagsn")
+
+    def test_assemble_groups_sources_and_omits_empty_refs(self) -> None:
+        catalog = assemble_serving_catalog(
+            [
+                {
+                    "source_name": "rwis_mart_view",
+                    "engine": "postgresql",
+                    "source_schema": "rwis_mart",
+                    "registered_at": "2026-08-20T20:49:27+09:00",
+                    "schema_name": "rwis_mart",
+                    "table_name": "vw_measure_1min",
+                    "column_name": "suj_code",
+                    "dtype": "character varying",
+                    "nullable": True,
+                    "is_primary_key": False,
+                    "metadata": {"data_type_with_length": "character varying(10)"},
+                },
+                {
+                    "source_name": "rwis_mart_view",
+                    "engine": "postgresql",
+                    "source_schema": "rwis_mart",
+                    "registered_at": "2026-08-20T20:49:27+09:00",
+                    "schema_name": "rwis_mart",
+                    "table_name": "vw_measure_1min",
+                    "column_name": "suj_code",
+                    "dtype": "character varying",
+                    "nullable": True,
+                    "is_primary_key": False,
+                    "metadata": {"data_type_with_length": "character varying(10)"},
+                    "ref_schema_name": "rwis_mart",
+                    "ref_table_name": "vw_tag_dim",
+                    "ref_column_name": "suj_code",
+                },
+            ],
+            serving_active=True,
+        )
+        self.assertEqual(catalog.serving_status, "active")
+        self.assertEqual(len(catalog.sources), 1)
+        source = catalog.sources[0]
+        self.assertEqual(source.source_name, "rwis_mart_view")
+        self.assertEqual(len(source.tables), 1)
+        columns = source.tables[0].columns
+        self.assertEqual(len(columns), 1)
+        self.assertEqual(columns[0].data_type, "varchar(10)")
+        self.assertIsNotNone(columns[0].references)
+
+    def test_inactive_when_no_serving_activation(self) -> None:
+        catalog = assemble_serving_catalog([], serving_active=False)
+        self.assertEqual(catalog.serving_status, "inactive")
+        self.assertEqual(catalog.sources, [])
 
 
 if __name__ == "__main__":

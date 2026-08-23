@@ -35,6 +35,7 @@ from ..meaning_slots import (
     time_role_from_procedure,
 )
 from .period import ParsedPeriod, parse_korean_period, week_mention
+from .data_process import FN_IDENTITY, refine_function
 from .table_type import list_table_type
 
 _FACT_LIKE = frozenset({"Fact", "Raw"})
@@ -104,7 +105,7 @@ def period_required_response(
         target="none",
         confidence=0.0,
         candidates=[],
-        threshold_used={"retrieval_axes": ["store"]},
+        threshold_used={},
         resolution_status="complete",
         query_analysis=analysis,
         query_plan=QueryPlan(
@@ -125,7 +126,7 @@ def range_unresolved_response(
         target="none",
         confidence=0.0,
         candidates=[],
-        threshold_used={"retrieval_axes": ["store"]},
+        threshold_used={},
         resolution_status="complete",
         query_analysis=analysis,
         query_plan=QueryPlan(
@@ -147,7 +148,7 @@ def fact_unresolved_response(
         target="none",
         confidence=0.0,
         candidates=list(candidates or []),
-        threshold_used={"retrieval_axes": ["store"]},
+        threshold_used={},
         resolution_status="complete",
         query_analysis=analysis,
         query_plan=QueryPlan(
@@ -164,7 +165,7 @@ def empty_meta_response(analysis: QueryAnalysis | None = None) -> DecisionRespon
         target="none",
         confidence=0.0,
         candidates=[],
-        threshold_used={"retrieval_axes": ["store"]},
+        threshold_used={},
         resolution_status="failed",
         query_analysis=analysis,
         query_plan=QueryPlan(
@@ -593,12 +594,14 @@ def facts_joinable_to_mappings(
     mapped_ids: set[int],
     edges: list[Any],
     max_hops: int,
+    mappings: list[dict[str, Any]] | None = None,
+    fact_columns_by_id: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep facts with the most approved paths to mapping seeds."""
+    """Keep facts with approved FK paths, else same code-column names. Do not mix scores."""
 
     if not mapped_ids or not facts:
         return list(facts)
-    scored: list[tuple[int, dict[str, Any]]] = []
+    fk_scored: list[tuple[int, dict[str, Any]]] = []
     for fact in facts:
         fact_id = int(fact["id"])
         hits = 0
@@ -614,11 +617,30 @@ def facts_joinable_to_mappings(
             ) is not None:
                 hits += 1
         if hits:
-            scored.append((hits, fact))
-    if not scored:
+            fk_scored.append((hits, fact))
+    if fk_scored:
+        best = max(item[0] for item in fk_scored)
+        return [fact for hits, fact in fk_scored if hits == best]
+    code_names = {
+        _mapping_code_column(row).casefold()
+        for row in (mappings or [])
+        if _mapping_code_column(row)
+    }
+    if not code_names or not fact_columns_by_id:
         return []
-    best = max(item[0] for item in scored)
-    return [fact for hits, fact in scored if hits == best]
+    named: list[dict[str, Any]] = []
+    for fact in facts:
+        columns = fact_columns_by_id.get(int(fact["id"]), [])
+        col_names = {
+            str(column.get("name") or column.get("column_name") or "")
+            .strip()
+            .casefold()
+            for column in columns
+            if str(column.get("name") or column.get("column_name") or "").strip()
+        }
+        if code_names & col_names:
+            named.append(fact)
+    return named
 
 
 def is_hour_grain_table(table: dict[str, Any]) -> bool:
@@ -693,14 +715,17 @@ def group_dimension_needles(
 def catalog_group_dimensions(
     catalog: list[dict[str, Any]],
     tokens: list[str],
+    columns_by_id: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Keep mention-matched Dimension tables as group-by seeds. No invented names."""
 
-    needles = [
-        SearchMixin._compact_natural_text(token)
-        for token in tokens
-        if len(SearchMixin._compact_natural_text(token)) >= 2
-    ]
+    needles = SearchMixin.expand_plant_mention_tokens(
+        [
+            SearchMixin._compact_natural_text(token)
+            for token in tokens
+            if len(SearchMixin._compact_natural_text(token)) >= 2
+        ]
+    )
     kept: list[dict[str, Any]] = []
     seen: set[int] = set()
     for table in catalog:
@@ -709,22 +734,31 @@ def catalog_group_dimensions(
         table_id = table.get("id")
         if table_id is None or int(table_id) in seen:
             continue
-        blob = SearchMixin._compact_natural_text(
-            " ".join(
-                [
-                    table_blob(table),
-                    str(table.get("original_name") or ""),
-                    str(table.get("name") or ""),
-                ]
+        blobs = [
+            SearchMixin._compact_natural_text(
+                " ".join(
+                    [
+                        table_blob(table),
+                        str(table.get("original_name") or ""),
+                        str(table.get("name") or ""),
+                    ]
+                )
             )
-        )
+        ]
+        for column in (columns_by_id or {}).get(int(table_id), []):
+            blobs.append(_column_identity_blob(column))
+            name = str(column.get("name") or column.get("column_name") or "").strip()
+            if name:
+                blobs.append(SearchMixin._compact_natural_text(name))
         if any(
-            needle
+            blob
+            and needle
             and (
                 SearchMixin._label_matches_needle(blob, needle)
                 or SearchMixin._label_starts_with(blob, needle)
                 or blob.endswith(SearchMixin._compact_natural_text(needle))
             )
+            for blob in blobs
             for needle in needles
         ):
             seen.add(int(table_id))
@@ -1107,9 +1141,15 @@ def aggregation_contract(
     period: ParsedPeriod | None,
     glossary_rows: list[dict[str, Any]] | None = None,
     query: str = "",
+    process_rows: list[dict[str, str]] | None = None,
+    grain: str | None = None,
 ) -> PlanAggregation | None:
     procedure = str(getattr(analysis, "procedure", "") or "").strip() if analysis else ""
-    if procedure not in {"aggregate", "extremum"}:
+    if procedure == "list" or is_catalog_list_query(query, analysis):
+        return None
+    if procedure == "lookup" and not process_rows:
+        return None
+    if procedure not in {"aggregate", "extremum", "lookup"}:
         return None
     function = ""
     if analysis is not None:
@@ -1126,6 +1166,8 @@ def aggregation_contract(
     )
     if procedure == "extremum":
         function = asked or function or "MAX"
+    elif procedure == "lookup" and not function:
+        function = FN_IDENTITY
     elif not function:
         function = "AVG"
     value_column = None
@@ -1167,12 +1209,22 @@ def aggregation_contract(
         if value_column is not None:
             break
     weighted = bool(weight_column)
+    tag_combine = None
+    if process_rows:
+        function, tag_combine = refine_function(
+            asked=function,
+            procedure=procedure,
+            rows=process_rows,
+            grain=grain,
+            query=query,
+        )
     return PlanAggregation(
         function=function,
         value_column=value_column,
         weighted=weighted,
         weight_column=weight_column,
         time_scope=_time_scope_text(period) if period is not None else None,
+        tag_combine=tag_combine,
     )
 
 
@@ -1294,6 +1346,124 @@ def _plan_column_fqn(table: dict[str, Any], column_name: str) -> str:
     if schema and table_name and name:
         return f"{schema}.{table_name}.{name}"
     return name
+
+
+def _filter_last_ident(column_fqn: str) -> str:
+    text = str(column_fqn or "").strip()
+    if "." in text:
+        return text.rsplit(".", 1)[-1]
+    return text
+
+
+def rewrite_mapping_filters_onto_facts(
+    planned: list[PlannedFilter],
+    *,
+    facts: list[dict[str, Any]],
+    fact_columns_by_id: dict[int, list[dict[str, Any]]],
+    mappings: list[dict[str, Any]],
+) -> tuple[list[PlannedFilter], set[int]]:
+    """Move mapping filters onto a chosen fact when the last ident exists there."""
+
+    if not planned or not facts:
+        return list(planned), set()
+    name_by_fact: dict[int, dict[str, str]] = {}
+    for fact in facts:
+        fact_id = int(fact["id"])
+        names: dict[str, str] = {}
+        for column in fact_columns_by_id.get(fact_id, []):
+            name = str(column.get("name") or column.get("column_name") or "").strip()
+            if name:
+                names[name.casefold()] = name
+        name_by_fact[fact_id] = names
+    mapping_by_fqn: dict[str, set[int]] = {}
+    for row in mappings:
+        fqn = str(row.get("column_fqn") or "").strip()
+        table_id = _mapping_table_id(row)
+        if not fqn or table_id is None:
+            continue
+        mapping_by_fqn.setdefault(fqn.casefold(), set()).add(table_id)
+    rewritten: list[PlannedFilter] = []
+    table_ok: dict[int, bool] = {}
+    for item in planned:
+        source_ids = mapping_by_fqn.get(str(item.column or "").strip().casefold(), set())
+        last = _filter_last_ident(item.column or "").casefold()
+        target: str | None = None
+        for fact in facts:
+            actual = name_by_fact.get(int(fact["id"]), {}).get(last)
+            if actual:
+                target = _plan_column_fqn(fact, actual)
+                break
+        if target is not None:
+            rewritten.append(item.model_copy(update={"column": target}))
+            for table_id in source_ids:
+                table_ok[table_id] = table_ok.get(table_id, True) and True
+        else:
+            rewritten.append(item)
+            for table_id in source_ids:
+                table_ok[table_id] = False
+    return rewritten, {table_id for table_id, ok in table_ok.items() if ok}
+
+
+_LIST_AXIS_PLANT = ("정수장", "사업장")
+_LIST_AXIS_HQ = ("본부", "유역", "권역")
+_LIST_AXIS_METRIC = ("변량", "측정항목")
+_LIST_AXIS_TAG = ("태그", "측정점")
+
+
+def list_axis_skips_tag_identity(axis: list[str]) -> bool:
+    blob = SearchMixin._compact_natural_text(" ".join(axis))
+    if not blob:
+        return False
+    if any(marker in blob for marker in _LIST_AXIS_TAG) and not any(
+        marker in blob
+        for marker in (*_LIST_AXIS_PLANT, *_LIST_AXIS_HQ, *_LIST_AXIS_METRIC)
+    ):
+        return False
+    return any(
+        marker in blob
+        for marker in (*_LIST_AXIS_PLANT, *_LIST_AXIS_HQ, *_LIST_AXIS_METRIC)
+    )
+
+
+def list_axis_identity_column_names(
+    columns: list[dict[str, Any]],
+    table: dict[str, Any] | None,
+    axis: list[str],
+) -> list[str]:
+    """Axis code+name only. Never invent names or keep tagsn on a plant/hq list."""
+
+    del table
+    blob_axis = SearchMixin._compact_natural_text(" ".join(axis))
+    wanted: list[str] = []
+    if any(marker in blob_axis for marker in _LIST_AXIS_PLANT):
+        wanted.extend(("사업장", "정수장", "suj"))
+    if any(marker in blob_axis for marker in _LIST_AXIS_HQ):
+        wanted.extend(("본부", "유역", "bnb"))
+    if any(marker in blob_axis for marker in _LIST_AXIS_METRIC):
+        wanted.extend(("변량", "br"))
+    names: list[str] = []
+    seen: set[str] = set()
+    for column in columns:
+        name = str(column.get("name") or "").strip()
+        if not name or name in seen or name.casefold() == "tagsn":
+            continue
+        ident = name.casefold()
+        compact_ident = ident.replace("_", "")
+        col_blob = _column_identity_blob(column)
+        if not any(
+            token in ident or token in compact_ident or token in col_blob
+            for token in wanted
+        ):
+            continue
+        is_code = ident.endswith(("_code", "_cd")) or "코드" in col_blob
+        is_name = ident.endswith(("_name", "_nm")) or any(
+            marker in col_blob for marker in ("이름", "명칭")
+        )
+        if not is_code and not is_name:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def _mapping_is_measure(mapping: dict[str, Any]) -> bool:
@@ -1471,7 +1641,7 @@ def _mention_is_measure_item(analysis: QueryAnalysis | None, mention: str) -> bo
     )
     if metric and (key == metric or metric in key or key in metric):
         return True
-    for role in analysis.meaning_roles or []:
+    for role in analysis.schema_roles or []:
         role_name = SearchMixin._compact_natural_text(str(role.role or ""))
         if "측정" not in role_name:
             continue
@@ -1602,7 +1772,7 @@ def _analysis_metric(analysis: QueryAnalysis | None) -> str:
     metric = str(analysis.metric or analysis.measurement.metric or "").strip()
     if metric:
         return metric
-    for role in analysis.meaning_roles or []:
+    for role in analysis.schema_roles or []:
         role_name = SearchMixin._compact_natural_text(str(role.role or ""))
         if "측정" not in role_name:
             continue

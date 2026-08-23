@@ -28,7 +28,7 @@ class CatalogNeedlesTests(unittest.TestCase):
             procedure="list",
             target="금강권역 정수장",
             primary_outputs=["정수장 목록"],
-            meaning_roles=[
+            schema_roles=[
                 SchemaRoleRequirement(
                     role="시설 유형",
                     necessity="required",
@@ -67,7 +67,7 @@ class CatalogNeedlesTests(unittest.TestCase):
             procedure="aggregate",
             metric="평균 탁도",
             primary_outputs=["평균 탁도"],
-            meaning_roles=[
+            schema_roles=[
                 SchemaRoleRequirement(
                     role="측정항목",
                     necessity="required",
@@ -103,7 +103,7 @@ class ExtremumAndMetricSurfaceTests(unittest.TestCase):
             procedure="extremum",
             metric="pH",
             primary_outputs=["장소", "pH"],
-            meaning_roles=[
+            schema_roles=[
                 SchemaRoleRequirement(
                     role="측정항목",
                     necessity="required",

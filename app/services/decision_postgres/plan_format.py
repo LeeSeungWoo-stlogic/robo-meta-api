@@ -17,7 +17,9 @@ from ..decision_planner import CompositeJoinEdge
 
 def _table_key(table: dict[str, Any]) -> TableKey:
     return TableKey(
-        db=str(table.get("source_name") or table.get("db") or "") or None,
+        source_name=str(table.get("source_name") or "") or None,
+        db=str(table.get("database_name") or table.get("db") or "") or None,
+        engine=str(table.get("engine") or "") or None,
         schema_name=str(table.get("schema_name") or ""),
         table_name=str(table.get("original_name") or table.get("name") or ""),
     )

@@ -15,6 +15,7 @@ class JoinGraphMixin:
                NULLIF(t.metadata->>'logical_name', '') AS logical_name,
                d.profile_id AS source_instance_id, d.engine,
                d.mindsdb_integration, d.mindsdb_catalog,
+               NULLIF(d.database_name, '') AS database_name,
                s.name AS source_name
         FROM t2s_tables t
         JOIN t2s_datasources d ON d.id=t.datasource_id

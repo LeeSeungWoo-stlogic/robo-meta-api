@@ -40,11 +40,11 @@ python -m app.main
 - `GET /health` (`t2sql_configured` boolean 포함. LLM/probe는 health에서 호출하지 않음)
 - `POST /data_decision`
 - `POST /t2sql` (파이프라인 벽시계는 `t2sql.total_timeout_seconds`, 기본 60초. statement timeout과 다름)
+- `POST /meta/catalog` (서빙 카탈로그 구조. 증강 메타 없음)
 - `POST /meta/batch`
 - `POST /meta/table`
 - `POST /meta/column`
-- `POST /meta/ref` (기본 FK 경로)
-- `POST /meta/fk` (`/meta/ref` alias)
+- `POST /meta/ref` (나가는 FK)
 - `POST /query_execute`
 - 폐기: `POST /semantic_decision`(410), `POST /query/execute`(410), `POST /query`(제거)
 
@@ -79,7 +79,8 @@ python tests/smoke_data_decision_only.py
 
 ## 8) 변경 기록(260623 계획 반영)
 - KAIR 단일 SoT 읽기 전략 고정
-- `/meta/fk` alias 추가
+- `/meta/fk` alias 제거. FK는 `/meta/ref`만 사용
+- `/meta/catalog` 추가. 서빙 연결·표·컬럼 구조만 반환. 나가는 FK는 `references`
 - smoke 차단 게이트를 `/data_decision` 단일로 조정
 
 ## 8b) ADR-002 Serving MVP (2026-08-06)

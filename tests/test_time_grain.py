@@ -35,7 +35,7 @@ from app.services.query_analysis import role_embedding_text
 def _analysis(**overrides) -> QueryAnalysis:
     payload = dict(
         status="complete",
-        intent="평균 탁도",
+        goal="평균 탁도",
         measurement=MeasurementRequirement(metric="탁도", aggregation="AVG"),
         schema_roles=[
             SchemaRoleRequirement(
