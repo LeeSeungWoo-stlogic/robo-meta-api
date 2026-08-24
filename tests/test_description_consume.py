@@ -30,6 +30,8 @@ def test_candidate_maps_serving_descriptions() -> None:
         ],
         source="vector",
     )
+    assert not hasattr(candidate, "score") or "score" not in candidate.model_dump()
+    assert "score" not in candidate.matched_columns[0].model_dump()
     assert candidate.table_name_kr == "사업장"
     assert candidate.table_description == "사업장 식별 코드와 명칭을 관리"
     assert candidate.matched_columns[0].column_name_kr == "사업장 코드"

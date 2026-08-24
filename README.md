@@ -10,117 +10,25 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 **Serving MVP 소비면:** `POST /data_decision` · `POST /t2sql` · `POST /query_execute`  
 (`/data_decision` 1.0. `/t2sql`은 동일 Serving 6표 추가 READ)  
 플랫폼 스키마 slim·경계: K-AIR-metadata-platform `docs/ADR-002-SERVING-MVP-AND-SCHEMA-SLIM.md`  
-(Wave 0–3 적용 완료 기준, 2026-08-06)
+**업데이트 이력:** [`change_log.md`](change_log.md)
 
-## 1.0 서빙 계약 (2026-08-24)
+## 서빙 계약
 
-`POST /meta/catalog`과 `POST /data_decision` HTTP 본문을 서빙 소비면으로 정리한다.
-HyDE 벡터 검색용 칸은 더 이상 채우지 않으므로 응답에서 뺀다. `/t2sql`은 용어집 라우트를
-내부에서 계속 쓴다.
+`POST /meta/catalog`과 `POST /data_decision`이 소비면이다. HyDE 벡터 검색용 칸은
+`/data_decision` HTTP에 넣지 않는다. `/t2sql`은 용어집 라우트를 내부에서 쓴다.
 
 | 항목 | 내용 |
 | --- | --- |
 | **`/meta/catalog`** | 서빙 중 연결·표·컬럼 구조만. 논리명·설명·`subject_area` 없음. `character varying(n)` → `varchar(n)` |
-| **테이블 키** | `source_name` → `db`(원천 database) → `engine` → `schema_name` → `table_name`. `db`에 연결명을 넣지 않음 |
-| **후보 표 슬롯** | 한글 라벨 `table_name_kr`. 상세 `table_description`. 후보에서 `logical_name`/`table_comment` 없음 |
-| **후보 컬럼** | 설명 키는 `column_description`. 타입은 catalog와 같이 `varchar(n)` |
-| **분석** | `query_analysis.query`는 요청 원문. 역할은 `schema_roles`. 목표는 `goal`. `intent`/`meaning_roles` 없음 |
-| **제외 (`/data_decision`만)** | `glossary_routes`, `suggested_probes`, `search_keywords`, `entities_include`/`exclude`, `join_requirements`, `fallback`, `measurement.storage_type_hint` |
-| **실행 컨텍스트** | HTTP에 `source_instance_id` 없음. `threshold_used`에 `retrieval_axes` 없음 |
-| **값사전** | `has_code`는 유지. 코드 바인딩 SoT는 `query_plan.filters`와 `resolved_entities` |
+| **테이블 키** | `source_name` → `db`(원천 database) → `engine` → `schema_name` → `table_name` |
+| **후보 표** | 한글 라벨 `table_name_kr`. 상세 `table_description` |
+| **후보 컬럼** | `column_description`. 타입은 catalog와 같이 `varchar(n)`. HTTP에 `score` 없음 |
+| **분석** | `query_analysis.query`는 요청 원문. 역할은 `schema_roles`. 목표는 `goal` |
+| **집계** | `query_plan.aggregation.function` / `tag_combine` / `tags[]`. `tags[]`는 tagsn 바인딩 뒤 `data_process`·`apply`·`unit`(`unit_desc` 표시) |
+| **제외 (`/data_decision` HTTP)** | `glossary_routes`, `secondary_targets`, `confidence`, 후보/`matched_columns` `score` |
+| **값사전** | `has_code` 유지. 코드 바인딩 SoT는 `query_plan.filters`와 `resolved_entities` |
 
-관련 테스트: `tests/test_meta_catalog.py` · `tests/test_description_consume.py` · `tests/test_dtype_consume.py` · `tests/test_glossary_routes.py`
-
-## 1.0 업데이트 (2026-08-20)
-
-`/meta`가 Metadata Store에서 꺼내는 테이블·컬럼 사실을 `/data_decision` 후보와
-같은 슬롯 규칙으로 채운다. 질의 전용 블록(`query_plan`, `join_groups`,
-`resolved_entities`)은 `/meta`에 넣지 않는다.
-
-| 항목 | 내용 |
-| --- | --- |
-| **`/meta` 슬롯** | 논리명 → `table_name_kr`/`column_name_kr`. 원본 설명 → `table_comment`/`column_comment`. 분석 설명 → `description` |
-| **`/meta` 보강** | `subject_area`, `table_type`, `default_date_column`, `value_examples`, 길이 포함 `data_type`, `unit`, `format_pattern`, `has_code`. 나가는 FK면 `code_lookup.via=fk` |
-| **`/meta/catalog`** | 서빙 중 연결·표·컬럼 구조만. 논리명·설명·`subject_area` 없음 |
-| **`/meta/batch`** | 표 키만이 아니라 논리명·설명·`subject_area` 요약 |
-| **`/meta/ref`** | Store `t2s_fk_constraints`의 **from 테이블 = 요청 테이블**인 행만. 들어오는 FK는 상대 표로 조회 |
-| **list vs lookup** | 행이 많다고 list가 아님. 대상 나열만 list. 측정값·변화·추이·추세는 lookup |
-| **기간** | 측정값을 묻는데 기간이 없으면 SQL을 만들지 않음. 목록 질의는 기간을 요구하지 않음 |
-| **동의어** | 용어 그룹 멤버는 맞은 그룹 안에서만 확장. 유형 접미 그룹과 섞지 않음 |
-
-관련 테스트: `tests/test_meta_catalog.py` · `tests/test_decision_planner_postgres.py` · `tests/test_synonym_groups.py`
-
-## 1.0 엔진 업데이트 (2026-08-19)
-
-자연어 → 저장소 메타 교차 → 계획 → SQL → `/query_execute`가 본 경로다.
-confirm 재판은 생략하고, 질문 전용 가드가 아니라 엔진 규칙으로 맞춘다.
-
-| 항목 | 내용 |
-| --- | --- |
-| **기간** | 집계·극값은 기간이 없으면 SQL을 만들지 않고 `기간을 지정해 주세요` |
-| **범위 OR/제외** | `금강권역 또는 낙동강권역`은 목록 축이 아니라 범위. 같은 컬럼 코드는 IN으로 합침. `아닌`은 NOT IN |
-| **팩트 필요** | 평균/합계뿐 아니라 추이·변화, 기간+측정 항목이면 팩트를 고름 |
-| **측정 항목** | 답의 축이어도 코드 필터를 유지. `pH`/`PH`처럼 짧은 표면은 저장소 코드값으로 결합 |
-| **극값** | 제일 낮/적 → MIN, 높/많 → MAX. LLM이 MAX로 적어도 질문 문구가 우선 |
-| **측정점 식별** | 태그 카탈로그 SELECT는 PK·설명. 별칭/`TAG_NAME`은 넣지 않음 |
-| **SQL 식별자** | 생성기가 `p`.'SUJ_NAME'처럼 컬럼을 문자 리터럴로 쓰면 백틱 식별자로 되돌림 |
-| **실행** | `/t2sql` `sql_fingerprint`를 `/query_execute`에서 다시 비교 가능 |
-| **검수 기동** | `docker compose -f docker-compose.meaning.yml up -d --build` (호스트 8101, orphans 유지) |
-
-관련 테스트: `tests/test_store_first.py` · `tests/test_meaning_slots.py` · `tests/test_sql_source_qualify.py` · `tests/test_engine_contracts.py`
-
-## 1.0 엔진 업데이트 (2026-08-17)
-
-Store 승인 메타만으로 decide/T2SQL을 조립한다. 질문 ID·물리 표명·TAGSN 하드코딩 없음.
-라이브 검사 산출(`t2sql_test/`, `_tmp_*`)은 Git 추적에서 제외한다. 단위 테스트 `tests/`는 계약을 잠근다.
-
-| 항목 | 내용 |
-| --- | --- |
-| **기간·입도** | 기간을 팩트보다 먼저 파싱. ISO 주. 질문 문구 입도 > analyzer hint. 연 창이 day/hour를 월 팩트로 덮지 않음 |
-| **시계열 입도** | 월+추이/변화/추세/트렌드 → 일 팩트. 일+동일 시계열 → 시간 팩트. `월별` 등 명시 입도 우선 |
-| **time_role** | 기본 `none`. `procedure=extremum`만 극값. `lookup`은 latest가 아님. 생성 정본은 procedure+answer_axis |
-| **표 선정** | 카탈로그-only JOIN 드롭. 팩트 [0]/LLM 추측 금지. JOIN은 팩트(없으면 매핑) 앵커만 |
-| **별칭·그룹** | 유역/권역/지역본부/유역본부/권역본부. `본부`는 치환 없이 그룹만. `발전` 미사용. `X별`/`X들`은 표 시드 |
-| **식별 컬럼** | 차원은 명칭·코드. 설명/비고/광역/사무소 등은 제외 |
-| **시계열 출력** | 측정점 키 + 태그 명칭/설명 + 시각 + 원천 VAL. 전일 증감 창작 없음 |
-| **측정점 교집합** | 별량 코드매핑 AND 태그 설명에 측정어 |
-| **태그 마스터** | 시계열이면 SELECT 대상. 식별은 PK+명칭/설명/별칭. 주소·경로·산출·사이트·상위 코드는 식별에서 제외. JOIN 키는 ON만 |
-| **기간 바인딩** | `YYYYMM` LIKE, `YYYYMMDD`/`YYYYMMDDHH` BETWEEN |
-| **범위** | `/data_decision` meta_version 1.0. Metadata Store 스키마·값매핑 미변경 |
-
-관련 테스트: `tests/test_engine_contracts.py` · `tests/test_store_first.py` · `tests/test_time_grain.py`
-
-## 이전 작업 요약 (2026-08-11)
-
-| 항목 | 내용 |
-| --- | --- |
-| **VM 매칭** | `t2s_value_mappings` 공백 무시(`탁 도`↔`탁도`) + Hangul 단독 멘션 경계 보정 |
-| **metric→필터** | `measurement.metric`이 Store VM에 매칭될 때만 필수 필터로 승격(표명 하드코딩 없음) |
-| **FK 필터 전파** | 해소된 EQ 필터를 승인 `t2s_fk_constraints` **1 hop**으로 plan/bridge 테이블에 복사(코드표→키 표) |
-| **역할 보강** | metric이 있으면 태그 마스터 역할 보강 조건 완화 |
-| **검증** | `화성정수장 평균 탁도` → `SUJ_CODE=617`·`BR_CODE=TB`·`RDITAG` 전파 후 `/query_execute` AVG 성공 |
-| **범위** | RWIS 전용 강바인드 금지. SoT=Store VM·승인 FK. 포맷/unit/facility·산출식은 비범위(플랫폼 값 전파·후속) |
-
-관련 테스트: `tests/test_filter_propagation.py`
-
-## 이전 작업 요약 (2026-08-08)
-
-| 항목 | 내용 |
-| --- | --- |
-| **모듈 분리** | `decision_postgres` · `metadata_repository` · legacy `decision_service`를 패키지/디렉터리로 분할(임포트 경로 정리, 동작 계약 동일) |
-| **KT 피드백 라이브 검증** | Store PUBLISH 후 `/health`·`/data_decision`(충청정수장 탁도…)·`/query_execute`·410 폐기 경로 점검. 응답 슬롯·`resolved_entities`는 **Metadata Store 승인 값매핑·FK 품질**에 의존 (시드/짧은 말 단독 SoT 아님) |
-| **범위** | 본 사이클에서 KT 필드를 robo에 하드코딩하지 않음. Alias·측정 메타 전파는 플랫폼 VALUE_MAPPING/PROJECT 후속 |
-
-## 이전 작업 요약 (2026-08-06)
-
-| 항목 | 내용 |
-| --- | --- |
-| **ADR-002 Wave 2** | `/semantic_decision` → 항상 **410** (`SEMANTIC_DECISION_GONE`). V2_PG_DSN / Semantic View 배선 제거 |
-| **artifact 경로** | `/query_execute`에 `artifact_id` 지정 시 **410** (`SEMANTIC_ARTIFACT_GONE`) |
-| **경로 정리** | `POST /query/execute` → **`POST /query_execute`**. 구경로 `/query/execute`는 **410**. stub `POST /query` **제거** |
-| **OpenAPI** | tag 순서 `decision` → `query` → `meta`; `decision-v2`는 schema 비노출(`include_in_schema=False`) |
-| **Store 정합** | Metadata Store platform-only activation·Serving KEEP 6표와 맞춤. `/data_decision` Request 계약 무변경 |
-| **스모크** | `tests/smoke_data_decision_only.py` — Serving DoD 차단 게이트 |
+질문 ID·물리 표명·TAGSN을 코드에 하드코딩하지 않는다. 기간이 필요한 측정 질의는 기간이 없으면 SQL을 만들지 않는다.
 
 ## `/data_decision`
 
@@ -147,7 +55,7 @@ resolve(코드) → anchor(키 표) → Fact 선택 → **승인 FK** path → `
 
 - `query_analysis`: 요청 원문, `goal`, 측정값, `schema_roles`, filter 요구사항
 - `candidates`: 테이블 키·`table_name_kr`·`table_description`과 관련 컬럼
-- `query_plan`: 필수 테이블, bridge, join path, filter, aggregation
+- `query_plan`: 필수 테이블, bridge, join path, filter, aggregation(`function` / `tag_combine` / `tags[]`)
 - `join_groups`: SQL 생성 시 사용할 join 조건 후보
 - `execution_context`: 실행 backend, dialect, catalog/schema 및 식별자 규칙
 - `resolved_entities`: Store 값사전으로 확인된 entity
@@ -155,7 +63,7 @@ resolve(코드) → anchor(키 표) → Fact 선택 → **승인 FK** path → `
 LLM 의미 분해가 실패하면 `query_analysis.status=degraded`와 `reason`만 반환한다.
 검색 결과를 근거 없이 확장하지 않는다.
 
-### 내용 품질 가드 (스키마 불변, 2026-07-31)
+### 내용 품질 가드
 
 `/data_decision` 경로·응답 키는 유지하고, 내부 선별·매칭만 보강합니다.
 

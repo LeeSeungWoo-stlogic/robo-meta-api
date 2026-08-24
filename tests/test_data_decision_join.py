@@ -55,7 +55,6 @@ def _summarize(name: str, body: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "query_name": name,
         "target": body.get("target"),
-        "confidence": body.get("confidence"),
         "candidates": len(cands),
         "candidate_tables": [
             f"{c.get('schema_name')}.{c.get('table_name')}" for c in cands[:5]

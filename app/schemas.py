@@ -3,7 +3,7 @@
 v0.6 변경 요약:
 - 응답에 `meta_version` 동봉
 - /data_decision: candidate별 `target_class`/`subject_area`/`matched_columns`,
-  최상위 `secondary_targets`/`join_groups` 추가
+  최상위 `join_groups` 추가
 - /meta/table: `table_info.datasource`/`lineage_brief`/`ontology_anchors`,
   `columns[].code_lookup`/`term_mapping`/`value_examples` 추가
 - 신규 enum: `target_class`, `recommended_strategy`, `bridge_via`
@@ -399,6 +399,16 @@ class PlannedFilter(BaseModel):
     confidence: float = 0.0
 
 
+class PlanAggregationTag(BaseModel):
+    """tagsn 확정 뒤에만 채운다. unit은 unit_desc 표시값."""
+
+    tagsn: str
+    data_process: Optional[str] = None
+    apply: Optional[str] = None
+    unit: Optional[str] = None
+    source_column: Optional[str] = None
+
+
 class PlanAggregation(BaseModel):
     """Optional aggregation contract. Missing store facts stay null. LLM must not fill."""
 
@@ -410,6 +420,7 @@ class PlanAggregation(BaseModel):
     time_scope: Optional[str] = None
     data_as_of: Optional[str] = None
     tag_combine: Optional[str] = None
+    tags: List[PlanAggregationTag] = Field(default_factory=list)
 
 
 class CandidateEvidence(BaseModel):
@@ -462,7 +473,6 @@ class MatchedColumn(BaseModel):
                          (t2s_columns.analyzed_description or .description).
     """
     column_name: str
-    score: float = 0.0
     constraints: List[ColumnConstraint] = Field(default_factory=list)
     column_name_kr: Optional[str] = None
     data_type: Optional[str] = None
@@ -480,7 +490,6 @@ class MatchedColumn(BaseModel):
 
 
 class DecisionCandidate(TableKey):
-    score: float
     source: Literal["vector", "schema_rule", "name_rule"] = "vector"
 
     # v0.6 신규 (빈 값 default)
@@ -521,7 +530,6 @@ class DecisionCandidate(TableKey):
                     "engine": "postgresql",
                     "schema_name": "rwis",
                     "table_name": "fct_measure_hour",
-                    "score": 0.82,
                     "source": "vector",
                     "target_class": "unknown",
                     "subject_area": "unknown",
@@ -621,8 +629,6 @@ class GlossaryRoute(BaseModel):
 class DecisionResponse(BaseModel):
     meta_version: str = META_VERSION
     target: TargetTop
-    secondary_targets: List[Literal["analytic", "source", "collect"]] = Field(default_factory=list)
-    confidence: float
     candidates: List[DecisionCandidate]
     join_groups: List[JoinGroup] = Field(default_factory=list)
     threshold_used: dict

@@ -359,7 +359,6 @@ def _candidate(
         matched.append(
             MatchedColumn(
                 column_name=str(column["name"]),
-                score=float(column.get("score") or 0.0),
                 constraints=constraints,
                 column_name_kr=_column_name_kr(column, metadata),
                 data_type=_serving_data_type(column, metadata),
@@ -385,7 +384,6 @@ def _candidate(
         engine=str(table.get("engine") or "") or None,
         schema_name=str(table.get("schema_name") or ""),
         table_name=str(table.get("original_name") or table.get("name") or ""),
-        score=float(table.get("score") or 0.0),
         source=source,
         target_class=_target_class(subject_area),
         subject_area=subject_area,

@@ -453,6 +453,58 @@ def usage_keep_rows(rows: list[dict[str, str]], *, query: str, asked: str) -> li
     return kept
 
 
+def apply_for_row(
+    row: dict[str, str],
+    *,
+    function: str,
+    tag_combine: str | None,
+) -> str | None:
+    tagsn = _norm_tagsn(row.get("tagsn")) or ""
+    letter = str(row.get("letter") or "").strip().upper()
+    for part in str(tag_combine or "").split(";"):
+        bits = [item.strip() for item in part.split(":") if item.strip()]
+        if len(bits) >= 3 and bits[0] == tagsn:
+            return bits[2]
+    kind = kind_for_letter(letter)
+    if function == FN_USAGE:
+        if kind == KIND_GAUGE:
+            return FN_DELTA
+        if kind == KIND_DELTA:
+            return FN_IDENTITY
+    if function in {FN_DELTA, FN_IDENTITY, FN_NO_SQL}:
+        return function
+    return None
+
+
+def aggregation_tags(
+    rows: list[dict[str, str]] | None,
+    *,
+    function: str,
+    tag_combine: str | None,
+) -> list[dict[str, str | None]]:
+    """Per-tagsn display after bind. unit is unit_desc. Skip rows without tagsn."""
+
+    out: list[dict[str, str | None]] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        tagsn = _norm_tagsn(row.get("tagsn"))
+        if not tagsn or tagsn in seen:
+            continue
+        seen.add(tagsn)
+        letter = str(row.get("letter") or "").strip().upper() or None
+        unit = str(row.get("unit_desc") or "").strip() or None
+        out.append(
+            {
+                "tagsn": tagsn,
+                "data_process": letter,
+                "apply": apply_for_row(row, function=function, tag_combine=tag_combine),
+                "unit": unit,
+                "source_column": "unit_desc",
+            }
+        )
+    return out
+
+
 def refine_function(
     *,
     asked: str,

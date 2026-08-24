@@ -1243,8 +1243,6 @@ async def decide(
     ]
     return DecisionResponse(
         target=_top_target(candidates),
-        secondary_targets=[],
-        confidence=1.0 if candidates else 0.0,
         candidates=candidates,
         join_groups=join_groups,
         threshold_used={

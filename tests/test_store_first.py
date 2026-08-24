@@ -239,6 +239,54 @@ class StoreFirstUnitTests(unittest.TestCase):
         assert spec is not None
         self.assertEqual(spec.function, "DELTA")
         self.assertEqual(spec.tag_combine, "period_end_minus_prev")
+        self.assertEqual(spec.tags, [])
+
+    def test_aggregation_contract_usage_emits_tags(self) -> None:
+        spec = aggregation_contract(
+            analysis=QueryAnalysis(
+                status="complete",
+                procedure="lookup",
+                measurement=MeasurementRequirement(),
+            ),
+            facts=[{"id": 1, "original_name": "vw_measure_day", "schema_name": "rwis_mart"}],
+            columns_by_id={
+                1: [
+                    {
+                        "name": "measure_value",
+                        "dtype": "numeric",
+                        "metadata": {"column_name_kr": "값"},
+                    }
+                ]
+            },
+            period=parse_korean_period("어제"),
+            query="구천 원수유량 어제 사용량",
+            process_rows=[
+                {"letter": "A", "unit_desc": "㎥", "tagsn": "136"},
+                {"letter": "D", "unit_desc": "㎥", "tagsn": "137"},
+            ],
+            grain="day",
+        )
+        assert spec is not None
+        self.assertEqual(spec.function, "USAGE")
+        self.assertEqual(
+            [item.model_dump() for item in spec.tags],
+            [
+                {
+                    "tagsn": "136",
+                    "data_process": "A",
+                    "apply": "DELTA",
+                    "unit": "㎥",
+                    "source_column": "unit_desc",
+                },
+                {
+                    "tagsn": "137",
+                    "data_process": "D",
+                    "apply": "IDENTITY",
+                    "unit": "㎥",
+                    "source_column": "unit_desc",
+                },
+            ],
+        )
 
     def test_aggregation_contract_instant_sum_is_no_sql(self) -> None:
         spec = aggregation_contract(

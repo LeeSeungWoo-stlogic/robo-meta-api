@@ -35,7 +35,7 @@ from ..meaning_slots import (
     time_role_from_procedure,
 )
 from .period import ParsedPeriod, parse_korean_period, week_mention
-from .data_process import FN_IDENTITY, refine_function
+from .data_process import FN_IDENTITY, aggregation_tags, refine_function
 from .table_type import list_table_type
 
 _FACT_LIKE = frozenset({"Fact", "Raw"})
@@ -103,7 +103,6 @@ def period_required_response(
 ) -> DecisionResponse:
     return DecisionResponse(
         target="none",
-        confidence=0.0,
         candidates=[],
         threshold_used={},
         resolution_status="complete",
@@ -124,7 +123,6 @@ def range_unresolved_response(
 ) -> DecisionResponse:
     return DecisionResponse(
         target="none",
-        confidence=0.0,
         candidates=[],
         threshold_used={},
         resolution_status="complete",
@@ -146,7 +144,6 @@ def fact_unresolved_response(
 ) -> DecisionResponse:
     return DecisionResponse(
         target="none",
-        confidence=0.0,
         candidates=list(candidates or []),
         threshold_used={},
         resolution_status="complete",
@@ -163,7 +160,6 @@ def fact_unresolved_response(
 def empty_meta_response(analysis: QueryAnalysis | None = None) -> DecisionResponse:
     return DecisionResponse(
         target="none",
-        confidence=0.0,
         candidates=[],
         threshold_used={},
         resolution_status="failed",
@@ -1225,6 +1221,11 @@ def aggregation_contract(
         weight_column=weight_column,
         time_scope=_time_scope_text(period) if period is not None else None,
         tag_combine=tag_combine,
+        tags=aggregation_tags(
+            process_rows,
+            function=function,
+            tag_combine=tag_combine,
+        ),
     )
 
 

@@ -298,7 +298,6 @@ async def _attach_matched_columns(
         out.setdefault(key, []).append(
             MatchedColumn(
                 column_name=c.name,
-                score=float(c.score or 0.0),
                 constraints=[],
                 column_name_kr=None,
                 data_type=c.dtype or None,
@@ -395,14 +394,13 @@ def _classify_target(cands: List[DecisionCandidate]) -> Tuple[str, float]:
     for c in cands:
         a = c.subject_area
         areas[a] = areas.get(a, 0) + 1
-    top = cands[0]
     agg_n = areas.get("agg", 0)
     raw_n = areas.get("raw", 0) + areas.get("master", 0) + areas.get("code", 0)
-    if agg_n >= 1 and top.score >= settings.decision_analytic_threshold:
-        return "analytic", top.score
-    if raw_n >= 1 and top.score >= settings.decision_source_threshold:
-        return "source", top.score
-    return "collect", top.score
+    if agg_n >= 1:
+        return "analytic", 0.0
+    if raw_n >= 1:
+        return "source", 0.0
+    return "collect", 0.0
 
 
 def _collect_secondary(top_target: str, cands: List[DecisionCandidate]) -> List[str]:
@@ -726,7 +724,6 @@ async def decide(
                 db=db_label,
                 schema_name=schema_name,
                 table_name=t.name or "",
-                score=float(t.score),
                 source="vector",
                 target_class=_subject_area_to_target_class(area),
                 subject_area=area,
@@ -763,9 +760,8 @@ async def decide(
     elif not settings.decision_match_columns:
         columns_mode = "disabled_env"
 
-    # 6) target / secondary / confidence
-    target, conf = _classify_target(cands)
-    secondary = _collect_secondary(target, cands)
+    # 6) target
+    target, _ = _classify_target(cands)
 
     # 7) join_groups — 이미 수집한 bridges_all / cand_map 재사용
     if table_fqns and bridges_all:
@@ -807,7 +803,7 @@ async def decide(
                     f"{gb.from_} -[{gb.via}]-> {gb.to}" for gb in group_bridges
                 )
             )
-            group_score = max(m.score for m in members) if members else 0.0
+            group_score = 0.0
 
             join_groups.append(
                 JoinGroup(
@@ -862,8 +858,6 @@ async def decide(
 
     return DecisionResponse(
         target=target,
-        secondary_targets=secondary,
-        confidence=conf,
         candidates=cands,
         join_groups=join_groups,
         threshold_used=threshold_used,
