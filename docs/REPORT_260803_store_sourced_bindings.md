@@ -2,6 +2,9 @@
 
 기준일: 2026-08. K-AIR-metadata-platform Store를 소스 실행 정본으로 고정.
 
+> **이후 계약 (PLAN 260805):** 경로는 `/query_execute`. `execution_context`는 Optional(sql-only).
+> 아래 To-Be의 “필수”·`/query/execute`는 이 보고 시점 문구이며 현행 스키마와 다르다.
+
 ## 요약
 
 | 영역 | As-Is | To-Be |

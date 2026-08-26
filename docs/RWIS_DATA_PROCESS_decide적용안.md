@@ -1,6 +1,10 @@
 # RWIS `data_process` decide 적용안
 
-근거: [RWIS_DATA_PROCESS.md](RWIS_DATA_PROCESS.md). 코드 구현 전 방향이다.
+근거: [RWIS_DATA_PROCESS.md](RWIS_DATA_PROCESS.md).
+
+> **상태 (2026-08-26):** 초안 당시에는 구현 전이었으나 `app/services/decision_postgres/data_process.py`와
+> `/data_decision` `query_plan.aggregation.tags[]`가 반영되어 있다. 방향 문서로 읽고,
+> 현재 동작은 README·코드를 따른다.
 
 ## 목표
 

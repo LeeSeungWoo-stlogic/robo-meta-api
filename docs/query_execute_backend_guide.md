@@ -1,5 +1,11 @@
 # `/query/execute` 백엔드 교체 가이드
 
+> **현행 아님 (2026-08-26).** 이 문서는 v0.7 시점의 교체 초안이다.
+> 지금 실행 경로는 `POST /query_execute`(포트 **8100**)이고, 백엔드는
+> Store `t2s_datasources` binding + MindsDB HTTP이다. 원천 `SOURCE_PG_*`로
+> SELECT를 대행하지 않는다. 구경로 `POST /query/execute`는 **410**.
+> 기동·수식은 [`../RUNBOOK.md`](../RUNBOOK.md)와 [`../README.md`](../README.md).
+
 `/query/execute` 엔드포인트는 AI가 생성한 SELECT SQL을 실제 데이터베이스에 대행 실행합니다.  
 기본 백엔드는 **PostgreSQL(psycopg)**이며, 이 문서는 **MindsDB 또는 다른 SQL 인터페이스로 교체**하는 방법을 안내합니다.
 

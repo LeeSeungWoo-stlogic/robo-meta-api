@@ -1,5 +1,9 @@
 # KAIR ↔ robo-meta-api 그래프 Contract (초안)
 
+> **현행 아님 (2026-08-26).** 이 초안은 Neo4j 적재·포트 **8099**·`/query/execute` 기준이다.
+> 지금 메타 SoT는 K-AIR Store `t2s_*`(포트 **8100**, `POST /query_execute`)이다.
+> 기동은 [`../RUNBOOK.md`](../RUNBOOK.md).
+
 > 버전: 0.1 (draft)  
 > 작성일: 2026-06-13  
 > 적용 대상: robo-meta-api v3 (`8099`)  

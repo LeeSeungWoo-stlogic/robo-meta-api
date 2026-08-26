@@ -4,6 +4,19 @@ robo-meta-api 업데이트 이력입니다. 서비스 설명·기능 안내는 [
 
 ---
 
+## 2026-08-26
+
+### 문서 정본화
+
+기동 절차가 Neo4j/`robo-postgres`/`.env.rwis-test.example`을 정본처럼 쓰던 드리프트를 고쳤다.
+
+- `RUNBOOK.md`·`README.md`: Store YAML + `METADATA_PG_PASSWORD` + 네트워크 `kair-metadata-platform_control-plane`, 포트 **8100**
+- health는 Store 소스 목록 조회. 설정만 확인이 아님
+- smoke 기준에 `suggested_probes` 없음
+- `docs/query_execute_backend_guide.md`·`docs/kair_robo_meta_api_graph_contract.md`는 현행 아님 배너 (8097/8099, `/query/execute`, Neo4j)
+
+코드 변경 없음. 문서만.
+
 ## 2026-08-24
 
 ### `/data_decision` 응답 슬롯

@@ -1,4 +1,6 @@
-# PLAN 260805 — /query/execute SQL-only + 소스표시명.스키마.테이블
+# PLAN 260805 — /query_execute SQL-only + 소스표시명.스키마.테이블
+
+> 제목의 구경로 `/query/execute`는 구현 후 `/query_execute`로 고정됐다. 구경로는 410.
 
 | 항목 | 내용 |
 |------|------|

@@ -1,6 +1,7 @@
 # join_groups Bridge 소비 규칙 (AI Agent용)
 
-robo-meta-api v3 `/data_decision` 응답의 `join_groups`를 NLQ/SQL Agent가 사용할 때 참고할 규칙.
+robo-meta-api 1.0 `/data_decision` 응답의 `join_groups`를 NLQ/SQL Agent가 사용할 때 참고할 규칙.
+현행 Serving은 승인 FK path를 우선한다. ontology/convention만 있는 JOIN은 채택하지 않는다.
 
 ## via 우선순위
 

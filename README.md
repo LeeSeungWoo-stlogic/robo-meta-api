@@ -142,7 +142,7 @@ Metadata Store Serving 카탈로그를 질의 없이 조회합니다. 원천 DB�
 
 | Method | Path | 역할 |
 |---|---|---|
-| `GET` | `/health` | Metadata Store 및 execution backend 설정 확인 |
+| `GET` | `/health` | Store 소스 목록 조회 가능 여부(`t2sql_configured` 포함). Store 조회 실패 시 503 |
 | `POST` | `/data_decision` | 자연어 질의 분석과 Metadata Context 계획 |
 | `POST` | `/t2sql` | 자연어 → 확정 SQL + used 메타 (벽시계는 `t2sql.total_timeout_seconds`, 기본 60초) |
 | `POST` | `/query_execute` | 검증된 읽기 전용 SQL 실행 |
@@ -222,14 +222,21 @@ embedding endpoint와 분리할 수 있습니다.
 
 ```bash
 python -m pip install -r requirements.txt
+cp config/runtime-settings.example.yaml \
+   config/runtime-settings.docker.local.yaml
+export ROBO_RUNTIME_SETTINGS_FILE="$PWD/config/runtime-settings.docker.local.yaml"
 python -m app.main
 ```
 
-Docker:
+`ROBO_RUNTIME_SETTINGS_FILE`과 `.env`의 `METADATA_PG_PASSWORD`가 없으면 기동에 실패한다.
+상세는 [`RUNBOOK.md`](RUNBOOK.md).
+
+Docker (K-AIR Store가 떠 있고 `kair-metadata-platform_control-plane`이 있어야 함):
 
 ```bash
 cp .env.example .env
-# OPENAI_API_KEY 등 실제 비밀값 설정
+cp config/runtime-settings.example.yaml config/runtime-settings.docker.local.yaml
+# METADATA_PG_PASSWORD · OPENAI_API_KEY 등 실제 비밀값 설정
 docker compose up -d --build
 curl http://127.0.0.1:8100/health
 ```
@@ -256,7 +263,8 @@ python tests/smoke_data_decision_only.py
 ```
 
 현재 suite는 Store-sourced binding·YAML 소스 등록 금지·위조 context·dialect
-분리·audit·semantic 410 stub 검증을 포함해 **87** tests collected입니다.
+분리·audit·semantic 410 stub 검증을 포함한다. 수집 건수는 커밋마다 달라지므로
+`python -m pytest tests -q` 결과를 따른다.
 
 ## 알려진 이슈·한계
 
