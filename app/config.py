@@ -137,8 +137,8 @@ class Settings:
     meta_db_label: str = _env("META_DB_LABEL", "kwater_prod")
 
     # --- /query/execute 정책 (K-AIR 차용 query_runner 가 의존) ---
-    exec_default_timeout_s: int = int(_env("EXEC_DEFAULT_TIMEOUT_S", "10"))
-    exec_max_timeout_s: int = int(_env("EXEC_MAX_TIMEOUT_S", "30"))
+    exec_default_timeout_s: int = int(_env("EXEC_DEFAULT_TIMEOUT_S", "60"))
+    exec_max_timeout_s: int = int(_env("EXEC_MAX_TIMEOUT_S", "300"))
     exec_default_max_rows: int = int(_env("EXEC_DEFAULT_MAX_ROWS", "1000"))
     exec_max_rows_hard: int = int(_env("EXEC_MAX_ROWS_HARD", "10000"))
     exec_max_bytes: int = int(_env("EXEC_MAX_BYTES", str(10 * 1024 * 1024)))

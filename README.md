@@ -19,7 +19,7 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 
 | 항목 | 내용 |
 | --- | --- |
-| **`/meta/catalog`** | 서빙 중 연결·표·컬럼 구조만. 논리명·설명·`subject_area` 없음. `character varying(n)` → `varchar(n)` |
+| **`/meta/catalog`** | Serving 정본. 연결·표·컬럼·설명·논리명·`subject_area`·FK. `character varying(n)` → `varchar(n)` |
 | **테이블 키** | `source_name` → `db`(원천 database) → `engine` → `schema_name` → `table_name` |
 | **후보 표** | 한글 라벨 `table_name_kr`. 상세 `table_description` |
 | **후보 컬럼** | `column_description`. 타입은 catalog와 같이 `varchar(n)`. HTTP에 `score` 없음 |
@@ -67,6 +67,7 @@ LLM 의미 분해가 실패하면 `query_analysis.status=degraded`와 `reason`�
 
 `/data_decision` 경로·응답 키는 유지하고, 내부 선별·매칭만 보강합니다.
 
+- **한글 기간**: `최근`/`지난`+길이(사흘·일주일·한달 등), 위치(익월·내일·이번주 등). 시계는 KST(`Asia/Seoul`). 길이만 있으면 되묻는다. 표·컬럼명은 쓰지 않는다 (`app/services/decision_postgres/period.py`)
 - **Hangul mention**: value mapping에서 `정수`⊂`정수장` 같은 중간 글자 오탐을 차단하되, `충청`⊂`충청지역` 등 지명 접미사 복합어는 허용. 라벨 내부 공백(`탁 도`)은 질의 `탁도`와 매칭
 - **value mapping 승격**: 매핑된 테이블이 약한 vector score로 gap-prune 되지 않도록 score를 유지·승격
 - **차원 질의 랭킹**: 시설/개수·목록 질의에서 `hist`/`link` demote, `master` 우선
@@ -92,7 +93,7 @@ T2SQL 키를 넣지 않습니다. `/data_decision` Request/Response 타입을 �
 - client `execution_context`를 server-side Metadata Store binding과 재검증
   (`source_instance_id` 또는 SourceName 기반 해석 — YAML `source_bindings` 없음)
 - 활성·승인 metadata에서 table allowlist 재계산
-- timeout, 최대 행 수, 최대 응답 크기 제한
+- timeout, 최대 행 수, 최대 응답 크기 제한. 요청 `timeout_s` 스키마 상한 600. 기본 60·최댓값 300(`EXEC_DEFAULT_TIMEOUT_S` / `EXEC_MAX_TIMEOUT_S`). HTTP 대기는 `timeout_s + EXEC_ERROR_RETURN_GRACE_S`(기본 30초)로 MindsDB 오류 본문을 `db_error`로 돌려준다
 - resolved integration·parser dialect·실행 결과의 audit 기록
 
 운영 SQL 수식(권장): `` `SourceName`.`Schema`.`Table` ``
@@ -116,27 +117,30 @@ Metadata Store Serving 카탈로그를 질의 없이 조회합니다. 원천 DB�
 
 | Method | Path | 역할 |
 |---|---|---|
-| `POST` | `/meta/catalog` | 서빙 카탈로그 구조(연결·표·컬럼·PK/FK). 증강 메타 없음 |
-| `POST` | `/meta/batch` | Serving 테이블 목록(논리명·설명·`subject_area` 포함) |
-| `POST` | `/meta/table` | 테이블 정보 + 전체 컬럼 + **나가는** FK |
-| `POST` | `/meta/column` | 단일 컬럼. FK가 있으면 `code_lookup` |
-| `POST` | `/meta/ref` | 해당 테이블에서 나가는 FK |
+| `POST` | `/meta/catalog` | Serving 정본. 연결·표·컬럼·설명·논리명·`subject_area`·FK |
+| `POST` | `/meta/batch` | catalog 표 목록을 펼친 요약 |
+| `POST` | `/meta/table` | catalog에서 표 하나 |
+| `POST` | `/meta/column` | catalog에서 컬럼 하나 |
+| `POST` | `/meta/ref` | catalog의 나가는 FK 면 |
 
-슬롯:
+정본은 `/meta/catalog` 한 통이다. `/meta/table`·`/meta/column`은 같은 문서를 표·컬럼으로 자른 `CatalogResponse`다. `/meta/batch`와 `/meta/ref`도 catalog에서 파생한다. 별도 `/meta/source`·`/meta/schema`는 없다. 구분 키는 플랫폼 소스(등록 단위)다.
 
-- `table_name_kr` / `column_name_kr`: 승인 한글 논리명. 설명 장문을 넣지 않음
-- `table_comment` / `column_comment`: Store 원본 설명
-- `description`: 분석 설명 우선, 없으면 원본 설명
-- `subject_area` / `table_type` / `default_date_column`: `/data_decision` 후보와 동일 헬퍼
-- `value_examples` · `unit` · `format_pattern` · `has_code`: 컬럼 `metadata` 및 승인 값사전
-- `code_lookup`: 승인 FK가 있을 때만 `via=fk`
+표·컬럼 슬롯:
+
+- `comment`: Store 원본 DDL/카탈로그 설명
+- `description`: 검수·서빙 설명. 분석 설명 우선, 없으면 `comment`
+- `logical_name`: 승인 한글 논리명. SQL 식별자가 아님. batch의 `table_name_kr`과 같음
+- `subject_area`: `/data_decision` 후보와 동일 헬퍼
+- 스키마는 소스의 `source_schema`만. 표에 `schema_name`을 반복하지 않음
+- 컬럼: `column_name` / `data_type` / `nullable` / `primary_key`
+- 나가는 FK: `references` (`constraint_name`·`position` 포함)
+- 들어오는 FK: `referenced_by`
 
 `/meta/catalog`는 질의 없이 Store Serving 행만 본다. `source_instance_id`·MindsDB 식별자·시크릿은 없다.
-컬럼은 `column_name` / `data_type` / `nullable` / `primary_key`이고, 나가는 FK가 있을 때만 `references`를 붙인다.
 `character varying(n)`은 Store에 길이가 있으면 `varchar(n)`으로 표기한다. 길이가 없으면 창작하지 않는다.
 
-`/meta/ref`는 `RDITAG_TB`처럼 마스터를 요청하면 그 표에서 **나가는** 관계만 줍니다.
-팩트 `TAGSN → RDITAG_TB` 같은 들어오는 관계는 팩트 표 이름으로 조회합니다.
+`/meta/ref`는 요청 표에서 **나가는** 관계를 catalog `references`에서 꺼냅니다.
+들어오는 관계는 대상 표 컬럼의 `referenced_by`로 본다.
 
 ## API
 

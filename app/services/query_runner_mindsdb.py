@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,44 @@ def _serialize(value: Any) -> Any:
         return value.isoformat()
     except Exception:
         return str(value)
+
+
+_ERROR_RETURN_GRACE_MAX = 120
+
+
+def _error_return_grace_seconds() -> int:
+    """MindsDB가 오류 JSON을 늦게 돌려줄 때 httpx가 먼저 끊지 않게 하는 여유."""
+
+    raw = os.environ.get("EXEC_ERROR_RETURN_GRACE_S", "30")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 30
+    return max(0, min(value, _ERROR_RETURN_GRACE_MAX))
+
+
+def _mindsdb_payload(response: httpx.Response) -> dict[str, Any]:
+    try:
+        body = response.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _mindsdb_error_text(
+    body: dict[str, Any],
+    response: httpx.Response | None = None,
+) -> str:
+    for key in ("error_message", "error", "message"):
+        value = body.get(key)
+        if value:
+            return str(value)
+    text = (response.text if response is not None else "").strip()
+    if text:
+        return text[:2000]
+    if response is not None:
+        return f"MindsDB HTTP {response.status_code}"
+    return "MindsDB error"
 
 
 def _append_audit(entry: dict[str, Any]) -> None:
@@ -187,22 +226,18 @@ async def execute(
     rows: list[list[Any]] = []
     truncated = False
     total_bytes = 0
+    http_timeout = applied_timeout + _error_return_grace_seconds()
 
     try:
-        async with httpx.AsyncClient(timeout=applied_timeout) as client:
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
             response = await client.post(
                 runtime.execution.sql_api_url,
                 json={"query": executable_sql},
             )
-            response.raise_for_status()
-            body = response.json()
-        if body.get("type") != "table":
+        body = _mindsdb_payload(response)
+        if response.status_code >= 400 or body.get("type") != "table":
             status = "db_error"
-            error = str(
-                body.get("error_message")
-                or body.get("error")
-                or f"Unexpected MindsDB response type: {body.get('type')}"
-            )
+            error = _mindsdb_error_text(body, response)
         else:
             columns = [str(item) for item in body.get("column_names") or []]
             for raw_row in body.get("data") or []:

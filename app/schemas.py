@@ -220,12 +220,14 @@ class MetaTableResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# /meta/catalog — Serving 구조 덤프 (증강 메타 없음)
+# /meta/catalog — Serving 정본 (표·컬럼 설명·FK 포함)
 # ---------------------------------------------------------------------------
 class CatalogColumnReference(BaseModel):
     schema_name: str
     table_name: str
     column_name: str
+    constraint_name: Optional[str] = None
+    position: int = 1
 
 
 class CatalogColumn(BaseModel):
@@ -233,12 +235,33 @@ class CatalogColumn(BaseModel):
     data_type: Optional[str] = None
     nullable: bool = True
     primary_key: bool = False
+    comment: Optional[str] = Field(
+        default=None,
+        description="원본 DDL/카탈로그 컬럼 설명",
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="검수·서빙 설명. 분석 설명 우선, 없으면 comment",
+    )
     references: Optional[CatalogColumnReference] = None
+    referenced_by: Optional[List[CatalogColumnReference]] = None
 
 
 class CatalogTable(BaseModel):
-    schema_name: str
     table_name: str
+    logical_name: Optional[str] = Field(
+        default=None,
+        description="승인 한글 논리명. SQL 식별자가 아님.",
+    )
+    comment: Optional[str] = Field(
+        default=None,
+        description="원본 DDL/카탈로그 테이블 설명",
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="검수·서빙 설명. 분석 설명 우선, 없으면 comment",
+    )
+    subject_area: SubjectArea = "unknown"
     columns: List[CatalogColumn] = Field(default_factory=list)
 
 
@@ -765,9 +788,13 @@ class QueryExecuteRequest(BaseModel):
         ),
     )
     timeout_s: Optional[int] = Field(
-        default=None, ge=1, le=120,
-        description="서버 statement_timeout (기본 10s, 최대 120s)",
-        examples=[10],
+        default=None, ge=1, le=600,
+        description=(
+            "서버 statement_timeout 요청값. "
+            "기본·상한은 execution YAML과 EXEC_DEFAULT_TIMEOUT_S / "
+            "EXEC_MAX_TIMEOUT_S. 요청이 상한을 넘으면 상한으로 자른다."
+        ),
+        examples=[60],
     )
     max_rows: Optional[int] = Field(
         default=None, ge=1, le=100000,

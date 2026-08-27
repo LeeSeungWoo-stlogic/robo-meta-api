@@ -26,6 +26,7 @@ services:
       V2_EMBEDDING_DIMENSIONS: "16"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
+      TZ: "Asia/Seoul"
       SOURCE_PG_HOST: "${SOURCE_PG_HOST:-host.docker.internal}"
       SOURCE_PG_PORT: "${SOURCE_PG_PORT:-5432}"
       SOURCE_PG_DB: "${SOURCE_PG_DB:-rwis}"

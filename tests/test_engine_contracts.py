@@ -17,7 +17,12 @@ from app.services.decision_postgres.aliases import (
     prefer_region_hq_mappings,
 )
 from app.services.decision_postgres.grain import resolve_time_grain
-from app.services.decision_postgres.period import parse_korean_period, week_mention
+from app.services.decision_postgres.period import (
+    decision_today,
+    parse_korean_period,
+    parse_period_from_query,
+    week_mention,
+)
 from app.services.decision_postgres.store_first import (
     drop_unjoinable_catalog_ids,
     assemble_anchor_join_paths,
@@ -597,12 +602,51 @@ class WeekPeriodTests(unittest.TestCase):
         self.assertEqual(last.year, 2025)
         self.assertEqual(this.year, 2026)
         self.assertIsNone(parse_korean_period("최근", today=today))
+        self.assertIsNone(parse_korean_period("나흘", today=today))
+        self.assertIsNone(parse_korean_period("일주일", today=today))
         span = parse_korean_period("최근 3개월", today=today)
         self.assertIsNotNone(span)
         assert span is not None
         self.assertEqual(span.week_start, date(2026, 5, 19))
         self.assertEqual(span.week_end, today)
         self.assertEqual(resolve_time_role(procedure=""), "none")
+
+    def test_korean_duration_and_position_words(self) -> None:
+        today = date(2026, 8, 27)
+        week = parse_korean_period("최근 일주일간 시간별 탁도 평균", today=today)
+        month = parse_korean_period("최근 한 달 평균", today=today)
+        three = parse_korean_period("최근 사흘", today=today)
+        four = parse_korean_period("지난 나흘", today=today)
+        nxt = parse_korean_period("익월 탁도", today=today)
+        tomorrow = parse_korean_period("내일", today=today)
+        this_week = parse_korean_period("이번주", today=today)
+        self.assertIsNotNone(week)
+        self.assertIsNotNone(month)
+        self.assertIsNotNone(three)
+        self.assertIsNotNone(four)
+        self.assertIsNotNone(nxt)
+        self.assertIsNotNone(tomorrow)
+        self.assertIsNotNone(this_week)
+        assert week is not None and month is not None
+        assert three is not None and four is not None
+        assert nxt is not None and tomorrow is not None
+        assert this_week is not None
+        self.assertEqual(week.week_start, date(2026, 8, 20))
+        self.assertEqual(week.week_end, today)
+        self.assertEqual(month.week_start, date(2026, 7, 27))
+        self.assertEqual(three.week_start, date(2026, 8, 24))
+        self.assertEqual(four.week_start, date(2026, 8, 23))
+        self.assertEqual((nxt.year, nxt.month), (2026, 9))
+        self.assertEqual(tomorrow.day, 28)
+        self.assertEqual(this_week.week_start, date(2026, 8, 24))
+        self.assertEqual(this_week.week_end, date(2026, 8, 30))
+        fallback = parse_period_from_query(
+            "최근 일주일간 시간별 탁도 평균",
+            "최근",
+            today=today,
+        )
+        self.assertEqual(fallback, week)
+        self.assertEqual(decision_today(), decision_today())
 
     def test_join_disambiguates_one_fact(self) -> None:
         edges = [

@@ -16,6 +16,7 @@ openai>=2.0,<3.0
 
 # --- env ---
 python-dotenv>=1.0,<2.0
+tzdata>=2024.1
 
 # --- semantic view v2 (JWT 인증·consumer contract 시험) ---
 PyJWT[crypto]>=2.9,<3.0

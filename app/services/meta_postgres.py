@@ -12,7 +12,6 @@ from ..schemas import (
     CodeLookup,
     ColumnMeta,
     DataSourceInfo,
-    MetaTableResponse,
     RefMeta,
     SubjectArea,
     TableInfo,
@@ -23,6 +22,7 @@ from .decision_postgres.helpers import (
     _column_name_kr,
     _format_pattern,
     _metadata_dict,
+    _optional_int,
     _optional_string,
     _pk_ordinal,
     _resolve_subject_area,
@@ -201,15 +201,111 @@ def _batch_item(row: dict[str, Any]) -> BatchItem:
     )
 
 
-async def _code_columns_for_table(
-    repository: PostgresMetadataRepository,
-    table: dict[str, Any],
-) -> set[str]:
-    table_id = table.get("id")
-    if table_id is None:
-        return set()
-    found = await repository.find_value_mapping_code_columns([int(table_id)])
-    return found.get(int(table_id), set())
+def _norm_key(value: str | None) -> str:
+    return str(value or "").strip().casefold()
+
+
+def catalog_has_tables(catalog: CatalogResponse) -> bool:
+    return any(source.tables for source in catalog.sources)
+
+
+def catalog_has_columns(catalog: CatalogResponse) -> bool:
+    return any(
+        column
+        for source in catalog.sources
+        for table in source.tables
+        for column in table.columns
+    )
+
+
+def slice_serving_catalog(
+    catalog: CatalogResponse,
+    *,
+    source_name: str | None = None,
+    engine: str | None = None,
+    schema_name: str,
+    table_name: str,
+    column_name: str | None = None,
+    refs_only: bool = False,
+) -> CatalogResponse:
+    source_key = _norm_key(source_name)
+    engine_key = _norm_key(engine)
+    schema_key = _norm_key(schema_name)
+    table_key = _norm_key(table_name)
+    column_key = _norm_key(column_name)
+    sources: list[CatalogSource] = []
+    for source in catalog.sources:
+        if source_key and _norm_key(source.source_name) != source_key:
+            continue
+        if engine_key and _norm_key(source.engine) != engine_key:
+            continue
+        tables: list[CatalogTable] = []
+        if schema_key and _norm_key(source.source_schema) != schema_key:
+            continue
+        for table in source.tables:
+            if _norm_key(table.table_name) != table_key:
+                continue
+            columns = list(table.columns)
+            if column_key:
+                columns = [
+                    column
+                    for column in columns
+                    if _norm_key(column.column_name) == column_key
+                ]
+            if refs_only:
+                columns = [
+                    column
+                    for column in columns
+                    if column.references is not None or column.referenced_by
+                ]
+            if column_key and not columns:
+                continue
+            tables.append(table.model_copy(update={"columns": columns}))
+        if tables:
+            sources.append(source.model_copy(update={"tables": tables}))
+    return CatalogResponse(
+        serving_status=catalog.serving_status,
+        sources=sources,
+    )
+
+
+def batch_items_from_catalog(catalog: CatalogResponse) -> list[BatchItem]:
+    items: list[BatchItem] = []
+    for source in catalog.sources:
+        for table in source.tables:
+            items.append(
+                BatchItem(
+                    source_name=source.source_name or None,
+                    engine=source.engine or None,
+                    schema_name=source.source_schema or "",
+                    table_name=table.table_name,
+                    table_name_kr=table.logical_name,
+                    table_comment=table.comment,
+                    description=table.description,
+                    subject_area=table.subject_area,
+                )
+            )
+    return items
+
+
+def refs_from_catalog(catalog: CatalogResponse) -> list[RefMeta]:
+    refs: list[RefMeta] = []
+    for source in catalog.sources:
+        for table in source.tables:
+            for column in table.columns:
+                ref = column.references
+                if ref is None:
+                    continue
+                refs.append(
+                    RefMeta(
+                        column_name=column.column_name,
+                        position=ref.position,
+                        ref_schema_name=ref.schema_name,
+                        ref_table_name=ref.table_name,
+                        ref_column_name=ref.column_name,
+                    )
+                )
+    return refs
 
 
 async def list_batch(
@@ -218,85 +314,75 @@ async def list_batch(
     batch_date: str | None,
 ) -> list[BatchItem]:
     _ = batch_date
-    rows = await repository.list_tables()
-    return [_batch_item(row) for row in rows]
+    catalog = await get_serving_catalog(repository)
+    return batch_items_from_catalog(catalog)
 
 
 async def get_table(
     repository: PostgresMetadataRepository,
     *,
-    db: str | None,
+    source_name: str | None = None,
+    engine: str | None = None,
+    db: str | None = None,
     schema_name: str,
     table_name: str,
-) -> MetaTableResponse | None:
-    detail = await repository.fetch_table_detail(
-        db=db,
+) -> CatalogResponse | None:
+    _ = db
+    catalog = slice_serving_catalog(
+        await get_serving_catalog(repository),
+        source_name=source_name,
+        engine=engine,
         schema_name=schema_name,
         table_name=table_name,
     )
-    if detail is None:
+    if not catalog_has_tables(catalog):
         return None
-    table = detail["table"]
-    columns = detail["columns"]
-    refs = detail["refs"]
-    code_columns = await _code_columns_for_table(repository, table)
-    return MetaTableResponse(
-        table_info=_table_info(table, columns),
-        columns=[
-            _column_meta(column, refs=refs, code_columns=code_columns)
-            for column in columns
-        ],
-        fk=[RefMeta(**row) for row in refs],
-    )
+    return catalog
 
 
 async def get_column(
     repository: PostgresMetadataRepository,
     *,
-    db: str | None,
+    source_name: str | None = None,
+    engine: str | None = None,
+    db: str | None = None,
     schema_name: str,
     table_name: str,
     column_name: str,
-) -> ColumnMeta | None:
-    detail = await repository.fetch_table_detail(
-        db=db,
+) -> CatalogResponse | None:
+    _ = db
+    catalog = slice_serving_catalog(
+        await get_serving_catalog(repository),
+        source_name=source_name,
+        engine=engine,
         schema_name=schema_name,
         table_name=table_name,
+        column_name=column_name,
     )
-    if detail is None:
+    if not catalog_has_columns(catalog):
         return None
-    needle = column_name.lower()
-    column = next(
-        (
-            item
-            for item in detail["columns"]
-            if str(item["name"]).lower() == needle
-        ),
-        None,
-    )
-    if column is None:
-        return None
-    code_columns = await _code_columns_for_table(repository, detail["table"])
-    return _column_meta(
-        column,
-        refs=detail["refs"],
-        code_columns=code_columns,
-    )
+    return catalog
 
 
 async def get_refs(
     repository: PostgresMetadataRepository,
     *,
-    db: str | None,
+    source_name: str | None = None,
+    engine: str | None = None,
+    db: str | None = None,
     schema_name: str,
     table_name: str,
 ) -> list[RefMeta]:
-    rows = await repository.fetch_refs(
-        db=db,
+    _ = db
+    catalog = slice_serving_catalog(
+        await get_serving_catalog(repository),
+        source_name=source_name,
+        engine=engine,
         schema_name=schema_name,
         table_name=table_name,
+        refs_only=True,
     )
-    return [RefMeta(**row) for row in rows]
+    return refs_from_catalog(catalog)
 
 
 def _catalog_data_type(column: dict[str, Any], metadata: dict[str, Any]) -> str | None:
@@ -309,25 +395,99 @@ def _catalog_data_type(column: dict[str, Any], metadata: dict[str, Any]) -> str 
     return raw
 
 
+def _catalog_reference(
+    row: dict[str, Any],
+    *,
+    schema_key: str,
+    table_key: str,
+    column_key: str,
+    constraint_key: str,
+    position_key: str,
+) -> CatalogColumnReference | None:
+    schema_name = _optional_string(row.get(schema_key))
+    table_name = _optional_string(row.get(table_key))
+    column_name = _optional_string(row.get(column_key))
+    if not schema_name or not table_name or not column_name:
+        return None
+    return CatalogColumnReference(
+        schema_name=schema_name,
+        table_name=table_name,
+        column_name=column_name,
+        constraint_name=_optional_string(row.get(constraint_key)),
+        position=_optional_int(row.get(position_key)) or 1,
+    )
+
+
+def _append_unique_reference(
+    items: list[CatalogColumnReference] | None,
+    extra: CatalogColumnReference | None,
+) -> list[CatalogColumnReference] | None:
+    if extra is None:
+        return items
+    current = list(items or [])
+    if extra in current:
+        return current or None
+    current.append(extra)
+    return current
+
+
 def _catalog_column(row: dict[str, Any]) -> CatalogColumn:
     metadata = _metadata_dict(row.get("metadata"))
     column = {"dtype": row.get("dtype"), "metadata": metadata}
-    references = None
-    schema_name = _optional_string(row.get("ref_schema_name"))
-    table_name = _optional_string(row.get("ref_table_name"))
-    column_name = _optional_string(row.get("ref_column_name"))
-    if schema_name and table_name and column_name:
-        references = CatalogColumnReference(
-            schema_name=schema_name,
-            table_name=table_name,
-            column_name=column_name,
-        )
+    comment = _optional_string(row.get("column_comment"))
+    referenced_by = _append_unique_reference(
+        None,
+        _catalog_reference(
+            row,
+            schema_key="inbound_schema_name",
+            table_key="inbound_table_name",
+            column_key="inbound_column_name",
+            constraint_key="inbound_constraint_name",
+            position_key="inbound_position",
+        ),
+    )
     return CatalogColumn(
         column_name=str(row.get("column_name") or ""),
         data_type=_catalog_data_type(column, metadata),
         nullable=bool(row.get("nullable")),
         primary_key=bool(row.get("is_primary_key")),
-        references=references,
+        comment=comment,
+        description=_analyzed_or_original(
+            row.get("column_description"),
+            row.get("column_comment"),
+        ),
+        references=_catalog_reference(
+            row,
+            schema_key="ref_schema_name",
+            table_key="ref_table_name",
+            column_key="ref_column_name",
+            constraint_key="ref_constraint_name",
+            position_key="ref_position",
+        ),
+        referenced_by=referenced_by,
+    )
+
+
+def _catalog_table_from_row(row: dict[str, Any]) -> CatalogTable:
+    table = _flatten_table(
+        {
+            "schema_name": row.get("schema_name"),
+            "original_name": row.get("table_name"),
+            "description": row.get("table_comment"),
+            "analyzed_description": row.get("table_description"),
+            "metadata": row.get("table_metadata"),
+        }
+    )
+    original = _optional_string(table.get("description"))
+    return CatalogTable(
+        table_name=str(row.get("table_name") or ""),
+        logical_name=_serving_logical_name(table),
+        comment=original,
+        description=_analyzed_or_original(
+            table.get("analyzed_description"),
+            table.get("description"),
+        ),
+        subject_area=_as_subject_area(table),
     )
 
 
@@ -361,11 +521,7 @@ def assemble_serving_catalog(
         if not table_key[4] or not table_key[5]:
             continue
         if table_key not in tables:
-            table = CatalogTable(
-                schema_name=table_key[4],
-                table_name=table_key[5],
-                columns=[],
-            )
+            table = _catalog_table_from_row(row)
             tables[table_key] = table
             sources[source_key].tables.append(table)
         column_name = str(row.get("column_name") or "")
@@ -378,10 +534,13 @@ def assemble_serving_catalog(
             tables[table_key].columns.append(column)
             continue
         existing = columns[column_key]
-        if existing.references is None:
-            extra = _catalog_column(row)
-            if extra.references is not None:
-                existing.references = extra.references
+        extra = _catalog_column(row)
+        if existing.references is None and extra.references is not None:
+            existing.references = extra.references
+        existing.referenced_by = _append_unique_reference(
+            existing.referenced_by,
+            extra.referenced_by[0] if extra.referenced_by else None,
+        )
     return CatalogResponse(
         serving_status="active" if serving_active else "inactive",
         sources=list(sources.values()),

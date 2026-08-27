@@ -34,7 +34,7 @@ from ..meaning_slots import (
     measure_item_surface,
     time_role_from_procedure,
 )
-from .period import ParsedPeriod, parse_korean_period, week_mention
+from .period import ParsedPeriod, parse_period_from_query, week_mention
 from .data_process import FN_IDENTITY, aggregation_tags, refine_function
 from .table_type import list_table_type
 
@@ -1013,8 +1013,7 @@ def period_filter_for_fact(
     columns: list[dict[str, Any]],
     period_text: str | None = None,
 ) -> PlannedFilter | None:
-    source = str(period_text or "").strip() or query
-    period = parse_korean_period(source)
+    period = parse_period_from_query(query, period_text)
     if period is None:
         return None
     dated = [
@@ -1805,9 +1804,8 @@ def asks_measured_reading(query: str = "", analysis: QueryAnalysis | None = None
 def measurement_needs_period(query: str = "", analysis: QueryAnalysis | None = None) -> bool:
     """Measured reading with an empty period slot. Do not invent latest."""
 
-    source = str(getattr(analysis, "period", "") or "").strip() if analysis else ""
-    source = source or query
-    if parse_korean_period(source) is not None:
+    period_text = str(getattr(analysis, "period", "") or "").strip() if analysis else ""
+    if parse_period_from_query(query, period_text) is not None:
         return False
     return asks_measured_reading(query, analysis)
 

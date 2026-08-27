@@ -256,6 +256,19 @@ def load_runtime(path: str | Path) -> RoboRuntime:
     )
     embedding_base_url = str(_required(embedding, "base_url"))
     maximum_timeout_seconds = int(_required(execution, "maximum_timeout_seconds"))
+    default_timeout_seconds = int(_required(execution, "default_timeout_seconds"))
+    env_max_timeout = os.environ.get("EXEC_MAX_TIMEOUT_S", "").strip()
+    env_default_timeout = os.environ.get("EXEC_DEFAULT_TIMEOUT_S", "").strip()
+    if env_max_timeout:
+        maximum_timeout_seconds = int(env_max_timeout)
+    if env_default_timeout:
+        default_timeout_seconds = int(env_default_timeout)
+    if default_timeout_seconds < 1 or maximum_timeout_seconds < 1:
+        raise RuntimeConfigError("execution timeout seconds must be >= 1")
+    if default_timeout_seconds > maximum_timeout_seconds:
+        raise RuntimeConfigError(
+            "execution.default_timeout_seconds must be <= maximum_timeout_seconds"
+        )
     maximum_rows = int(_required(execution, "maximum_rows"))
     t2sql = _load_t2sql(
         robo,
@@ -324,9 +337,7 @@ def load_runtime(path: str | Path) -> RoboRuntime:
         execution=ExecutionRuntime(
             backend=str(_required(execution, "backend")),
             sql_api_url=str(_required(execution, "sql_api_url")),
-            default_timeout_seconds=int(
-                _required(execution, "default_timeout_seconds")
-            ),
+            default_timeout_seconds=default_timeout_seconds,
             maximum_timeout_seconds=maximum_timeout_seconds,
             default_max_rows=int(_required(execution, "default_max_rows")),
             maximum_rows=maximum_rows,

@@ -4,6 +4,31 @@ robo-meta-api 업데이트 이력입니다. 서비스 설명·기능 안내는 [
 
 ---
 
+## 2026-08-27
+
+### `/meta/catalog` 정본화
+
+- catalog에 표/컬럼 `comment`·`description`·논리명·`subject_area`를 넣음
+- 나가는 FK `references`에 `constraint_name`·`position`. 들어오는 FK는 `referenced_by`
+- `/meta/table`·`/meta/column`은 catalog 문서를 표 하나·컬럼 하나로 자른 응답
+- `/meta/batch`·`/meta/ref`는 catalog에서 파생. 별도 소스/스키마 API 없음
+
+관련: `app/schemas.py` · `app/services/meta_postgres.py` · `app/services/metadata_repository/_catalog.py`
+
+### `/query_execute` 타임아웃
+
+MindsDB가 늦게 주는 오류 JSON을 받도록 HTTP 대기에 `EXEC_ERROR_RETURN_GRACE_S`(기본 30초)를 더한다. 오류 본문은 `db_error`. 요청 `timeout_s` 스키마 상한 600. 기본 60 / 최댓값 300은 `EXEC_DEFAULT_TIMEOUT_S` · `EXEC_MAX_TIMEOUT_S`.
+
+관련: `app/services/query_runner_mindsdb.py` · `app/schemas.py` · `app/runtime_config.py`
+
+### `/data_decision` 한글 기간
+
+`최근`/`지난`+길이 단어(사흘·나흘·일주일·한달 등)와 위치 단어(익월·내일·이번주 등)를 KST 시계로 해석한다. 길이만 있으면 되묻는다. 표·컬럼명은 쓰지 않는다.
+
+관련: `app/services/decision_postgres/period.py`
+
+---
+
 ## 2026-08-26
 
 ### 문서 정본화

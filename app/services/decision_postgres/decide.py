@@ -69,7 +69,7 @@ from .plan_format import (
     assemble_join_groups,
 )
 from .grain import TimeGrain, resolve_time_grain, year_window_narrows_to_month
-from .period import parse_korean_period, week_mention
+from .period import parse_period_from_query, week_mention
 from .select_store import (
     apply_store_selection,
     compact_store_recall,
@@ -687,8 +687,10 @@ async def decide(
                     }:
                         continue
                     tables_by_id.setdefault(int(table_id), table)
-    period_source = str(analysis.period or "").strip() or query
-    parsed_period = parse_korean_period(period_source)
+    parsed_period = parse_period_from_query(
+        query,
+        str(analysis.period or "").strip() or None,
+    )
     week_parsed = parsed_period is not None and parsed_period.week_start is not None
     query_grain = resolve_time_grain(query)
     if grain_override in ("month", "day", "hour", "instant"):

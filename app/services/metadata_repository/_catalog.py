@@ -130,14 +130,26 @@ class CatalogMixin:
                ) AS registered_at,
                t.schema_name,
                COALESCE(t.original_name, t.name) AS table_name,
+               t.description AS table_comment,
+               t.analyzed_description AS table_description,
+               t.metadata AS table_metadata,
                c.name AS column_name,
                c.dtype,
                c.metadata,
                c.nullable,
                c.is_primary_key,
+               c.description AS column_comment,
+               c.analyzed_description AS column_description,
                t_to.schema_name AS ref_schema_name,
                COALESCE(t_to.original_name, t_to.name) AS ref_table_name,
-               c_to.name AS ref_column_name
+               c_to.name AS ref_column_name,
+               fk.constraint_name AS ref_constraint_name,
+               COALESCE((fk.metadata->>'position')::int, 1) AS ref_position,
+               t_from.schema_name AS inbound_schema_name,
+               COALESCE(t_from.original_name, t_from.name) AS inbound_table_name,
+               c_from.name AS inbound_column_name,
+               fk_in.constraint_name AS inbound_constraint_name,
+               COALESCE((fk_in.metadata->>'position')::int, 1) AS inbound_position
         FROM t2s_datasources d
         LEFT JOIN kair_platform_sources s ON s.source_id = d.source_id
         JOIN t2s_snapshot_activations act
@@ -156,11 +168,21 @@ class CatalogMixin:
           ON c_to.id = fk.to_column_id
          AND c_to.review_status = 'approved'
         LEFT JOIN t2s_tables t_to ON t_to.id = c_to.table_id
+        LEFT JOIN t2s_fk_constraints fk_in ON fk_in.to_column_id = c.id
+        LEFT JOIN t2s_columns c_from
+          ON c_from.id = fk_in.from_column_id
+         AND c_from.review_status = 'approved'
+        LEFT JOIN t2s_tables t_from
+          ON t_from.id = c_from.table_id
+         AND t_from.text_to_sql_is_valid = true
+         AND t_from.review_status = 'approved'
         WHERE t.text_to_sql_is_valid = true
           AND t.review_status = 'approved'
         ORDER BY s.name, d.engine, d.source_schema,
                  t.schema_name, COALESCE(t.original_name, t.name), c.name,
-                 t_to.schema_name, COALESCE(t_to.original_name, t_to.name), c_to.name
+                 t_to.schema_name, COALESCE(t_to.original_name, t_to.name), c_to.name,
+                 t_from.schema_name, COALESCE(t_from.original_name, t_from.name),
+                 c_from.name
         """
         async with self._pool.acquire() as connection:
             active = await connection.fetchrow(active_query)
