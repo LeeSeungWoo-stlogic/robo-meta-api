@@ -1,9 +1,7 @@
-import pytest
 from app.schemas import (
     DecisionCandidate,
-    ExecutionContext,
-    PlannedFilter,
     PlanAggregation,
+    PlannedFilter,
     QueryPlan,
     ResolvedEntity,
     ResolvedValue,
