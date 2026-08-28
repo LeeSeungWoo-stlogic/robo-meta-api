@@ -26,6 +26,7 @@ def used_metadata_for_plan(
     resolved_entities=None,
     execution_context: ExecutionContext | None = None,
 ) -> T2SqlUsedMetadata:
+    universal_plan = plan.universal_plan if plan is not None else None
     return T2SqlUsedMetadata(
         candidates=list(candidates or []),
         join_groups=list(join_groups or []),
@@ -34,6 +35,7 @@ def used_metadata_for_plan(
         query_analysis=query_analysis,
         query_plan=plan,
         candidate_evidence=list(plan.candidate_evidence) if plan is not None else [],
+        universal_plan=universal_plan,
     )
 
 
@@ -88,6 +90,7 @@ def filter_used_metadata(
         for entity in decision.resolved_entities
         if str(entity.table).lower() in entity_tables
     ]
+    universal_plan = decision.universal_plan or (plan.universal_plan if plan is not None else None)
     return T2SqlUsedMetadata(
         candidates=candidates,
         join_groups=join_groups,
@@ -96,4 +99,5 @@ def filter_used_metadata(
         query_analysis=decision.query_analysis,
         query_plan=plan,
         candidate_evidence=list(plan.candidate_evidence) if plan is not None else [],
+        universal_plan=universal_plan,
     )
