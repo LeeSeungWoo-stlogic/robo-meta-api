@@ -1,6 +1,7 @@
 import pytest
 from app.schemas import (
     DecisionCandidate,
+    ExecutionContext,
     PlannedFilter,
     PlanAggregation,
     QueryPlan,
@@ -37,6 +38,7 @@ def test_build_universal_plan_rwis_compatibility():
         ),
     )
     candidate = DecisionCandidate(
+        source_name="rwis_mart_view",
         schema_name="RWIS",
         table_name="RDF01HH_TB",
     )
@@ -49,12 +51,12 @@ def test_build_universal_plan_rwis_compatibility():
         analysis=None,
     )
 
-    assert univ_plan.system_type == "RWIS"
+    assert univ_plan.system_type == "RWIS_MART_VIEW"
     assert len(univ_plan.entities) == 1
     assert univ_plan.entities[0].entity_id == "100120"
     assert len(univ_plan.metrics) == 1
     assert univ_plan.metrics[0].column_name == "VAL"
-    # Verify backward compatibility tags projection
+    # Verify backward compatibility tags projection from genuine tag entity
     assert "100120" in univ_plan.tags
     assert "화성정수장_탁도" in univ_plan.tagsn
 
@@ -86,6 +88,7 @@ def test_build_universal_plan_hdaps_multi_metric():
         ),
     )
     candidate = DecisionCandidate(
+        source_name="hdaps_source",
         schema_name="NBEAVER",
         table_name="DUBHRDAMIF",
     )
@@ -98,7 +101,7 @@ def test_build_universal_plan_hdaps_multi_metric():
         analysis=None,
     )
 
-    assert univ_plan.system_type == "HDAPS"
+    assert univ_plan.system_type == "HDAPS_SOURCE"
     assert len(univ_plan.entities) == 1
     assert univ_plan.entities[0].entity_type == "dam"
     assert univ_plan.entities[0].entity_id == "1012110"

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, List, Optional
 from ..schemas import (
     DecisionCandidate,
+    ExecutionContext,
     QueryAnalysis,
     QueryPlan,
     ResolvedEntity,
@@ -21,18 +22,18 @@ def build_universal_plan(
     entities: List[ResolvedEntity],
     candidates: List[DecisionCandidate],
     analysis: Optional[QueryAnalysis],
+    execution_context: Optional[ExecutionContext] = None,
 ) -> UniversalServingPlan:
-    """Constructs a universal entity-metric-filter plan with backward-compatible tags projection."""
+    """Constructs a universal entity-metric-filter plan without table-name guessing or substring TAG matching."""
     univ_entities: List[UniversalEntity] = []
     univ_metrics: List[UniversalMetric] = []
     univ_filters: List[UniversalFilter] = []
     tags: List[str] = []
     tagsn: List[str] = []
 
-    # 1. Map Resolved Entities
+    # 1. Map Resolved Entities (dam, observatory, facility, tag, station, pipe, etc.)
     for e in entities:
         etype = e.entity_type
-        # Extract code value and label
         code_val = e.values[0].code if e.values else None
         label_val = e.values[0].label if (e.values and e.values[0].label) else e.mention
         conf = getattr(e.values[0], "confidence", 1.0) if e.values else 1.0
@@ -47,9 +48,11 @@ def build_universal_plan(
                 confidence=conf,
             )
         )
+        # Populate backward-compatible tags ONLY for actual tag entities
         if etype == "tag" and code_val:
-            tags.append(code_val)
-            if label_val:
+            if code_val not in tags:
+                tags.append(code_val)
+            if label_val and label_val not in tagsn:
                 tagsn.append(label_val)
 
     # 2. Extract Filters from QueryPlan
@@ -65,16 +68,8 @@ def build_universal_plan(
                     value=val,
                 )
             )
-            # Check if this filter is for tagsn / tag
-            if "TAGSN" in col.upper() or "TAG" in col.upper():
-                if isinstance(val, list):
-                    for v in val:
-                        if str(v) not in tags:
-                            tags.append(str(v))
-                elif val and str(val) not in tags:
-                    tags.append(str(val))
 
-    # 3. Extract Metrics from Plan Aggregation & Candidates
+    # 3. Extract Metrics from Plan Aggregation & Analysis
     if plan and plan.aggregation and (plan.aggregation.value_column or getattr(plan.aggregation, "measure_column", None)):
         mcol = plan.aggregation.value_column or getattr(plan.aggregation, "measure_column", None)
         mfunc = plan.aggregation.function or "AVG"
@@ -96,19 +91,19 @@ def build_universal_plan(
             )
         )
 
-    # Detect system domain type
-    t_names = [c.table_name.upper() for c in candidates]
-    if any("DAM" in t or "RF" in t or "WL" in t for t in t_names):
-        sys_type = "HDAPS"
-    elif any("TAG" in t or "RDF" in t or "RDR" in t or "RWIS" in t for t in t_names):
-        sys_type = "RWIS"
-    elif any("GIS" in t or "PIPE" in t or "VALVE" in t for t in t_names):
-        sys_type = "GIOS"
-    else:
-        sys_type = "AUTO"
+    # 4. Determine system_type strictly from Store Source (never from table name guessing)
+    source_name = None
+    if execution_context and execution_context.source_name:
+        source_name = execution_context.source_name
+    elif candidates and candidates[0].source_name:
+        source_name = candidates[0].source_name
+    elif candidates and candidates[0].db:
+        source_name = candidates[0].db
+
+    system_type = (source_name or "UNKNOWN").upper()
 
     return UniversalServingPlan(
-        system_type=sys_type,
+        system_type=system_type,
         entities=univ_entities,
         metrics=univ_metrics,
         filters=univ_filters,

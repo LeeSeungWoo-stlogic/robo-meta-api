@@ -1251,6 +1251,7 @@ async def decide(
         entities=entities,
         candidates=candidates,
         analysis=analysis,
+        execution_context=execution_context,
     )
     plan.universal_plan = universal_plan
 
