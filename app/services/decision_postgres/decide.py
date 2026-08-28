@@ -1243,6 +1243,17 @@ async def decide(
         for row in glossary_rows
         if row.get("mention") and row.get("standard_term")
     ]
+    from ..universal_serving import build_universal_plan
+
+    universal_plan = build_universal_plan(
+        query=query,
+        plan=plan,
+        entities=entities,
+        candidates=candidates,
+        analysis=analysis,
+    )
+    plan.universal_plan = universal_plan
+
     return DecisionResponse(
         target=_top_target(candidates),
         candidates=candidates,
@@ -1258,4 +1269,5 @@ async def decide(
         query_analysis=analysis,
         query_plan=plan,
         glossary_routes=glossary_routes,
+        universal_plan=universal_plan,
     )

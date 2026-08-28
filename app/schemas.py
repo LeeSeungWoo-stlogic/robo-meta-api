@@ -483,6 +483,7 @@ class QueryPlan(BaseModel):
     answer_axis: List[str] = Field(default_factory=list)
     aggregation: Optional[PlanAggregation] = None
     candidate_evidence: List[CandidateEvidence] = Field(default_factory=list)
+    universal_plan: Optional[UniversalServingPlan] = None
 
 class MatchedColumn(BaseModel):
     """자연어 질의-컬럼 매칭 결과. 컬럼 RAG(`embedding_columns`) 활성화 후 채워짐.
@@ -592,7 +593,44 @@ class JoinGroup(BaseModel):
 class ResolvedValue(BaseModel):
     code: str
     label: Optional[str] = None
+class UniversalEntity(BaseModel):
+    """범용 엔티티 (시설, 댐, 관측소, 관로, 블록 등)"""
+    entity_type: str = Field(..., description="엔티티 유형 (facility, dam, observatory, station, pipe, block 등)")
+    entity_id: Optional[str] = Field(default=None, description="엔티티 식별 코드")
+    entity_name: Optional[str] = Field(default=None, description="엔티티 명칭")
+    table_name: Optional[str] = Field(default=None, description="엔티티 소속 기준정보 테이블")
+    join_key: Optional[str] = Field(default=None, description="JOIN 키 컬럼")
     confidence: float = 1.0
+
+
+class UniversalMetric(BaseModel):
+    """범용 수치 지표 (수위, 유입량, 방류량, 탁도, 압력, 유량 등)"""
+    metric_name: str = Field(..., description="지표명")
+    column_name: str = Field(..., description="물리 수치 컬럼명")
+    table_name: Optional[str] = Field(default=None, description="계측 팩트 테이블명")
+    unit: Optional[str] = Field(default=None, description="단위")
+    aggregation: str = Field(default="AVG", description="집계 함수 (AVG, SUM, MAX, MIN 등)")
+
+
+class UniversalFilter(BaseModel):
+    """범용 차원/상태 필터"""
+    column_name: str = Field(..., description="필터 컬럼명")
+    operator: str = Field(default="=", description="연산자")
+    value: Any = Field(..., description="필터 값")
+    table_name: Optional[str] = Field(default=None, description="대상 테이블")
+
+
+class UniversalServingPlan(BaseModel):
+    """범용 엔티티-메트릭 서빙 플랜 (v2 서빙 계약)"""
+    system_type: Optional[str] = Field(default="AUTO", description="데이터 소스 도메인 (RWIS, HDAPS, GIOS 등)")
+    entities: List[UniversalEntity] = Field(default_factory=list)
+    metrics: List[UniversalMetric] = Field(default_factory=list)
+    filters: List[UniversalFilter] = Field(default_factory=list)
+    time_range: Optional[Dict[str, Any]] = None
+    sql_strategy: Optional[str] = None
+    # 하위 호환성 투영 레이어 (RWIS 클라이언트 보장)
+    tags: List[str] = Field(default_factory=list, description="RWIS 하위 호환 태그 ID 목록")
+    tagsn: List[str] = Field(default_factory=list, description="RWIS 하위 호환 태그 한글명 목록")
 
 
 class ResolvedEntity(BaseModel):
@@ -600,6 +638,11 @@ class ResolvedEntity(BaseModel):
     entity_type: Literal[
         "facility",
         "tag",
+        "dam",
+        "observatory",
+        "station",
+        "pipe",
+        "block",
         "code",
         "metric",
         "unit",
@@ -661,6 +704,7 @@ class DecisionResponse(BaseModel):
     query_analysis: Optional[QueryAnalysis] = None
     query_plan: Optional[QueryPlan] = None
     glossary_routes: List[GlossaryRoute] = Field(default_factory=list)
+    universal_plan: Optional[UniversalServingPlan] = None
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +763,7 @@ class T2SqlUsedMetadata(BaseModel):
     query_analysis: Optional[QueryAnalysis] = None
     query_plan: Optional[QueryPlan] = None
     candidate_evidence: List[CandidateEvidence] = Field(default_factory=list)
+    universal_plan: Optional[UniversalServingPlan] = None
 
 
 class ProbeSummary(BaseModel):
