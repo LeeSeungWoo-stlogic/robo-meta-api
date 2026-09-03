@@ -395,6 +395,7 @@ def _candidate(
         ),
         table_type=list_table_type(subject_area),
         default_date_column=default_date_column(columns),
+        row_count=_optional_int(table.get("row_count") or _metadata_dict(table.get("metadata")).get("row_count") or _metadata_dict(table.get("metadata")).get("estimated_row_count")),
         matched_columns=matched,
     )
 

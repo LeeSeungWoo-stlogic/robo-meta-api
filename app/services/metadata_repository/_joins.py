@@ -13,6 +13,7 @@ class JoinGraphMixin:
                NULLIF(t.metadata->>'subject_area_override', '') AS subject_area_override,
                NULLIF(t.metadata->>'subject_area', '') AS subject_area,
                NULLIF(t.metadata->>'logical_name', '') AS logical_name,
+               (t.metadata->>'row_count')::bigint AS row_count,
                d.profile_id AS source_instance_id, d.engine,
                d.mindsdb_integration, d.mindsdb_catalog,
                NULLIF(d.database_name, '') AS database_name,

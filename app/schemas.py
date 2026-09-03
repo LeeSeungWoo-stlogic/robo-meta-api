@@ -165,6 +165,10 @@ class TableInfo(BaseModel):
     pk_columns: List[str] = Field(default_factory=list)
 
     # v0.6 신규 (빈 값 default)
+    row_count: Optional[int] = Field(
+        default=None,
+        description="메타데이터 저장소에 기록된 테이블의 전체 행 수(Row Count).",
+    )
     datasource: Optional[DataSourceInfo] = None
     lineage_brief: LineageBrief = Field(default_factory=LineageBrief)
     ontology_anchors: List[OntologyAnchor] = Field(default_factory=list)
@@ -260,6 +264,10 @@ class CatalogTable(BaseModel):
     description: Optional[str] = Field(
         default=None,
         description="검수·서빙 설명. 분석 설명 우선, 없으면 comment",
+    )
+    row_count: Optional[int] = Field(
+        default=None,
+        description="메타데이터 저장소에 기록된 테이블 행 수.",
     )
     subject_area: SubjectArea = "unknown"
     columns: List[CatalogColumn] = Field(default_factory=list)
@@ -528,6 +536,10 @@ class DecisionCandidate(TableKey):
         default=None,
         description="분석 설명 우선, 없으면 원본 카탈로그 설명 (analyzed_description → description)",
         examples=["시간별 탁도·유량 등 계측 fact 테이블. tagsn으로 태그 마스터와 조인."],
+    )
+    row_count: Optional[int] = Field(
+        default=None,
+        description="메타데이터 저장소에 기록된 테이블 전체 행 수.",
     )
     table_type: Optional[ListTableType] = Field(
         default=None,

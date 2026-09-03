@@ -69,6 +69,31 @@ def _mindsdb_payload(response: httpx.Response) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
+def _detect_simple_table_count(sql_text: str, parser_dialect: str = "mysql") -> tuple[bool, str | None, str | None]:
+    """WHERE, GROUP BY, HAVING, JOIN 없는 단순 SELECT COUNT(...) FROM table [LIMIT ...] 판별"""
+    try:
+        expr = parse_one(sql_text, read=parser_dialect)
+        if not isinstance(expr, exp.Select):
+            return False, None, None
+        if expr.args.get("where") or expr.args.get("group") or expr.args.get("having") or expr.args.get("joins"):
+            return False, None, None
+        selects = expr.selects
+        if len(selects) != 1:
+            return False, None, None
+        sel = selects[0]
+        count_func = sel.this if isinstance(sel, exp.Alias) else sel
+        if not isinstance(count_func, exp.Count):
+            return False, None, None
+        tables = list(expr.find_all(exp.Table))
+        if len(tables) != 1:
+            return False, None, None
+        table_name = str(tables[0].name or "")
+        alias = sel.alias if isinstance(sel, exp.Alias) else "row_count"
+        return True, table_name, alias or "row_count"
+    except Exception:
+        return False, None, None
+
+
 def _mindsdb_error_text(
     body: dict[str, Any],
     response: httpx.Response | None = None,
@@ -225,8 +250,60 @@ async def execute(
     columns: list[str] = []
     rows: list[list[Any]] = []
     truncated = False
-    total_bytes = 0
     http_timeout = applied_timeout + _error_return_grace_seconds()
+
+    # 💡 Smart Short-Circuit: WHERE/GROUP BY 없는 단일 테이블 단순 COUNT 질의 탐지
+    is_simple_count, target_table, count_alias = _detect_simple_table_count(sql_client, parser_dialect=execution_context.parser_dialect)
+    if is_simple_count and target_table:
+        try:
+            from ..db import get_metadata_repository
+            repo = get_metadata_repository()
+            detail = await repo.fetch_table_detail(
+                db=None,
+                schema_name=execution_context.schema_name or "rwis_mart",
+                table_name=target_table,
+            )
+            if detail and detail.get("table"):
+                meta = detail["table"].get("metadata") or {}
+                if isinstance(meta, str):
+                    import json
+                    meta = json.loads(meta)
+                fast_count = meta.get("row_count") or meta.get("estimated_row_count")
+                if fast_count is not None:
+                    elapsed = (time.perf_counter() - started) * 1000
+                    col_name = count_alias or "row_count"
+                    rows_out = [[int(fast_count)]]
+                    _append_audit({
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "audit_id": audit_id,
+                        "status": "ok",
+                        "caller": caller,
+                        "sql": sql_client,
+                        "sql_client": sql_client,
+                        "sql_executed": "[METADATA_SHORT_CIRCUIT] " + sql_client,
+                        "backend": "metadata_store",
+                        "integration": execution_context.integration,
+                        "resolved_integration": execution_context.integration,
+                        "parser_dialect": execution_context.parser_dialect,
+                        "execution_context": execution_context.audit_dict(),
+                        "timeout_s_applied": applied_timeout,
+                        "max_rows_applied": applied_rows,
+                        "row_count": 1,
+                        "truncated": False,
+                        "elapsed_ms": round(elapsed, 1),
+                        "error": None,
+                    })
+                    return {
+                        "audit_id": audit_id,
+                        "columns": [col_name],
+                        "rows": rows_out,
+                        "truncated": False,
+                        "status": "ok",
+                        "elapsed_ms": elapsed,
+                        "sql_executed": "[METADATA_SHORT_CIRCUIT] " + sql_client,
+                    }
+        except Exception:
+            pass  # Fallback to standard execution if metadata lookup fails
 
     try:
         async with httpx.AsyncClient(timeout=http_timeout) as client:

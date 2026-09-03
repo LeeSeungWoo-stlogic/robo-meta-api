@@ -4,6 +4,34 @@ robo-meta-api 업데이트 이력입니다. 서비스 설명·기능 안내는 [
 
 ---
 
+## 2026-09-03
+
+### 테이블 `row_count` 서빙 및 단순 COUNT 단축
+
+Store `t2s_tables.metadata.row_count`(없으면 `estimated_row_count`)를 `/meta/catalog`·`/meta/table`·`/data_decision` 후보에 넣는다.
+
+`/query_execute`는 WHERE·GROUP BY·HAVING·JOIN이 없는 단일 표 `SELECT COUNT(...)`이면 MindsDB 대신 메타 행 수를 돌려준다. 조회 실패 시 기존 실행으로 폴백한다.
+
+관련: `app/schemas.py` · `app/services/meta_postgres.py` · `app/services/decision_postgres/helpers.py` · `app/services/metadata_repository/_search.py` · `app/services/metadata_repository/_joins.py` · `app/services/query_runner_mindsdb.py`
+
+### `universal_serving` 측정명
+
+`UniversalMetric.metric_name`은 `measurement.metric`을 우선하고, 없으면 `name`을 쓴다.
+
+관련: `app/services/universal_serving.py`
+
+---
+
+## 2026-08-28
+
+### 범용 entity-metric 계약 v2
+
+`/data_decision`·`/t2sql` used 메타에 `universal_plan`을 채운다. `system_type`은 Store 소스에서 유도한다. 태그 엔티티는 엄격 projection.
+
+관련 커밋: `9d262f1` · `56d61f7` · `6c6da26` · `74dbd5e`
+
+---
+
 ## 2026-08-27
 
 ### `/meta/catalog` 정본화

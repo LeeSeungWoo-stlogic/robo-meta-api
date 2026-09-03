@@ -50,6 +50,8 @@ def _flatten_table(table: dict[str, Any]) -> dict[str, Any]:
         value = metadata.get(key)
         if value is not None and str(value).strip():
             row[key] = value
+    if "row_count" not in row and (metadata.get("row_count") is not None or metadata.get("estimated_row_count") is not None):
+        row["row_count"] = _optional_int(metadata.get("row_count") or metadata.get("estimated_row_count"))
     return row
 
 
@@ -166,6 +168,7 @@ def _table_info(
         subject_area=subject_area,
         table_type=list_table_type(subject_area),
         default_date_column=default_date_column(normalized),
+        row_count=_optional_int(row.get("row_count")),
         table_is_active="Y",
         pk_columns=[
             str(column["name"])
@@ -487,6 +490,7 @@ def _catalog_table_from_row(row: dict[str, Any]) -> CatalogTable:
             table.get("analyzed_description"),
             table.get("description"),
         ),
+        row_count=_optional_int(table.get("row_count")),
         subject_area=_as_subject_area(table),
     )
 

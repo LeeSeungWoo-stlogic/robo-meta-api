@@ -81,8 +81,8 @@ def build_universal_plan(
             )
         )
     elif analysis and analysis.measurement:
-        m_name = analysis.measurement.name or analysis.measurement.expression or "value"
-        m_func = analysis.measurement.aggregation or "AVG"
+        m_name = getattr(analysis.measurement, "metric", None) or getattr(analysis.measurement, "name", None) or "value"
+        m_func = getattr(analysis.measurement, "aggregation", None) or "AVG"
         univ_metrics.append(
             UniversalMetric(
                 metric_name=m_name,

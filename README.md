@@ -19,8 +19,9 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 
 | 항목 | 내용 |
 | --- | --- |
-| **`/meta/catalog`** | Serving 정본. 연결·표·컬럼·설명·논리명·`subject_area`·FK. `character varying(n)` → `varchar(n)` |
+| **`/meta/catalog`** | Serving 정본. 연결·표·컬럼·설명·논리명·`subject_area`·FK·`row_count`. `character varying(n)` → `varchar(n)` |
 | **테이블 키** | `source_name` → `db`(원천 database) → `engine` → `schema_name` → `table_name` |
+| **행 수** | `row_count`는 Store `t2s_tables.metadata.row_count`(없으면 `estimated_row_count`). catalog·`/meta/table`·`/data_decision` 후보에 동일 |
 | **후보 표** | 한글 라벨 `table_name_kr`. 상세 `table_description` |
 | **후보 컬럼** | `column_description`. 타입은 catalog와 같이 `varchar(n)`. HTTP에 `score` 없음 |
 | **분석** | `query_analysis.query`는 요청 원문. 역할은 `schema_roles`. 목표는 `goal` |
@@ -94,6 +95,7 @@ T2SQL 키를 넣지 않습니다. `/data_decision` Request/Response 타입을 �
   (`source_instance_id` 또는 SourceName 기반 해석 — YAML `source_bindings` 없음)
 - 활성·승인 metadata에서 table allowlist 재계산
 - timeout, 최대 행 수, 최대 응답 크기 제한. 요청 `timeout_s` 스키마 상한 600. 기본 60·최댓값 300(`EXEC_DEFAULT_TIMEOUT_S` / `EXEC_MAX_TIMEOUT_S`). HTTP 대기는 `timeout_s + EXEC_ERROR_RETURN_GRACE_S`(기본 30초)로 MindsDB 오류 본문을 `db_error`로 돌려준다
+- WHERE·GROUP BY·HAVING·JOIN이 없는 단일 표 `SELECT COUNT(...)`는 Store `row_count`로 단축. 실패 시 MindsDB 실행으로 폴백
 - resolved integration·parser dialect·실행 결과의 audit 기록
 
 운영 SQL 수식(권장): `` `SourceName`.`Schema`.`Table` ``
