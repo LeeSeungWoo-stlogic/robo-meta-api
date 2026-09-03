@@ -239,13 +239,17 @@ class CatalogColumn(BaseModel):
     data_type: Optional[str] = None
     nullable: bool = True
     primary_key: bool = False
+    logical_name: Optional[str] = Field(
+        default=None,
+        description="승인 한글 논리라벨명. SQL 식별자가 아님.",
+    )
     comment: Optional[str] = Field(
         default=None,
-        description="원본 DDL/카탈로그 컬럼 설명",
+        description="논리라벨명. logical_name과 같다. 설명 장문을 넣지 않는다.",
     )
     description: Optional[str] = Field(
         default=None,
-        description="검수·서빙 설명. 분석 설명 우선, 없으면 comment",
+        description="검수·서빙 설명. 분석 설명 우선, 없으면 원본 설명. 논리라벨과 같은 문자열은 넣지 않는다.",
     )
     references: Optional[CatalogColumnReference] = None
     referenced_by: Optional[List[CatalogColumnReference]] = None
@@ -259,11 +263,11 @@ class CatalogTable(BaseModel):
     )
     comment: Optional[str] = Field(
         default=None,
-        description="원본 DDL/카탈로그 테이블 설명",
+        description="논리라벨명. logical_name과 같다. 설명 장문을 넣지 않는다.",
     )
     description: Optional[str] = Field(
         default=None,
-        description="검수·서빙 설명. 분석 설명 우선, 없으면 comment",
+        description="검수·서빙 설명. 분석 설명 우선, 없으면 원본 설명. 논리라벨과 같은 문자열은 넣지 않는다.",
     )
     row_count: Optional[int] = Field(
         default=None,

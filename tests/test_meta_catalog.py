@@ -234,6 +234,47 @@ class ServingCatalogTests(unittest.TestCase):
         self.assertIsNone(column.description)
         self.assertIsNone(column.referenced_by)
 
+    def test_comment_is_logical_label_not_description(self) -> None:
+        catalog = assemble_serving_catalog(
+            [
+                {
+                    "source_name": "rwis",
+                    "engine": "oracle",
+                    "source_schema": "RWIS",
+                    "registered_at": "2026-09-03T00:00:00+09:00",
+                    "schema_name": "RWIS",
+                    "table_name": "RDD01DD_TB",
+                    "table_comment": "일자별 태그 값과 건수를 기록하는 일 단위 데이터",
+                    "table_description": "일자별 태그 값과 건수를 기록하는 일 단위 데이터",
+                    "table_metadata": {"logical_name": "일 DATA", "subject_area": "agg"},
+                    "column_name": "VAL",
+                    "dtype": "NUMBER",
+                    "nullable": True,
+                    "is_primary_key": False,
+                    "column_comment": "일자별 태그 값과 건수를 기록하는 일 단위 데이터",
+                    "column_description": "일자별 태그 값과 건수를 기록하는 일 단위 데이터",
+                    "metadata": {"logical_name": "측정값"},
+                }
+            ],
+            serving_active=True,
+        )
+        table = catalog.sources[0].tables[0]
+        self.assertEqual(table.logical_name, "일 DATA")
+        self.assertEqual(table.comment, "일 DATA")
+        self.assertEqual(
+            table.description,
+            "일자별 태그 값과 건수를 기록하는 일 단위 데이터",
+        )
+        self.assertNotEqual(table.comment, table.description)
+        column = table.columns[0]
+        self.assertEqual(column.logical_name, "측정값")
+        self.assertEqual(column.comment, "측정값")
+        self.assertEqual(
+            column.description,
+            "일자별 태그 값과 건수를 기록하는 일 단위 데이터",
+        )
+        self.assertNotEqual(column.comment, column.description)
+
     def test_outbound_fk_becomes_references(self) -> None:
         column = _catalog_column(
             {
@@ -241,9 +282,12 @@ class ServingCatalogTests(unittest.TestCase):
                 "dtype": "numeric",
                 "nullable": False,
                 "is_primary_key": True,
-                "metadata": {"data_type_with_length": "numeric(6)"},
                 "column_comment": "태그일련번호",
                 "column_description": "태그 마스터 키",
+                "metadata": {
+                    "data_type_with_length": "numeric(6)",
+                    "logical_name": "태그일련번호",
+                },
                 "ref_schema_name": "rwis_mart",
                 "ref_table_name": "vw_tag_dim",
                 "ref_column_name": "tagsn",
@@ -254,6 +298,7 @@ class ServingCatalogTests(unittest.TestCase):
         self.assertEqual(column.data_type, "numeric(6)")
         self.assertFalse(column.nullable)
         self.assertTrue(column.primary_key)
+        self.assertEqual(column.logical_name, "태그일련번호")
         self.assertEqual(column.comment, "태그일련번호")
         self.assertEqual(column.description, "태그 마스터 키")
         self.assertIsNotNone(column.references)
@@ -304,7 +349,10 @@ class ServingCatalogTests(unittest.TestCase):
                     "is_primary_key": False,
                     "column_comment": "사업장코드",
                     "column_description": "정수장 코드",
-                    "metadata": {"data_type_with_length": "character varying(10)"},
+                    "metadata": {
+                        "data_type_with_length": "character varying(10)",
+                        "logical_name": "사업장코드",
+                    },
                 },
                 {
                     "source_name": "rwis_mart_view",
@@ -335,12 +383,13 @@ class ServingCatalogTests(unittest.TestCase):
         self.assertEqual(len(source.tables), 1)
         table = source.tables[0]
         self.assertEqual(table.logical_name, "1분 계측")
-        self.assertEqual(table.comment, "1분 계측 원본")
+        self.assertEqual(table.comment, "1분 계측")
         self.assertEqual(table.description, "1분 계측 fact")
         self.assertEqual(table.subject_area, "agg")
         columns = table.columns
         self.assertEqual(len(columns), 1)
         self.assertEqual(columns[0].data_type, "varchar(10)")
+        self.assertEqual(columns[0].logical_name, "사업장코드")
         self.assertEqual(columns[0].comment, "사업장코드")
         self.assertEqual(columns[0].description, "정수장 코드")
         self.assertIsNotNone(columns[0].references)

@@ -19,7 +19,7 @@ FK 및 논리 join hint를 조회합니다. `POST /data_decision`은 SQL을 생�
 
 | 항목 | 내용 |
 | --- | --- |
-| **`/meta/catalog`** | Serving 정본. 연결·표·컬럼·설명·논리명·`subject_area`·FK·`row_count`. `character varying(n)` → `varchar(n)` |
+| **`/meta/catalog`** | Serving 정본. 표·컬럼 `logical_name`/`comment`는 논리라벨명, `description`은 설명. 같은 문자열을 양쪽에 넣지 않음. `subject_area`·FK·`row_count`. `character varying(n)` → `varchar(n)` |
 | **테이블 키** | `source_name` → `db`(원천 database) → `engine` → `schema_name` → `table_name` |
 | **행 수** | `row_count`는 Store `t2s_tables.metadata.row_count`(없으면 `estimated_row_count`). catalog·`/meta/table`·`/data_decision` 후보에 동일 |
 | **후보 표** | 한글 라벨 `table_name_kr`. 상세 `table_description` |

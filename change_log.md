@@ -6,6 +6,12 @@ robo-meta-api 업데이트 이력입니다. 서비스 설명·기능 안내는 [
 
 ## 2026-09-03
 
+### `/meta/catalog` comment는 논리라벨명, description은 설명
+
+표·컬럼 `comment`에 원본/분석 설명을 넣고 `description`이 같은 문자열로 폴백하던 매핑을 고친다. `comment`는 `logical_name`(컬럼은 metadata 논리명)과 같다. `description`은 분석 설명 우선, 없으면 원본 설명이며 논리라벨과 같으면 비운다. 컬럼에 `logical_name` 칸을 추가한다.
+
+관련: `app/schemas.py` · `app/services/meta_postgres.py` · `tests/test_meta_catalog.py`
+
 ### `/query_execute` 행 바이트 누적 초기화
 
 `total_bytes`를 실행 시작 때 0으로 둔다. 단순 COUNT 단축이 들어간 뒤 일반 MindsDB 경로에서 미초기화로 행 적재가 깨질 수 있던 것을 고친다. 모듈 상단 `json` import를 재사용한다.

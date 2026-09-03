@@ -70,6 +70,19 @@ def _analyzed_or_original(*values: Any) -> str | None:
     return None
 
 
+def _label_comment_and_description(
+    label: str | None,
+    *prose_values: Any,
+) -> tuple[str | None, str | None]:
+    """catalog comment = 논리라벨명. description = 설명. 같은 문자열을 양쪽에 넣지 않는다."""
+    comment = _optional_string(label)
+    for value in prose_values:
+        text = _optional_string(value)
+        if text and text != comment:
+            return comment, text
+    return comment, None
+
+
 def _constraints(column: dict[str, Any], metadata: dict[str, Any]) -> list[str]:
     constraints: list[str] = []
     if column.get("is_primary_key"):
@@ -437,7 +450,12 @@ def _append_unique_reference(
 def _catalog_column(row: dict[str, Any]) -> CatalogColumn:
     metadata = _metadata_dict(row.get("metadata"))
     column = {"dtype": row.get("dtype"), "metadata": metadata}
-    comment = _optional_string(row.get("column_comment"))
+    logical = _column_name_kr(column, metadata)
+    comment, description = _label_comment_and_description(
+        logical,
+        row.get("column_description"),
+        row.get("column_comment"),
+    )
     referenced_by = _append_unique_reference(
         None,
         _catalog_reference(
@@ -454,11 +472,9 @@ def _catalog_column(row: dict[str, Any]) -> CatalogColumn:
         data_type=_catalog_data_type(column, metadata),
         nullable=bool(row.get("nullable")),
         primary_key=bool(row.get("is_primary_key")),
+        logical_name=logical,
         comment=comment,
-        description=_analyzed_or_original(
-            row.get("column_description"),
-            row.get("column_comment"),
-        ),
+        description=description,
         references=_catalog_reference(
             row,
             schema_key="ref_schema_name",
@@ -481,15 +497,17 @@ def _catalog_table_from_row(row: dict[str, Any]) -> CatalogTable:
             "metadata": row.get("table_metadata"),
         }
     )
-    original = _optional_string(table.get("description"))
+    logical = _serving_logical_name(table)
+    comment, description = _label_comment_and_description(
+        logical,
+        table.get("analyzed_description"),
+        table.get("description"),
+    )
     return CatalogTable(
         table_name=str(row.get("table_name") or ""),
-        logical_name=_serving_logical_name(table),
-        comment=original,
-        description=_analyzed_or_original(
-            table.get("analyzed_description"),
-            table.get("description"),
-        ),
+        logical_name=logical,
+        comment=comment,
+        description=description,
         row_count=_optional_int(table.get("row_count")),
         subject_area=_as_subject_area(table),
     )
