@@ -250,6 +250,7 @@ async def execute(
     columns: list[str] = []
     rows: list[list[Any]] = []
     truncated = False
+    total_bytes = 0
     http_timeout = applied_timeout + _error_return_grace_seconds()
 
     # 💡 Smart Short-Circuit: WHERE/GROUP BY 없는 단일 테이블 단순 COUNT 질의 탐지
@@ -266,7 +267,6 @@ async def execute(
             if detail and detail.get("table"):
                 meta = detail["table"].get("metadata") or {}
                 if isinstance(meta, str):
-                    import json
                     meta = json.loads(meta)
                 fast_count = meta.get("row_count") or meta.get("estimated_row_count")
                 if fast_count is not None:

@@ -6,6 +6,12 @@ robo-meta-api 업데이트 이력입니다. 서비스 설명·기능 안내는 [
 
 ## 2026-09-03
 
+### `/query_execute` 행 바이트 누적 초기화
+
+`total_bytes`를 실행 시작 때 0으로 둔다. 단순 COUNT 단축이 들어간 뒤 일반 MindsDB 경로에서 미초기화로 행 적재가 깨질 수 있던 것을 고친다. 모듈 상단 `json` import를 재사용한다.
+
+관련: `app/services/query_runner_mindsdb.py`
+
 ### 테이블 `row_count` 서빙 및 단순 COUNT 단축
 
 Store `t2s_tables.metadata.row_count`(없으면 `estimated_row_count`)를 `/meta/catalog`·`/meta/table`·`/data_decision` 후보에 넣는다.
